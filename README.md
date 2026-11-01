@@ -14,6 +14,12 @@ user authentication, website ownership, the UI, and long-term report history.
 - HTML metadata, headings, links, images, canonical/hreflang relationships,
   indexability directives, status/redirect problems, duplicated content/metadata,
   sitemap inconsistencies, forms, basic security headers and performance hints.
+- Canonical/hreflang target discovery, meta-refresh redirects, responsive images,
+  scripts/styles/media/preloads and recursive CSS dependency observations, including
+  public CDN resources. Separate resource budgets and typed relationship coverage.
+- Bounded JSON-LD and nested microdata extraction, repeated Open Graph/Twitter
+  metadata, declared character encodings, header hreflang/canonical fallback,
+  BCP47 validation, and multi-target finding evidence. See [extraction contract](docs/EXTRACTION.md).
   `seosmith rules` emits the authoritative versioned rule catalog.
 - SQLite/WAL jobs, frontier checkpoints, exclusive process lock, cancellation,
   restart recovery, immutable reports and idempotent job submission.
@@ -54,6 +60,7 @@ Create `request.json` (use your actual HTP website UUID):
   "binding_generation": 1,
   "url": "https://example.com/",
   "max_pages": 500,
+  "max_resources": 500,
   "max_duration_seconds": 1800,
   "delay_ms": 1000,
   "check_external_links": false
@@ -109,15 +116,18 @@ Requests and reports are JSON; protected responses have `Cache-Control: no-store
 
 Only one crawl runs at a time, while the delivery worker runs independently. Job
 submission is limited to 100 queued/running/unacknowledged-report jobs. Page limits
-are 1..20,000 (including discovered image/external resources), deadlines 10..7200
+are 1..20,000; a separate `max_resources` budget (0..20,000, default 500) covers
+assets and external link observations. Resources do not consume the page budget. Deadlines 10..7200
 seconds, and request delays 1000..60000ms. Current deadlines include downtime
 between restarts. Fetching is HTTP only; scripts and form actions are never run.
 
 ## HTP push protocol
 
-HTP must implement `POST /integrations/seosmith/audits`. This repository includes
-validated receiver source and a Supabase migration under [integrations/htp](integrations/htp).
-The receiving HTP changes must be deployed before production deliveries can succeed.
+HTP implements `POST /integrations/seosmith/audits`; expanded evidence support was
+merged in [HTP PR #4](https://github.com/hatchertechnology/htp/pull/4) and deployed.
+HTP owns receiver source/migrations. The [integration notes](integrations/htp)
+identify the older bootstrap snapshot and explain how to verify real collector
+reports against the current HTP receiver without production access.
 
 Each push uses the scoped HTP bearer credential and `Idempotency-Key: <request_id>`:
 

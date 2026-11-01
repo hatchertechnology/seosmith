@@ -19,6 +19,29 @@ macro_rules! rule {
 #[must_use]
 pub fn rules() -> Vec<Rule> {
     vec![
+        rule!("invalid_language", Warning, "Invalid BCP47 language tag"),
+        rule!("invalid_hreflang", Alert, "Invalid BCP47 hreflang tag"),
+        rule!(
+            "invalid_json_ld",
+            Alert,
+            "JSON-LD block is invalid JSON or has an invalid top-level value"
+        ),
+        rule!("meta_refresh", Warning, "HTML meta refresh directive"),
+        rule!(
+            "broken_resource",
+            Alert,
+            "Dependency has an observed HTTP error"
+        ),
+        rule!(
+            "insecure_resource",
+            Warning,
+            "HTTPS page depends on HTTP resource"
+        ),
+        rule!(
+            "encoding_errors",
+            Warning,
+            "Character decoding required replacements"
+        ),
         rule!("http_redirect", Warning, "HTTP redirect"),
         rule!("http_client_error", Critical, "HTTP 4xx"),
         rule!("http_server_error", Critical, "HTTP 5xx"),
@@ -194,6 +217,8 @@ fn add(out: &mut Vec<Finding>, p: &Page, rule: &Rule, evidence: String) {
         rule: rule.id.into(),
         severity: rule.severity.clone(),
         url: p.url.clone(),
+        evidence_items: vec![evidence.clone()],
+        details: serde_json::json!({}),
         evidence,
     });
 }
@@ -204,7 +229,7 @@ pub fn analyze(pages: &[Page], seed: &Url) -> Vec<Finding> {
     let mut groups: BTreeMap<(&str, &str), usize> = BTreeMap::new();
     let mut incoming: HashMap<&str, (usize, usize)> = HashMap::new();
     for p in pages {
-        if p.html() {
+        if p.html() && !p.is_resource {
             for (kind, value) in [
                 ("duplicate_title", p.title.as_str()),
                 ("duplicate_description", &p.description),
@@ -215,7 +240,7 @@ pub fn analyze(pages: &[Page], seed: &Url) -> Vec<Finding> {
                 }
             }
         }
-        for link in &p.links {
+        for link in p.links.iter().filter(|_| !p.is_resource) {
             let count = incoming.entry(&link.url).or_default();
             if link.nofollow {
                 count.1 += 1;
@@ -226,9 +251,12 @@ pub fn analyze(pages: &[Page], seed: &Url) -> Vec<Finding> {
     }
     let mut out = Vec::new();
     for p in pages {
-        let mut found: BTreeMap<&str, String> = BTreeMap::new();
+        let mut found: BTreeMap<&str, Vec<String>> = BTreeMap::new();
         let mut mark = |rule, evidence: String| {
-            found.insert(rule, evidence);
+            let values = found.entry(rule).or_default();
+            if !values.contains(&evidence) && values.len() < 2000 {
+                values.push(evidence);
+            }
         };
         if p.blocked_by_robots {
             mark("robots_blocked", "Not fetched: robots.txt".into());
@@ -292,7 +320,47 @@ pub fn analyze(pages: &[Page], seed: &Url) -> Vec<Finding> {
         if p.depth > 4 {
             mark("deep_page", p.depth.to_string());
         }
-        if p.html() {
+        for relationship in &p.relationships {
+            if relationship.resource {
+                if p.url.starts_with("https:") && relationship.url.starts_with("http:") {
+                    mark("insecure_resource", relationship.url.clone());
+                }
+                if by_url
+                    .get(relationship.url.as_str())
+                    .is_some_and(|t| t.status.is_some_and(|s| s >= 400))
+                {
+                    mark("broken_resource", relationship.url.clone());
+                }
+            }
+        }
+        if p.html() && !p.is_resource {
+            if !p.language.is_empty() && !valid_language(&p.language) {
+                mark("invalid_language", p.language.clone());
+            }
+            for alternate in &p.alternates {
+                if !alternate.language.eq_ignore_ascii_case("x-default")
+                    && !valid_language(&alternate.language)
+                {
+                    mark("invalid_hreflang", alternate.language.clone());
+                }
+            }
+            for (index, block) in p.structured_data.iter().enumerate() {
+                if block.format == "json_ld"
+                    && let Some(error) =
+                        block.error.as_ref().filter(|e| e.as_str() != "block_limit")
+                {
+                    mark("invalid_json_ld", format!("block {index}: {error}"));
+                }
+            }
+            if let Some(delay) = p.refresh_delay {
+                mark(
+                    "meta_refresh",
+                    format!(
+                        "{delay}s: {}",
+                        p.refresh_target.as_deref().unwrap_or("reload")
+                    ),
+                );
+            }
             for flag in &p.flags {
                 if let Some(def) = defs.iter().find(|r| r.id == flag) {
                     mark(def.id, flag.clone());
@@ -501,8 +569,11 @@ pub fn analyze(pages: &[Page], seed: &Url) -> Vec<Finding> {
                 }
             }
         }
-        if let Some(target) = p.redirect.as_deref() {
-            if by_url.get(target).is_some_and(|t| t.redirect.is_some()) {
+        if let Some(target) = p.redirect_target() {
+            if by_url
+                .get(target)
+                .is_some_and(|t| t.redirect_target().is_some())
+            {
                 mark("redirect_chain", target.into());
             }
             let mut visited = HashSet::new();
@@ -513,15 +584,23 @@ pub fn analyze(pages: &[Page], seed: &Url) -> Vec<Finding> {
                     mark("redirect_loop", u.into());
                     break;
                 }
-                next = by_url.get(u).and_then(|t| t.redirect.as_deref());
+                next = by_url.get(u).and_then(|t| t.redirect_target());
             }
         }
-        for (id, evidence) in found {
+        for (id, items) in found {
             if let Some(def) = defs.iter().find(|r| r.id == id) {
-                add(&mut out, p, def, evidence);
+                add(&mut out, p, def, items.first().cloned().unwrap_or_default());
+                if let Some(finding) = out.last_mut() {
+                    finding.evidence_items = items;
+                    finding.details = serde_json::json!({"status":p.status,"bytes":p.bytes,"ttfb_ms":p.ttfb_ms,"words":p.words,"dom_nodes":p.dom_nodes,"observation_count":finding.evidence_items.len()});
+                }
             }
         }
     }
     out.sort_by(|a, b| (&a.url, &a.rule).cmp(&(&b.url, &b.rule)));
     out
+}
+
+fn valid_language(value: &str) -> bool {
+    language_tags::LanguageTag::parse(value).is_ok_and(|tag| tag.validate().is_ok())
 }

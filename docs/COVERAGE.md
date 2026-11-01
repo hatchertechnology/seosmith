@@ -14,7 +14,7 @@ archive replay and MySQL schema are intentionally not reproduced.
 - Internal link errors/nofollow, follow/nofollow incoming conflicts, observed
   indexable nofollow targets, link counts, dead ends and localhost/HTTP links.
 - Optional observed external redirects/errors; external pages are not expanded.
-- Image alt/size/picture structure; same-host image byte size observations.
+- Image alt/size/picture structure; responsive candidates and public CDN asset observations.
 - Canonical multiplicity/relativity/header disagreement, errors, redirects,
   noindex targets and canonical chains.
 - Hreflang self-reference, language mismatch, x-default, relative URLs, observed
@@ -23,14 +23,17 @@ archive replay and MySQL schema are intentionally not reproduced.
 - URL underscores/spaces/slashes/depth; forms over HTTP/insecure actions;
   security header presence; common extension/media-type mismatches; slow headers.
 - Pagination head links without corresponding body navigation.
+- Invalid JSON-LD, HTML meta refresh, broken dependencies and insecure resources.
+- JSON-LD/microdata and Open Graph/Twitter data extraction; these are observations,
+  not assertions of schema.org validity or rich-result eligibility. See EXTRACTION.md.
 
 The CLI/API rule catalog is authoritative. Severities and heuristic thresholds
 are Seosmith policies, not Google ranking factors or guarantees. TTFB includes
 connection/TLS time until headers; it is not a browser Core Web Vitals measurement.
 An external link without nofollow is not intrinsically an SEO error and is not
-flagged merely because it is followed. Language validity is not yet fully checked
-against the BCP47 registry. Large-image observations cover fetched same-host src
-resources, not every srcset candidate or externally hosted image.
+flagged merely because it is followed. Language identifiers are validated with the `language-tags` BCP47 parser and its
+bundled registry. Image observations cover discovered src/srcset/picture candidates,
+subject to robots, the resource budget and fetch limits.
 
 ## Coverage semantics
 
@@ -40,8 +43,9 @@ page on the website is discovered, every real visitor can access it, or Google
 has indexed it. Robots exclusions remain reported as exclusions.
 
 `partial` identifies page/time/discovery/extraction limits or fetch/sitemap gaps.
-Orphans are candidates within the observed graph. Unfetched canonical/hreflang
-and external targets remain unknown rather than passing or failing. HTP must not
+Orphans are candidates within the observed graph. Canonical/hreflang targets are explicitly queued within the exact-host scope.
+Unfetched canonical/hreflang and external targets remain unknown rather than passing
+or failing; typed relationship records carry the observation state. HTP must not
 resolve an old finding just because its page disappeared from a partial run.
 Compare compatible URL scopes, rulesets and configurations.
 

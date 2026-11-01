@@ -16,16 +16,6 @@ fn text(el: scraper::ElementRef<'_>) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
-fn header_canonical(value: &str, base: &Url) -> Option<String> {
-    value.split(',').find_map(|part| {
-        let (target, attrs) = part.split_once('>')?;
-        if attrs.contains("canonical") {
-            normalize(base, target.trim().strip_prefix('<')?).map(Into::into)
-        } else {
-            None
-        }
-    })
-}
 #[must_use]
 pub fn parse(url: &Url, depth: usize, in_sitemap: bool, response: &Response) -> Page {
     let mut p = Page {
@@ -50,22 +40,51 @@ pub fn parse(url: &Url, depth: usize, in_sitemap: bool, response: &Response) -> 
             .get("location")
             .and_then(|v| normalize(url, v))
             .map(Into::into),
-        header_canonical: response
-            .headers
-            .get("link")
-            .and_then(|v| header_canonical(v, url)),
+
         ..Page::default()
     };
-    if !p.html() {
+    if let Some(value) = response.headers.get("link") {
+        crate::extract::headers(&mut p, url, value);
+    }
+    let is_css = p
+        .content_type
+        .split(';')
+        .next()
+        .is_some_and(|t| t.trim().eq_ignore_ascii_case("text/css"));
+    if !p.html() && !is_css {
+        p.canonical.clone_from(&p.header_canonical);
         return p;
     }
-    let html = Html::parse_document(&String::from_utf8_lossy(&response.body));
+    let (decoded, encoding, errors) = crate::extract::decode(&response.body, &p.content_type);
+    p.encoding = encoding;
+    if errors {
+        p.flags.push("encoding_errors".into());
+    }
+    if !p.html() {
+        if is_css {
+            let (targets, truncated) = crate::extract::css_observations(&decoded);
+            p.extraction_truncated |= truncated;
+            for target in targets {
+                crate::extract::relationship(&mut p, url, "css_url", &target, "", true);
+            }
+        }
+        if p.extraction_truncated {
+            p.flags.push("extraction_limit".into());
+        }
+        p.canonical.clone_from(&p.header_canonical);
+        return p;
+    }
+    let html = Html::parse_document(&decoded);
     let base = html
         .select(&sel("base[href]"))
         .next()
         .and_then(|x| normalize(url, x.value().attr("href")?))
         .unwrap_or_else(|| url.clone());
-    let mut flags = Vec::new();
+    let mut flags: Vec<&str> = if errors {
+        vec!["encoding_errors"]
+    } else {
+        Vec::new()
+    };
     let titles: Vec<_> = html.select(&sel("head title")).collect();
     p.title = titles.first().copied().map_or_else(String::new, text);
     if titles.len() > 1 {
@@ -80,6 +99,17 @@ pub fn parse(url: &Url, depth: usize, in_sitemap: bool, response: &Response) -> 
         .and_then(|x| x.value().attr("lang"))
         .unwrap_or_default()
         .into();
+    p.language_source = if p.language.is_empty() {
+        String::new()
+    } else {
+        "html".into()
+    };
+    if p.language.is_empty()
+        && let Some(value) = response.headers.get("content-language")
+    {
+        p.language = value.split(',').next().unwrap_or_default().trim().into();
+        p.language_source = "http_header".into();
+    }
     for meta in html.select(&sel("head meta")) {
         let name = meta
             .value()
@@ -140,7 +170,10 @@ pub fn parse(url: &Url, depth: usize, in_sitemap: bool, response: &Response) -> 
     if canonicals.len() > 1 {
         flags.push("multiple_canonicals");
     }
-    p.canonical = canonicals.first().cloned();
+    p.canonical = canonicals
+        .first()
+        .cloned()
+        .or_else(|| p.header_canonical.clone());
     for el in html.select(&sel("a[href], area[href]")).take(2000) {
         if let Some(target) = el.value().attr("href").and_then(|s| normalize(&base, s)) {
             let rel = el
@@ -150,9 +183,10 @@ pub fn parse(url: &Url, depth: usize, in_sitemap: bool, response: &Response) -> 
                 .to_ascii_lowercase();
             p.links.push(Link {
                 url: target.to_string(),
-                nofollow: rel
-                    .split_whitespace()
-                    .any(|x| matches!(x, "nofollow" | "sponsored" | "ugc")),
+                nofollow: rel.split_whitespace().any(|x| x == "nofollow"),
+                sponsored: rel.split_whitespace().any(|x| x == "sponsored"),
+                ugc: rel.split_whitespace().any(|x| x == "ugc"),
+                rel: rel.split_whitespace().map(str::to_owned).collect(),
                 text: text(el),
             });
         }
@@ -258,6 +292,39 @@ pub fn parse(url: &Url, depth: usize, in_sitemap: bool, response: &Response) -> 
     }
     for heading in &mut p.headings {
         heading.1 = heading.1.chars().take(1024).collect();
+    }
+    crate::extract::enrich(&mut p, &html, &base);
+    if let Some(target) = p.canonical.clone() {
+        crate::extract::relationship(&mut p, &base, "canonical", &target, "", false);
+    }
+    for alternate in p.alternates.clone() {
+        crate::extract::relationship(
+            &mut p,
+            &base,
+            "hreflang",
+            &alternate.url,
+            &alternate.language,
+            false,
+        );
+    }
+    for link in p.links.clone() {
+        crate::extract::relationship(
+            &mut p,
+            &base,
+            "navigation",
+            &link.url,
+            &link.rel.join(" "),
+            false,
+        );
+    }
+    for image in p.images.clone() {
+        crate::extract::relationship(&mut p, &base, "image", &image.url, "", true);
+    }
+    if let Some(target) = p.refresh_target.clone() {
+        crate::extract::relationship(&mut p, &base, "meta_refresh", &target, "", false);
+    }
+    if p.extraction_truncated {
+        flags.push("extraction_limit");
     }
     p.flags = flags.into_iter().map(str::to_owned).collect();
     p

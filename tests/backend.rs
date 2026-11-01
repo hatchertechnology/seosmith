@@ -27,6 +27,7 @@ fn request() -> CrawlRequest {
         max_duration_seconds: 30,
         delay_ms: 1000,
         check_external_links: false,
+        max_resources: 500,
     }
 }
 fn response(html: &str) -> Response {
