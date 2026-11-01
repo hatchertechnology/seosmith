@@ -37,6 +37,17 @@ impl Store {
             CREATE TABLE IF NOT EXISTS frontier (job_id TEXT NOT NULL REFERENCES jobs(id), url TEXT NOT NULL,
             depth INTEGER NOT NULL, in_sitemap INTEGER NOT NULL, page TEXT, PRIMARY KEY(job_id,url));")
             .execute(&pool).await?;
+        let columns = sqlx::query("PRAGMA table_info(frontier)")
+            .fetch_all(&pool)
+            .await?;
+        if !columns
+            .iter()
+            .any(|r| r.get::<String, _>("name") == "resource")
+        {
+            sqlx::query("ALTER TABLE frontier ADD COLUMN resource INTEGER NOT NULL DEFAULT 0")
+                .execute(&pool)
+                .await?;
+        }
         Ok(Self(pool))
     }
     pub async fn recover(&self) -> Result<()> {
@@ -108,18 +119,44 @@ impl Store {
         sitemap: bool,
         cap: usize,
     ) -> Result<()> {
-        sqlx::query("INSERT OR IGNORE INTO frontier(job_id,url,depth,in_sitemap) SELECT ?,?,?,? WHERE (SELECT count(*) FROM frontier WHERE job_id=?) < ?")
-            .bind(id).bind(url).bind(i64::try_from(depth)?).bind(sitemap).bind(id).bind(i64::try_from(cap)?).execute(&self.0).await?;
+        self.discover_kind(id, url, depth, sitemap, cap, false)
+            .await
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub async fn discover_kind(
+        &self,
+        id: &str,
+        url: &str,
+        depth: usize,
+        sitemap: bool,
+        cap: usize,
+        resource: bool,
+    ) -> Result<()> {
+        sqlx::query("INSERT OR IGNORE INTO frontier(job_id,url,depth,in_sitemap,resource) SELECT ?,?,?,?,? WHERE (SELECT count(*) FROM frontier WHERE job_id=?) < ?")
+            .bind(id).bind(url).bind(i64::try_from(depth)?).bind(sitemap).bind(resource).bind(id).bind(i64::try_from(cap)?).execute(&self.0).await?;
         sqlx::query("UPDATE jobs SET discovery_truncated=1 WHERE id=? AND NOT EXISTS(SELECT 1 FROM frontier WHERE job_id=? AND url=?)")
             .bind(id).bind(id).bind(url).execute(&self.0).await?;
-        if sitemap {
-            sqlx::query("UPDATE frontier SET in_sitemap=1 WHERE job_id=? AND url=?")
-                .bind(id)
-                .bind(url)
-                .execute(&self.0)
-                .await?;
-        }
+        sqlx::query("UPDATE frontier SET in_sitemap=max(in_sitemap,?),resource=CASE WHEN page IS NULL THEN min(resource,?) ELSE resource END WHERE job_id=? AND url=?")
+            .bind(sitemap).bind(resource).bind(id).bind(url).execute(&self.0).await?;
         Ok(())
+    }
+    pub async fn next_budgeted(
+        &self,
+        id: &str,
+        pages: bool,
+        resources: bool,
+    ) -> Result<Option<(String, usize, bool, bool)>> {
+        let row=sqlx::query("SELECT url,depth,in_sitemap,resource FROM frontier WHERE job_id=? AND page IS NULL AND ((resource=0 AND ?) OR (resource=1 AND ?)) ORDER BY resource,depth,url LIMIT 1")
+            .bind(id).bind(pages).bind(resources).fetch_optional(&self.0).await?;
+        row.map(|r| {
+            Ok((
+                r.try_get("url")?,
+                usize::try_from(r.try_get::<i64, _>("depth")?)?,
+                r.try_get("in_sitemap")?,
+                r.try_get("resource")?,
+            ))
+        })
+        .transpose()
     }
     pub async fn discovery_truncated(&self, id: &str) -> Result<bool> {
         Ok(

@@ -48,7 +48,7 @@ spec:
       containers:
         - name: seosmith
           # Build and publish first, then replace this tag with a verified digest.
-          image: ghcr.io/hatchertechnology/seosmith:0.1.0
+          image: ghcr.io/hatchertechnology/seosmith:0.2.0
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

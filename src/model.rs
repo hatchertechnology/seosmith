@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 pub const SCHEMA_VERSION: u32 = 1;
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const RULESET_VERSION: &str = "2026-10-31.1";
+pub const RULESET_VERSION: &str = "2026-11-01.1";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -22,6 +22,11 @@ pub struct CrawlRequest {
     pub delay_ms: u64,
     #[serde(default)]
     pub check_external_links: bool,
+    #[serde(default = "default_resources")]
+    pub max_resources: usize,
+}
+const fn default_resources() -> usize {
+    500
 }
 const fn default_pages() -> usize {
     500
@@ -55,6 +60,10 @@ impl CrawlRequest {
             "max_pages must be 1..20000"
         );
         ensure!(
+            self.max_resources <= 20_000,
+            "max_resources must be 0..20000"
+        );
+        ensure!(
             (10..=7200).contains(&self.max_duration_seconds),
             "duration must be 10..7200 seconds"
         );
@@ -73,9 +82,13 @@ impl CrawlRequest {
     }
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Link {
     pub url: String,
     pub nofollow: bool,
+    pub sponsored: bool,
+    pub ugc: bool,
+    pub rel: Vec<String>,
     pub text: String,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -91,6 +104,22 @@ pub struct Alternate {
     pub url: String,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Relationship {
+    pub kind: String,
+    pub url: String,
+    pub descriptor: String,
+    pub resource: bool,
+    pub state: String,
+}
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct StructuredData {
+    pub format: String,
+    pub data: Option<serde_json::Value>,
+    pub error: Option<String>,
+}
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+#[allow(clippy::struct_excessive_bools)] // Independent facts in the serialized observation contract.
 pub struct Page {
     pub url: String,
     pub depth: usize,
@@ -116,10 +145,33 @@ pub struct Page {
     pub words: usize,
     pub dom_nodes: usize,
     pub flags: Vec<String>,
+    pub is_resource: bool,
+    pub encoding: String,
+    pub language_source: String,
+    pub refresh_delay: Option<f64>,
+    pub refresh_target: Option<String>,
+    pub relationships: Vec<Relationship>,
+    pub structured_data: Vec<StructuredData>,
+    pub open_graph: std::collections::BTreeMap<String, Vec<String>>,
+    pub twitter: std::collections::BTreeMap<String, Vec<String>>,
+    pub extraction_truncated: bool,
 }
 impl Page {
     pub fn html(&self) -> bool {
-        self.status == Some(200) && self.content_type.to_ascii_lowercase().contains("text/html")
+        self.status.is_some_and(|s| (200..300).contains(&s))
+            && matches!(
+                self.content_type
+                    .split(';')
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_ascii_lowercase()
+                    .as_str(),
+                "text/html" | "application/xhtml+xml" | "application/vnd.wap.xhtml+xml"
+            )
+    }
+    pub fn redirect_target(&self) -> Option<&str> {
+        self.redirect.as_deref().or(self.refresh_target.as_deref())
     }
     pub fn noindex(&self) -> bool {
         self.robots
@@ -141,6 +193,10 @@ pub struct Finding {
     pub severity: Severity,
     pub url: String,
     pub evidence: String,
+    #[serde(default)]
+    pub evidence_items: Vec<String>,
+    #[serde(default)]
+    pub details: serde_json::Value,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Report {

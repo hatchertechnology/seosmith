@@ -174,15 +174,16 @@ pub async fn crawl_with(store: &Store, r: &CrawlRequest, fetch: &impl Transport)
         Err(_) => false,
     };
     policies.insert(origin(&r.url), policy);
-    let mut count = store.pages(&id).await?.len();
+    let existing = store.pages(&id).await?;
+    let mut count = existing.iter().filter(|p| !p.is_resource).count();
+    let mut resources = existing.iter().filter(|p| p.is_resource).count();
     let mut reason = "frontier_exhausted";
-    while let Some((url, depth, in_sitemap)) = store.next(&id).await? {
+    while let Some((url, depth, in_sitemap, is_resource)) = store
+        .next_budgeted(&id, count < r.max_pages, resources < r.max_resources)
+        .await?
+    {
         if store.cancelled(&id).await? {
             reason = "cancelled";
-            break;
-        }
-        if count >= r.max_pages {
-            reason = "page_limit";
             break;
         }
         if chrono::Utc::now().timestamp() >= deadline
@@ -210,7 +211,7 @@ pub async fn crawl_with(store: &Store, r: &CrawlRequest, fetch: &impl Transport)
             tokio::time::sleep(Duration::from_millis(r.delay_ms)).await;
             match fetch.get(&u).await {
                 Ok(response) => {
-                    if r.in_scope(&u) {
+                    if r.in_scope(&u) || is_resource {
                         page = parse::parse(&u, depth, in_sitemap, &response);
                     } else {
                         page.status = Some(response.status);
@@ -233,40 +234,87 @@ pub async fn crawl_with(store: &Store, r: &CrawlRequest, fetch: &impl Transport)
         } else {
             page.blocked_by_robots = true;
         }
+        page.is_resource = is_resource;
         let follow = !page
             .robots
             .to_ascii_lowercase()
             .split([',', ' ', ';'])
             .any(|d| matches!(d, "nofollow" | "none"));
-        if r.in_scope(&u) {
-            for image in &page.images {
-                if let Some(target) = normalize(&u, &image.url).filter(|u| r.in_scope(u)) {
-                    store
-                        .discover(&id, target.as_str(), depth + 1, false, r.max_pages * 10)
-                        .await?;
-                }
-            }
+        let cap = (r.max_pages + r.max_resources).saturating_mul(10);
+        if r.in_scope(&u) && !is_resource {
             for link in page
                 .links
                 .iter()
-                .filter(|l| follow && !l.nofollow)
-                .map(|l| l.url.as_str())
-                .chain(page.redirect.as_deref())
+                .filter(|l| follow && !l.nofollow && !l.sponsored && !l.ugc)
             {
-                if let Some(target) = normalize(&u, link).filter(|u| {
-                    r.in_scope(u)
-                        || (r.check_external_links
-                            && page.links.iter().any(|l| l.url == u.as_str()))
-                }) {
+                if let Some(target) =
+                    normalize(&u, &link.url).filter(|u| r.in_scope(u) || r.check_external_links)
+                {
                     store
-                        .discover(&id, target.as_str(), depth + 1, false, r.max_pages * 10)
+                        .discover_kind(
+                            &id,
+                            target.as_str(),
+                            depth + 1,
+                            false,
+                            cap,
+                            !r.in_scope(&target),
+                        )
                         .await?;
                 }
             }
         }
+        if let Some(target) = page
+            .redirect
+            .as_deref()
+            .and_then(|v| normalize(&u, v))
+            .filter(|t| r.in_scope(t) || is_resource)
+        {
+            store
+                .discover_kind(&id, target.as_str(), depth + 1, false, cap, is_resource)
+                .await?;
+        }
+        for relation in &page.relationships {
+            if relation.kind == "navigation" {
+                continue;
+            }
+            if is_resource
+                && (!relation.resource
+                    || !page
+                        .content_type
+                        .to_ascii_lowercase()
+                        .starts_with("text/css"))
+            {
+                continue;
+            }
+            if let Some(target) =
+                normalize(&u, &relation.url).filter(|t| relation.resource || r.in_scope(t))
+            {
+                store
+                    .discover_kind(
+                        &id,
+                        target.as_str(),
+                        depth + 1,
+                        false,
+                        cap,
+                        relation.resource,
+                    )
+                    .await?;
+            }
+        }
         // Checkpoint after discoveries: a crash can replay discovery without losing targets.
         store.save_page(&id, &page).await?;
-        count += 1;
+        if is_resource {
+            resources += 1;
+        } else {
+            count += 1;
+        }
+    }
+    if reason == "frontier_exhausted" && store.next(&id).await?.is_some() {
+        reason = if store.next_budgeted(&id, true, false).await?.is_some() {
+            "page_limit"
+        } else {
+            "resource_limit"
+        };
     }
     let pages = store.pages(&id).await?;
     if store.cancelled(&id).await? {
@@ -276,6 +324,9 @@ pub async fn crawl_with(store: &Store, r: &CrawlRequest, fetch: &impl Transport)
         .iter()
         .any(|p| p.flags.iter().any(|f| f == "extraction_limit"))
         || store.discovery_truncated(&id).await?;
+    if pages.iter().any(|p| p.html() && p.encoding.is_empty()) && reason == "frontier_exhausted" {
+        reason = "legacy_checkpoint_metadata";
+    }
     if truncated && reason == "frontier_exhausted" {
         reason = "discovery_or_extraction_limit";
     }
@@ -305,7 +356,41 @@ async fn report(
     reason: &str,
     complete: bool,
 ) -> Result<Report> {
-    let pages = store.pages(&r.request_id.to_string()).await?;
+    let mut pages = store.pages(&r.request_id.to_string()).await?;
+    let states: HashMap<_, _> = pages
+        .iter()
+        .map(|p| {
+            (
+                p.url.clone(),
+                if p.blocked_by_robots {
+                    "blocked"
+                } else if p.error.is_some() {
+                    "fetch_failed"
+                } else {
+                    "checked"
+                },
+            )
+        })
+        .collect();
+    for page in &mut pages {
+        for relation in &mut page.relationships {
+            relation.state = states
+                .get(&relation.url)
+                .map_or_else(
+                    || {
+                        if !relation.resource
+                            && Url::parse(&relation.url).is_ok_and(|u| !r.in_scope(&u))
+                        {
+                            "outside_scope"
+                        } else {
+                            "not_fetched"
+                        }
+                    },
+                    |s| *s,
+                )
+                .into();
+        }
+    }
     let findings = audit::analyze(&pages, &r.url);
     Ok(Report {
         schema_version: model::SCHEMA_VERSION,

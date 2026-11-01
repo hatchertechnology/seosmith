@@ -23,7 +23,10 @@ pub struct Fetcher {
 impl Default for Fetcher {
     fn default() -> Self {
         Self {
-            user_agent: "Seosmith/0.1 (+https://github.com/hatchertechnology/seosmith)".into(),
+            user_agent: format!(
+                "Seosmith/{} (+https://github.com/hatchertechnology/seosmith)",
+                env!("CARGO_PKG_VERSION")
+            ),
         }
     }
 }
@@ -110,11 +113,18 @@ impl Transport for Fetcher {
         let mut response = client.get(url.clone()).send().await?;
         let ttfb_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let status = response.status().as_u16();
-        let headers = response
-            .headers()
-            .iter()
-            .filter_map(|(k, v)| v.to_str().ok().map(|v| (k.to_string(), v.to_owned())))
-            .collect();
+        let mut headers = BTreeMap::<String, String>::new();
+        for (key, value) in response.headers() {
+            if let Ok(value) = value.to_str() {
+                headers
+                    .entry(key.to_string())
+                    .and_modify(|old| {
+                        old.push_str(", ");
+                        old.push_str(value);
+                    })
+                    .or_insert_with(|| value.to_owned());
+            }
+        }
         if response
             .content_length()
             .is_some_and(|n| n > MAX_BODY as u64)
