@@ -1,0 +1,44 @@
+[
+  {
+    "name": "baseline",
+    "canonical_utf8": "{\"catalog_version\":\"s14-1\",\"collection\":{\"check_external_links\":true,\"max_pages\":500,\"max_resources\":500,\"seed_url\":\"https://example.com/\"},\"policy\":{\"description_max\":160,\"description_min\":50,\"forbid_redirects\":false,\"links_max\":200,\"require_indexable\":false,\"title_max\":60,\"title_min\":15,\"words_min\":100},\"schema_version\":3,\"validator_version\":\"s14-1\"}",
+    "sha256": "sha256:b1d99b0fb8c2bc87a08c8ed83bdf23ef5de2841f055f140555234291bd6e57a7",
+    "request_delta": {}
+  },
+  {
+    "name": "volatile_ids_unchanged",
+    "canonical_utf8": "{\"catalog_version\":\"s14-1\",\"collection\":{\"check_external_links\":true,\"max_pages\":500,\"max_resources\":500,\"seed_url\":\"https://example.com/\"},\"policy\":{\"description_max\":160,\"description_min\":50,\"forbid_redirects\":false,\"links_max\":200,\"require_indexable\":false,\"title_max\":60,\"title_min\":15,\"words_min\":100},\"schema_version\":3,\"validator_version\":\"s14-1\"}",
+    "sha256": "sha256:b1d99b0fb8c2bc87a08c8ed83bdf23ef5de2841f055f140555234291bd6e57a7",
+    "request_delta": {
+      "request_id": "00000000-0000-4000-8000-000000000999",
+      "website_id": "00000000-0000-4000-8000-000000000998",
+      "binding_generation": 7,
+      "delay_ms": 9000,
+      "max_duration_seconds": 2000
+    }
+  },
+  {
+    "name": "max_pages_changed",
+    "canonical_utf8": "{\"catalog_version\":\"s14-1\",\"collection\":{\"check_external_links\":true,\"max_pages\":501,\"max_resources\":500,\"seed_url\":\"https://example.com/\"},\"policy\":{\"description_max\":160,\"description_min\":50,\"forbid_redirects\":false,\"links_max\":200,\"require_indexable\":false,\"title_max\":60,\"title_min\":15,\"words_min\":100},\"schema_version\":3,\"validator_version\":\"s14-1\"}",
+    "sha256": "sha256:f41e1bf9fd0d2d17c3e686326b713bbde181291b93f3953b55f379d65d3dbff2",
+    "request_delta": {}
+  },
+  {
+    "name": "max_resources_changed",
+    "canonical_utf8": "{\"catalog_version\":\"s14-1\",\"collection\":{\"check_external_links\":true,\"max_pages\":500,\"max_resources\":501,\"seed_url\":\"https://example.com/\"},\"policy\":{\"description_max\":160,\"description_min\":50,\"forbid_redirects\":false,\"links_max\":200,\"require_indexable\":false,\"title_max\":60,\"title_min\":15,\"words_min\":100},\"schema_version\":3,\"validator_version\":\"s14-1\"}",
+    "sha256": "sha256:d857016e85237a537a6806f5b0d8342f69e0682d5c3e59128e1d31c651eb5808",
+    "request_delta": {}
+  },
+  {
+    "name": "external_checks_changed",
+    "canonical_utf8": "{\"catalog_version\":\"s14-1\",\"collection\":{\"check_external_links\":false,\"max_pages\":500,\"max_resources\":500,\"seed_url\":\"https://example.com/\"},\"policy\":{\"description_max\":160,\"description_min\":50,\"forbid_redirects\":false,\"links_max\":200,\"require_indexable\":false,\"title_max\":60,\"title_min\":15,\"words_min\":100},\"schema_version\":3,\"validator_version\":\"s14-1\"}",
+    "sha256": "sha256:1594b7055c2b6e7ad94e31ec55dae9e102575608aa9a7fbbc42a17e3ce8e551d",
+    "request_delta": {}
+  },
+  {
+    "name": "intent_changed",
+    "canonical_utf8": "{\"catalog_version\":\"s14-1\",\"collection\":{\"check_external_links\":true,\"max_pages\":500,\"max_resources\":500,\"seed_url\":\"https://example.com/\"},\"policy\":{\"description_max\":160,\"description_min\":50,\"forbid_redirects\":false,\"links_max\":200,\"require_indexable\":true,\"title_max\":60,\"title_min\":15,\"words_min\":100},\"schema_version\":3,\"validator_version\":\"s14-1\"}",
+    "sha256": "sha256:a3b159e427f8a8f93e4376e3252dbda82faf58cc4d88f0c9ed6deeaecdeab1e4",
+    "request_delta": {}
+  }
+]

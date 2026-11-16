@@ -7,7 +7,7 @@ use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Record {
     pub record_id: String,
@@ -62,9 +62,63 @@ pub struct ManifestRow {
 pub struct Candidate {
     pub policy_canonical_json: String,
     pub policy_digest: String,
+    pub scope_digest: String,
+    pub manifest_digest: String,
     pub observed_at: crate::contract::Interval,
     pub records: Vec<Record>,
     pub coverage: Vec<Coverage>,
+}
+fn tagged(fields: &[(&str, &str)]) -> String {
+    use std::fmt::Write;
+    fields.iter().fold(String::new(), |mut out, (key, value)| {
+        let _ = writeln!(out, "{key}={}:{}", value.len(), value);
+        out
+    })
+}
+
+pub fn scope_digest(report: &Report) -> String {
+    let website = report.request.website_id.to_string();
+    let generation = report.request.binding_generation.to_string();
+    format!(
+        "sha256:{}",
+        digest(
+            format!(
+                "seosmith-scope-v1\n{}",
+                tagged(&[
+                    ("website_id", &website),
+                    ("binding_generation", &generation)
+                ])
+            )
+            .as_bytes()
+        )
+    )
+}
+pub fn manifest_digest(manifest: &[ManifestRow]) -> String {
+    let mut rows: Vec<_> = manifest
+        .iter()
+        .map(|m| {
+            (
+                &m.category,
+                &m.rule_id,
+                &m.rule_version,
+                &m.expected_pointer,
+            )
+        })
+        .collect();
+    rows.sort();
+    let mut bytes = format!("seosmith-manifest-v1\nrows={}\n", rows.len());
+    for (category, rule, version, expected) in rows {
+        let (tag, value) = expected.as_deref().map_or(("null", ""), |v| ("pointer", v));
+        bytes.push_str(&tagged(&[
+            ("category", category),
+            ("rule_id", rule),
+            ("rule_version", version),
+            ("expected_type", tag),
+            ("expected", value),
+        ]));
+    }
+    bytes.push_str("end\n");
+    format!("sha256:{}", digest(bytes.as_bytes()))
 }
 fn component(s: &str) -> bool {
     !s.is_empty() && s.len() <= 256 && s.bytes().all(|c| (0x20..=0x7e).contains(&c))
@@ -189,6 +243,11 @@ fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]) ->
     ensure!(
         serde_json::to_vec(manifest)?.len() <= 262_144,
         "manifest byte limit"
+    );
+    ensure!(
+        candidate.scope_digest == scope_digest(report)
+            && candidate.manifest_digest == manifest_digest(manifest),
+        "scope or manifest digest"
     );
     let mut manifest_keys = HashSet::new();
     for row in manifest {
@@ -553,7 +612,7 @@ fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]) ->
 
 /// Conservative lifecycle rule: an edge or incomplete evaluation never resolves a violation.
 #[allow(clippy::fn_params_excessive_bools)]
-pub fn resolves(
+fn resolves_flags(
     previous: &Record,
     current: &Record,
     scope_equal: bool,
@@ -579,6 +638,51 @@ pub fn resolves(
         && current.outcome == "no_violation"
 }
 
+/// Compare only validated local payloads; authentication of the binding remains external.
+pub fn resolves(
+    previous_report: &Report,
+    current_report: &Report,
+    previous: &Record,
+    current: &Record,
+) -> bool {
+    let Some(old_guidance) = previous_report.policy_guidance.as_ref() else {
+        return false;
+    };
+    let Some(new_guidance) = current_report.policy_guidance.as_ref() else {
+        return false;
+    };
+    let (Some(old), Some(new), Some(old_manifest), Some(new_manifest)) = (
+        &old_guidance.candidate,
+        &new_guidance.candidate,
+        &old_guidance.manifest,
+        &new_guidance.manifest,
+    ) else {
+        return false;
+    };
+    if validate_generated(old, old_manifest, previous_report, &old_guidance.config).is_err()
+        || validate_generated(new, new_manifest, current_report, &new_guidance.config).is_err()
+    {
+        return false;
+    }
+    if !old.records.iter().any(|r| r == previous) || !new.records.iter().any(|r| r == current) {
+        return false;
+    }
+    let complete = new
+        .coverage
+        .iter()
+        .find(|row| row.category == current.category && row.rule_id == current.rule_id)
+        .is_some_and(|row| row.complete);
+    resolves_flags(
+        previous,
+        current,
+        old.scope_digest == new.scope_digest,
+        old.policy_digest == new.policy_digest,
+        old.manifest_digest == new.manifest_digest,
+        current_report.coverage_complete,
+        complete,
+    )
+}
+
 pub(crate) fn source_unavailable(page: &crate::model::Page) -> bool {
     page.blocked_by_robots
         || page.error.is_some()
@@ -592,6 +696,10 @@ pub fn generate(
     policy: &crate::policy::AdvisoryPolicy,
 ) -> Result<(Candidate, Vec<ManifestRow>)> {
     policy.validate()?;
+    ensure!(
+        report.request.binding_generation <= 9_007_199_254_740_991,
+        "binding generation exceeds safe integer range"
+    );
     let policy_json = canonical_policy(report, policy)?;
     let signature = format!("sha256:{}", digest(policy_json.as_bytes()));
     let defs = [
@@ -626,6 +734,8 @@ pub fn generate(
     let mut contract = Candidate {
         policy_canonical_json: policy_json,
         policy_digest: signature.clone(),
+        scope_digest: scope_digest(report),
+        manifest_digest: String::new(),
         observed_at: crate::contract::Interval {
             started_at: report.started_at.clone(),
             finished_at: report.finished_at.clone(),
@@ -982,6 +1092,7 @@ pub fn generate(
         && *edge_coverage.outcomes.get("unknown").unwrap_or(&0) == 0;
     contract.coverage.push(edge_coverage);
     manifest.push(edge_manifest);
+    contract.manifest_digest = manifest_digest(&manifest);
     validate(&contract, report, &manifest)?;
     Ok((contract, manifest))
 }
@@ -1033,9 +1144,11 @@ mod tests {
             reason: None,
         };
         r.record_id = record_id(&r);
-        let c = Candidate {
+        let mut c = Candidate {
             policy_canonical_json: canonical,
             policy_digest: signature,
+            scope_digest: scope_digest(&report),
+            manifest_digest: String::new(),
             observed_at: crate::contract::Interval {
                 started_at: report.started_at.clone(),
                 finished_at: report.finished_at.clone(),
@@ -1055,6 +1168,13 @@ mod tests {
                 unknown_reasons: BTreeMap::new(),
             }],
         };
+        c.manifest_digest = manifest_digest(&[ManifestRow {
+            category: "advisory".into(),
+            rule_id: "short_title".into(),
+            rule_version: "s14-1".into(),
+            expected_pointer: Some("/policy/title_min".into()),
+            candidates: vec![c.records[0].entity_id.clone()],
+        }]);
         (c, report)
     }
     #[test]
@@ -1176,7 +1296,9 @@ mod tests {
             .iter()
             .find(|r| r.rule_id == "external_link" && r.discriminator == "edge:1")
             .unwrap();
-        assert!(!resolves(old_edge, new_edge, true, true, true, true, true));
+        assert!(!resolves_flags(
+            old_edge, new_edge, true, true, true, true, true
+        ));
         report.pages[0].extraction_truncated = true;
         let (partial, _) = generate(&report, &policy).unwrap();
         assert!(
@@ -1435,6 +1557,68 @@ mod tests {
             serde_json::to_vec(&report).unwrap(),
         )
         .unwrap();
+        let mut intent = report.clone();
+        intent.schema_version = 1;
+        intent.policy_guidance = None;
+        intent.pages[0].robots = "noindex".into();
+        intent.pages[1].status = Some(301);
+        intent.findings = crate::audit::analyze(&intent.pages, &intent.request.url);
+        let intended = crate::policy::AdvisoryPolicy {
+            require_indexable: true,
+            forbid_redirects: true,
+            ..Default::default()
+        };
+        crate::policy::apply_with_evidence(&mut intent, &intended).unwrap();
+        std::fs::write(
+            "fixtures/policies/v3-local-intent.json",
+            serde_json::to_vec(&intent).unwrap(),
+        )
+        .unwrap();
+        let mut resolved = intent.clone();
+        resolved.schema_version = 1;
+        resolved.policy_guidance = None;
+        resolved.request.request_id =
+            uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000099").unwrap();
+        resolved.pages[0].robots.clear();
+        resolved.findings = crate::audit::analyze(&resolved.pages, &resolved.request.url);
+        crate::policy::apply_with_evidence(&mut resolved, &intended).unwrap();
+        std::fs::write(
+            "fixtures/policies/v3-local-resolved.json",
+            serde_json::to_vec(&resolved).unwrap(),
+        )
+        .unwrap();
+        let mut blocked = report.clone();
+        blocked.schema_version = 1;
+        blocked.policy_guidance = None;
+        let last = blocked.pages.len() - 1;
+        blocked.pages[last].status = None;
+        blocked.pages[last].blocked_by_robots = true;
+        blocked.coverage_complete = false;
+        blocked.outcome = "partial".into();
+        blocked.stop_reason = "robots_unavailable".into();
+        blocked.findings = crate::audit::analyze(&blocked.pages, &blocked.request.url);
+        crate::policy::apply_with_evidence(&mut blocked, &crate::policy::AdvisoryPolicy::default())
+            .unwrap();
+        std::fs::write(
+            "fixtures/policies/v3-local-blocked.json",
+            serde_json::to_vec(&blocked).unwrap(),
+        )
+        .unwrap();
+        let mut reordered = report.clone();
+        reordered.schema_version = 1;
+        reordered.policy_guidance = None;
+        reordered.pages[0].links.reverse();
+        reordered.findings = crate::audit::analyze(&reordered.pages, &reordered.request.url);
+        crate::policy::apply_with_evidence(
+            &mut reordered,
+            &crate::policy::AdvisoryPolicy::default(),
+        )
+        .unwrap();
+        std::fs::write(
+            "fixtures/policies/v3-local-reordered.json",
+            serde_json::to_vec(&reordered).unwrap(),
+        )
+        .unwrap();
         report.pages[0].extraction_truncated = true;
         report.coverage_complete = false;
         report.outcome = "partial".into();
@@ -1448,6 +1632,21 @@ mod tests {
             serde_json::to_vec(&report).unwrap(),
         )
         .unwrap();
+        report.schema_version = 1;
+        report.policy_guidance = None;
+        let original = report.pages[0].clone();
+        for i in 0..55 {
+            let mut page = original.clone();
+            page.url = format!("https://example.com/item-{i}");
+            report.pages.push(page);
+        }
+        crate::policy::apply_with_evidence(&mut report, &crate::policy::AdvisoryPolicy::default())
+            .unwrap();
+        std::fs::write(
+            "fixtures/policies/v3-local-omitted.json",
+            serde_json::to_vec(&report).unwrap(),
+        )
+        .unwrap();
     }
     #[test]
     fn resolution_requires_same_policy_complete_coverage_and_scalar_verdict() {
@@ -1458,16 +1657,125 @@ mod tests {
         old.record_id = record_id(&old);
         let mut new = old.clone();
         new.outcome = "no_violation".into();
-        assert!(resolves(&old, &new, true, true, true, true, true));
-        assert!(!resolves(&old, &new, false, true, true, true, true));
-        assert!(!resolves(&old, &new, true, false, true, true, true));
-        assert!(!resolves(&old, &new, true, true, true, true, false));
+        assert!(resolves_flags(&old, &new, true, true, true, true, true));
+        assert!(!resolves_flags(&old, &new, false, true, true, true, true));
+        assert!(!resolves_flags(&old, &new, true, false, true, true, true));
+        assert!(!resolves_flags(&old, &new, true, true, true, true, false));
         new.outcome = "unknown".into();
-        assert!(!resolves(&old, &new, true, true, true, true, true));
+        assert!(!resolves_flags(&old, &new, true, true, true, true, true));
         new.outcome = "no_violation".into();
         old.discriminator = "edge:0".into();
         new.discriminator = "edge:0".into();
-        assert!(!resolves(&old, &new, true, true, true, true, true));
+        assert!(!resolves_flags(&old, &new, true, true, true, true, true));
+    }
+    #[test]
+    fn validated_reports_derive_lifecycle_identity() {
+        let (_, mut old) = sample();
+        old.pages.truncate(1);
+        old.coverage_complete = true;
+        let page = &mut old.pages[0];
+        page.status = Some(200);
+        page.content_type = "text/html".into();
+        page.error = None;
+        page.blocked_by_robots = false;
+        page.extraction_truncated = false;
+        page.robots = "noindex".into();
+        let policy = crate::policy::AdvisoryPolicy {
+            require_indexable: true,
+            ..Default::default()
+        };
+        crate::policy::apply_with_evidence(&mut old, &policy).unwrap();
+        let mut new = old.clone();
+        new.schema_version = 1;
+        new.policy_guidance = None;
+        new.request.request_id = uuid::Uuid::new_v4();
+        new.pages[0].robots.clear();
+        crate::policy::apply_with_evidence(&mut new, &policy).unwrap();
+        let old_record = old
+            .policy_guidance
+            .as_ref()
+            .unwrap()
+            .candidate
+            .as_ref()
+            .unwrap()
+            .records
+            .iter()
+            .find(|r| r.category == "policy_violation" && r.rule_id == "noindex")
+            .unwrap();
+        let new_record = new
+            .policy_guidance
+            .as_ref()
+            .unwrap()
+            .candidate
+            .as_ref()
+            .unwrap()
+            .records
+            .iter()
+            .find(|r| r.category == "policy_violation" && r.rule_id == "noindex")
+            .unwrap();
+        assert!(resolves(&old, &new, old_record, new_record));
+        let mut wrong_scope = new.clone();
+        wrong_scope.request.binding_generation += 1;
+        assert!(!resolves(&old, &wrong_scope, old_record, new_record));
+        let mut missing = new.clone();
+        missing
+            .policy_guidance
+            .as_mut()
+            .unwrap()
+            .candidate
+            .as_mut()
+            .unwrap()
+            .coverage
+            .clear();
+        assert!(!resolves(&old, &missing, old_record, new_record));
+        let mut forged = new_record.clone();
+        forged.reason = Some("forged".into());
+        assert!(!resolves(&old, &new, old_record, &forged));
+    }
+    #[test]
+    fn identity_vectors_bind_scope_and_rule_definitions_not_candidate_population() {
+        let report: Report =
+            serde_json::from_str(include_str!("../fixtures/policies/v3-local-complete.json"))
+                .unwrap();
+        let vectors: serde_json::Value =
+            serde_json::from_str(include_str!("../fixtures/policies/identity-vectors.json"))
+                .unwrap();
+        assert_eq!(
+            scope_digest(&report),
+            vectors["scope"]["digest"].as_str().unwrap()
+        );
+        let mut changed = report.clone();
+        changed.request.request_id = uuid::Uuid::new_v4();
+        changed.request.delay_ms += 1000;
+        assert_eq!(scope_digest(&changed), scope_digest(&report));
+        changed.request.binding_generation += 1;
+        assert_eq!(
+            scope_digest(&changed),
+            vectors["scope"]["different_binding"].as_str().unwrap()
+        );
+        let mut manifest = report
+            .policy_guidance
+            .as_ref()
+            .unwrap()
+            .manifest
+            .clone()
+            .unwrap();
+        assert_eq!(
+            manifest_digest(&manifest),
+            vectors["manifest"]["digest"].as_str().unwrap()
+        );
+        manifest[0].candidates.clear();
+        assert_eq!(
+            manifest_digest(&manifest),
+            vectors["manifest"]["different_population"]
+                .as_str()
+                .unwrap()
+        );
+        manifest[0].rule_version = "s14-2".into();
+        assert_eq!(
+            manifest_digest(&manifest),
+            vectors["manifest"]["different_version"].as_str().unwrap()
+        );
     }
     #[test]
     fn lifecycle_fixture_is_conservative() {
@@ -1484,7 +1792,7 @@ mod tests {
             let mut current = previous.clone();
             current.outcome = case["outcome"].as_str().unwrap().into();
             assert_eq!(
-                resolves(
+                resolves_flags(
                     &previous,
                     &current,
                     case["scope_equal"].as_bool().unwrap(),

@@ -1,0 +1,17 @@
+[
+ {"name":"invalid tuple","mutation":"tuple"},
+ {"name":"missing manifest row","mutation":"missing_manifest"},
+ {"name":"wrong rule expected pointer","mutation":"wrong_policy_pointer"},
+ {"name":"source belongs to another page","mutation":"wrong_source"},
+ {"name":"wrong policy digest","mutation":"digest"},
+ {"name":"wrong scope digest","mutation":"scope"},
+ {"name":"wrong manifest digest","mutation":"manifest_digest"},
+ {"name":"coverage tuple impossible","mutation":"coverage_tuple"},
+ {"name":"coverage omitted residual","mutation":"omitted"},
+ {"name":"duplicate record","mutation":"duplicate_record"},
+ {"name":"missing coverage row","mutation":"missing_coverage"},
+ {"name":"unsafe integer","mutation":"unsafe_integer"},
+ {"name":"overlong policy","mutation":"policy_limit"},
+ {"name":"duplicate decoded key","mutation":"duplicate_key"},
+ {"name":"depth 65","mutation":"depth_65"}
+]
