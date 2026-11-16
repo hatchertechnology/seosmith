@@ -12,6 +12,20 @@
     {
       "canonical_utf8": "{\"quote\":\"\\\"\\\\/\\n\\u0001  \"}",
       "sha256": "sha256:8e2b69df4e099a8f57e1d04594a7cdbf641e42a9eb19f8caddbe432aaecdea6b"
+    },
+    {
+      "canonical_utf8": "{\"negative\":-9007199254740991,\"positive\":9007199254740991}",
+      "sha256": "sha256:77ce65892da0441493712f08cc17cfc8c50cb89b1ba4af2eb082b723720bca9b"
+    }
+  ],
+  "negative_vectors": [
+    {
+      "canonical_utf8": "{\"value\":9007199254740992}",
+      "reason": "safe_integer_range"
+    },
+    {
+      "canonical_utf8": "{\"value\":-9007199254740992}",
+      "reason": "safe_integer_range"
     }
   ]
 }

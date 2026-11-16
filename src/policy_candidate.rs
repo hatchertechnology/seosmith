@@ -21,6 +21,10 @@ pub struct Record {
     pub outcome: String,
     pub actual: String,
     pub source_locator: Option<String>,
+    pub expected: Option<String>,
+    pub confidence: String,
+    pub interval_ref: String,
+    pub policy_ref: String,
     pub reason: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -131,6 +135,22 @@ pub fn validate(candidate: &Candidate, report: &Report, manifest: &[(&str, &str)
                     && t["actual"] == r.actual
             })
             .ok_or_else(|| anyhow::anyhow!("invalid tuple"))?;
+        ensure!(
+            row["confidence"] == r.confidence
+                && r.interval_ref == "report.observed_at"
+                && r.policy_ref == candidate.policy_digest,
+            "confidence or inheritance"
+        );
+        ensure!(
+            if row["expected"] == "policy_source" {
+                r.expected.as_ref().is_some_and(|p| {
+                    p.starts_with('/') && p.len() <= 1024 && value.pointer(p).is_some()
+                })
+            } else {
+                r.expected.is_none()
+            },
+            "expected policy source"
+        );
         let needs_reason = row["reason"] == "required";
         ensure!(
             if needs_reason {
@@ -234,12 +254,16 @@ mod tests {
             outcome: "advisory_triggered".into(),
             actual: "source".into(),
             source_locator: Some("/pages/0/title".into()),
+            expected: Some("/threshold".into()),
+            confidence: "high".into(),
+            interval_ref: "report.observed_at".into(),
+            policy_ref: format!("sha256:{}", digest(br#"{"threshold":15}"#)),
             reason: None,
         };
         r.record_id = record_id(&r);
         let c = Candidate {
-            policy_canonical_json: "{}".into(),
-            policy_digest: format!("sha256:{}", digest(b"{}")),
+            policy_canonical_json: r#"{"threshold":15}"#.into(),
+            policy_digest: format!("sha256:{}", digest(br#"{"threshold":15}"#)),
             records: vec![r],
             coverage: vec![Coverage {
                 category: "advisory".into(),
@@ -254,10 +278,43 @@ mod tests {
         (c, report)
     }
     #[test]
+    fn canonical_unicode_and_safe_integer_vectors() {
+        let vectors: serde_json::Value = serde_json::from_str(include_str!(
+            "../fixtures/policies/canonical-unicode-vectors.json"
+        ))
+        .unwrap();
+        let (_, report) = sample();
+        for vector in vectors["vectors"].as_array().unwrap() {
+            let candidate = Candidate {
+                policy_canonical_json: vector["canonical_utf8"].as_str().unwrap().into(),
+                policy_digest: vector["sha256"].as_str().unwrap().into(),
+                records: vec![],
+                coverage: vec![],
+            };
+            assert!(validate(&candidate, &report, &[]).is_ok());
+        }
+        for vector in vectors["negative_vectors"].as_array().unwrap() {
+            let text = vector["canonical_utf8"].as_str().unwrap();
+            let candidate = Candidate {
+                policy_canonical_json: text.into(),
+                policy_digest: format!("sha256:{}", digest(text.as_bytes())),
+                records: vec![],
+                coverage: vec![],
+            };
+            assert!(validate(&candidate, &report, &[]).is_err());
+        }
+    }
+    #[test]
     fn validates_candidate_and_rejects_inconsistent_states() {
         let (c, r) = sample();
         let manifest = [("advisory", "short_title")];
         assert!(validate(&c, &r, &manifest).is_ok());
+        let mut invalid = c.clone();
+        invalid.records[0].expected = Some("/missing".into());
+        assert!(validate(&invalid, &r, &manifest).is_err());
+        let mut invalid = c.clone();
+        invalid.records[0].confidence = "unknown".into();
+        assert!(validate(&invalid, &r, &manifest).is_err());
         let mut invalid = c.clone();
         invalid.records[0].outcome = "violation".into();
         assert!(validate(&invalid, &r, &manifest).is_err());
