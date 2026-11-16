@@ -172,10 +172,7 @@ async fn process_jobs(
                 _ = stopped.changed() => return Ok(()),
             };
             if let Ok(mut report) = result {
-                if evidence_contract_v2 {
-                    seosmith::contract::enable_v2(&mut report)?;
-                }
-                store.finish(&report).await?;
+                finalize_job(&store, &mut report, evidence_contract_v2).await?;
             } else {
                 store.fail(&request.request_id.to_string()).await?;
                 tracing::error!(run_id=%request.request_id, "crawl failed");
@@ -186,5 +183,60 @@ async fn process_jobs(
                 _ = stopped.changed() => return Ok(()),
             }
         }
+    }
+}
+
+async fn finalize_job(store: &Store, report: &mut seosmith::model::Report, v2: bool) -> Result<()> {
+    if v2 && let Err(error) = seosmith::contract::enable_v2(report) {
+        store.fail(&report.request.request_id.to_string()).await?;
+        tracing::error!(run_id=%report.request.request_id, %error, "evidence finalization failed");
+        return Ok(());
+    }
+    store.finish(report).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn invalid_v2_job_fails_and_next_job_completes_after_recovery() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(dir.path().join("jobs.sqlite").to_str().unwrap()).await?;
+        let mut bad: seosmith::model::Report =
+            serde_json::from_str(include_str!("../fixtures/contracts/legacy.json"))?;
+        bad.request.request_id = uuid::Uuid::new_v4();
+        store.submit(&bad.request).await?;
+        store.claim().await?.unwrap();
+        let mut value = serde_json::json!(null);
+        for _ in 0..64 {
+            value = serde_json::json!([value]);
+        }
+        bad.pages[0]
+            .structured_data
+            .push(seosmith::model::StructuredData {
+                format: "json_ld".into(),
+                data: Some(value),
+                error: None,
+            });
+        finalize_job(&store, &mut bad, true).await?;
+        let id = bad.request.request_id.to_string();
+        assert_eq!(store.view(&id).await?.unwrap().state, "failed");
+        assert!(store.report(&id).await?.is_none());
+        store.recover().await?;
+        assert!(store.claim().await?.is_none());
+        let mut good: seosmith::model::Report =
+            serde_json::from_str(include_str!("../fixtures/contracts/legacy.json"))?;
+        good.request.request_id = uuid::Uuid::new_v4();
+        store.submit(&good.request).await?;
+        store.claim().await?.unwrap();
+        finalize_job(&store, &mut good, true).await?;
+        assert!(
+            store
+                .report(&good.request.request_id.to_string())
+                .await?
+                .is_some()
+        );
+        Ok(())
     }
 }
