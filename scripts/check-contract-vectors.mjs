@@ -47,9 +47,9 @@ function validate(raw) {
 const vectors = JSON.parse(readFileSync(new URL('../fixtures/contracts/raw-validation-vectors.json', import.meta.url)))
 for (const vector of vectors) {
   const data = vector.depth ? '['.repeat(vector.depth - 1) + '0' + ']'.repeat(vector.depth - 1) : vector.suffix
-  const raw = `{"schema_version":${vector.schema},"data":${data}}`
+  const raw = vector.raw ?? `{"schema_version":${vector.schema},"data":${data}}`
   let accepted = true
-  try { JSON.parse(raw); if (vector.schema === 2) validate(raw) } catch { accepted = false }
+  try { const parsed = JSON.parse(raw); if (parsed.schema_version === 2) validate(raw) } catch { accepted = false }
   assert.equal(accepted, vector.accepted, vector.name)
 }
 console.log(`Verified ${vectors.length} shared raw JSON vectors`)
