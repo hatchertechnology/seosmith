@@ -1,0 +1,6 @@
+{
+  "status": "proposed-not-frozen",
+  "canonical_policy_utf8": "{\"catalog_version\":\"s14-1\",\"intent\":{\"require_indexable\":false},\"schema_version\":3,\"thresholds\":{\"title_max\":60,\"title_min\":15},\"validator_version\":\"s14-1\"}",
+  "sha256": "sha256:7c63113f395229da72a1783590e058c8740ecf002781bde878f45d517fcaf49e",
+  "note": "Partial example only; production policy must include every effective setting and request field."
+}

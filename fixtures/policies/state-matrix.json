@@ -1,0 +1,17 @@
+{
+  "version": "s14-proposal-1",
+  "status": "proposed-not-frozen",
+  "common_required": ["record_id", "category", "rule_id", "rule_version", "entity_id", "discriminator", "eligibility", "attempt", "outcome", "provenance"],
+  "tuples": [
+    {"category":"observation","eligibility":"eligible","attempt":"completed","outcome":"observed","actual":"source","reason":"null"},
+    {"category":"observation","eligibility":"unknown","attempt":"not_attempted","outcome":"unknown","actual":"unavailable","reason":"required"},
+    {"category":"advisory","eligibility":"eligible","attempt":"completed","outcome":"advisory_triggered","actual":"source","reason":"null"},
+    {"category":"advisory","eligibility":"eligible","attempt":"completed","outcome":"advisory_not_triggered","actual":"source","reason":"null"},
+    {"category":"policy_violation","eligibility":"eligible","attempt":"completed","outcome":"violation","actual":"source","reason":"null"},
+    {"category":"policy_violation","eligibility":"eligible","attempt":"completed","outcome":"no_violation","actual":"source","reason":"null"},
+    {"category":"advisory","eligibility":"unknown","attempt":"not_attempted","outcome":"unknown","actual":"unavailable","reason":"required"},
+    {"category":"policy_violation","eligibility":"unknown","attempt":"not_attempted","outcome":"unknown","actual":"unavailable","reason":"required"},
+    {"category":"advisory","eligibility":"ineligible","attempt":"not_attempted","outcome":"not_applicable","actual":"unavailable","reason":"required"},
+    {"category":"policy_violation","eligibility":"ineligible","attempt":"not_attempted","outcome":"not_applicable","actual":"unavailable","reason":"required"}
+  ]
+}

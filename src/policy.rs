@@ -74,12 +74,21 @@ pub struct PolicyMetadata {
 }
 
 pub fn catalog() -> Vec<Guidance> {
-    audit::rules().into_iter().map(|r| {
-        let advisory = matches!(r.id, "short_title" | "long_title" | "short_description" | "long_description" | "little_content" | "too_many_links");
-        let observation = matches!(r.id, "noindex" | "http_redirect" | "missing_hreflang_xdefault");
-        Guidance { rule: r.id.into(), version: "s14-1".into(), kind: if advisory {"advisory"} else if observation {"observation"} else {"legacy_finding"}.into(), applicability: "See source evidence and crawl coverage; unavailable evidence is unknown".into(), explanation: r.description.into(), evidence_schema: "finding.evidence_items (observed strings); page fields are authoritative".into(), source: if advisory { "https://developers.google.com/search/docs/fundamentals/creating-helpful-content" } else { "legacy rule catalog; source not recorded" }.into(), reviewed_at: "2026-11-16".into(), confidence: "observation_only".into(), fix_guidance: if advisory {"Review in context; adjust only if useful for users"} else if observation {"Compare the observation with the site's intended policy"} else {"Inspect source evidence and applicability before changing the page"}.into() }
+    audit::rules().into_iter().filter_map(|r| {
+        let (kind, applicability, explanation, evidence, source, fix) = match r.id {
+            "short_title" | "long_title" => ("advisory", "Successfully extracted HTML with a nonempty title", "Character count crosses a configured review threshold; display depends on context and there is no universal ideal length.", "page.title; Unicode scalar count", "https://developers.google.com/search/docs/appearance/title-link", "Review whether the title describes the page clearly; edit only where useful."),
+            "short_description" | "long_description" => ("advisory", "Successfully extracted HTML with a nonempty description", "Character count crosses a configured review threshold; search snippets vary by query and display.", "page.description; Unicode scalar count", "https://developers.google.com/search/docs/appearance/snippet", "Review whether the description accurately summarizes the page."),
+            "little_content" => ("advisory", "Successfully extracted HTML page", "Extracted word count falls below a configured review threshold; word count alone does not determine content quality.", "page.words; extracted word count", "https://developers.google.com/search/docs/fundamentals/creating-helpful-content", "Assess whether the page answers its users' needs; do not add words solely to meet a count."),
+            "too_many_links" => ("advisory", "Successfully extracted HTML page", "Outgoing link count exceeds a configured review threshold; this is not a universal link limit.", "page.links; extracted link count", "https://developers.google.com/search/docs/crawling-indexing/links-crawlable", "Review whether links are useful, contextual and crawlable."),
+            "noindex" => ("observation_or_policy_violation", "HTML page with an observed noindex directive; violation requires explicit indexability intent", "A noindex directive is an observation and may be intentional.", "page.robots; observed directive", "https://developers.google.com/search/docs/crawling-indexing/block-indexing", "If this page should be indexed, review its robots directives."),
+            "http_redirect" => ("observation_or_policy_violation", "Observed HTTP 3xx response; violation requires explicit redirect prohibition", "A redirect is an observation and may be intentional.", "page.status; observed HTTP status", "https://developers.google.com/search/docs/crawling-indexing/301-redirects", "Review the redirect only when it conflicts with the intended URL policy."),
+            "missing_hreflang_xdefault" => ("observation", "Page contains alternate language links", "An x-default alternate is optional; its absence alone is not a defect.", "page.alternates; observed hreflang values", "https://developers.google.com/search/docs/specialty/international/localized-versions", "Add x-default only if a fallback page serves the site's audience."),
+            _ => return None,
+        };
+        Some(Guidance { rule: r.id.into(), version: "s14-1".into(), kind: kind.into(), applicability: applicability.into(), explanation: explanation.into(), evidence_schema: evidence.into(), source: source.into(), reviewed_at: "2026-11-16".into(), confidence: "observed_data_only".into(), fix_guidance: fix.into() })
     }).collect()
 }
+
 fn add(findings: &mut Vec<Finding>, page: &Page, rule: &str, evidence: String) {
     findings.push(Finding {
         key: digest(format!("{}\n{}", rule, page.url).as_bytes()),
