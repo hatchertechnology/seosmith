@@ -13,4 +13,5 @@ pub mod contract;
 
 pub mod policy;
 
+pub mod operations;
 pub mod policy_candidate;
