@@ -22,6 +22,11 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Bounded standalone operations for agent hosts.
+    Operations {
+        #[command(subcommand)]
+        operation: seosmith::operations::Operation,
+    },
     Serve {
         #[arg(long, env = "SEOSMITH_BIND", default_value = "127.0.0.1:8080")]
         bind: String,
@@ -64,6 +69,27 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
     let cli = Cli::parse();
+    if let Command::Operations { operation } = cli.command {
+        if cli.evidence_contract_v2 {
+            eprintln!(
+                "{}",
+                serde_json::json!({"error":"operation_failed", "reason":"evidence_v2_unsupported"})
+            );
+            std::process::exit(1);
+        }
+        if let Err(error) =
+            seosmith::operations::execute(operation, std::path::Path::new(&cli.database)).await
+        {
+            // No error chains or backend bodies: request data and credentials must
+            // never become diagnostics. Detailed backend errors stay internal.
+            eprintln!(
+                "{}",
+                serde_json::json!({"error":"operation_failed", "reason":error.to_string()})
+            );
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     if matches!(cli.command, Command::Rules) {
         println!(
             "{}",
@@ -81,9 +107,11 @@ async fn main() -> Result<()> {
         .open(format!("{}.lock", cli.database))?;
     fs2::FileExt::try_lock_exclusive(&lock)
         .context("another Seosmith process owns this database")?;
+    seosmith::operations::reject_legacy_database(std::path::Path::new(&cli.database)).await?;
     let store = Store::open(&cli.database).await?;
     store.recover().await?;
     match cli.command {
+        Command::Operations { .. } => unreachable!(),
         Command::Rules => {}
         Command::Crawl { request } => {
             let r: CrawlRequest = serde_json::from_slice(&tokio::fs::read(request).await?)?;
