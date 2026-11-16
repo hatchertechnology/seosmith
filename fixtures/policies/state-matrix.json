@@ -1,6 +1,6 @@
 {
-  "version": "s14-proposal-1",
-  "status": "proposed-not-frozen",
+  "version": "s14-local-1",
+  "status": "frozen-local",
   "common_required": [
     "record_id",
     "category",
