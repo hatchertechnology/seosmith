@@ -42,7 +42,7 @@ for (const vector of vectors.slice(0,2)) {
   const req={...base.request,...vector.request_delta};
   const policy=JSON.parse(vector.canonical_utf8);
   assert.deepEqual(policy.collection,{check_external_links:req.check_external_links,max_pages:req.max_pages,max_resources:req.max_resources,seed_url:req.url});
-} 
+}
 for(const v of vectors.slice(2)) assert.notEqual(v.sha256,vectors[0].sha256,v.name)
 const mutations={
  tuple:r=>r.policy_guidance.candidate.records[0].outcome='violation',
