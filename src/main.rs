@@ -120,8 +120,9 @@ async fn main() -> Result<()> {
             );
             let mut report = crawler::crawl(&store, &job).await?;
             if let Some(policy) = &policy {
-                seosmith::policy::apply(&mut report, policy);
+                let result = seosmith::policy::apply_with_evidence(&mut report, policy);
                 store.fail(&job.request_id.to_string()).await?;
+                result?;
             } else if !finalize_job(&store, &mut report, cli.evidence_contract_v2).await? {
                 anyhow::bail!("report finalization failed");
             }
@@ -197,7 +198,7 @@ async fn process_jobs(
             };
             if let Ok(mut report) = result {
                 if let Some(policy) = &policy {
-                    seosmith::policy::apply(&mut report, policy);
+                    seosmith::policy::apply_with_evidence(&mut report, policy)?;
                 }
                 finalize_job(&store, &mut report, evidence_contract_v2).await?;
             } else {

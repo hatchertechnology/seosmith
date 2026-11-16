@@ -71,6 +71,10 @@ pub struct PolicyMetadata {
     pub version: String,
     pub config: AdvisoryPolicy,
     pub catalog: Vec<Guidance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<crate::policy_candidate::Candidate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<Vec<crate::policy_candidate::ManifestRow>>,
 }
 
 pub fn catalog() -> Vec<Guidance> {
@@ -186,7 +190,20 @@ pub fn apply(report: &mut Report, policy: &AdvisoryPolicy) {
         version: "s14-1".into(),
         config: policy.clone(),
         catalog: catalog(),
+        candidate: None,
+        manifest: None,
     });
+}
+
+/// Generate local experimental metadata; no schema 3 payload is queued for delivery.
+pub fn apply_with_evidence(report: &mut Report, policy: &AdvisoryPolicy) -> anyhow::Result<()> {
+    let (candidate, manifest) = crate::policy_candidate::generate(report, policy)?;
+    apply(report, policy);
+    if let Some(guidance) = &mut report.policy_guidance {
+        guidance.candidate = Some(candidate);
+        guidance.manifest = Some(manifest);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

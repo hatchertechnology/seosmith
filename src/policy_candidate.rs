@@ -180,7 +180,7 @@ pub fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]
         ensure!(
             rule.rule_version == r.rule_version
                 && rule.candidates.contains(&r.entity_id)
-                && r.expected == rule.expected_pointer,
+                && (r.attempt != "completed" || r.expected == rule.expected_pointer),
             "rule or scope mismatch"
         );
         ensure!(r.discriminator == "self", "edge scope not implemented");
@@ -381,6 +381,189 @@ pub fn resolves(
         && current.outcome == "no_violation"
 }
 
+/// Produce a bounded experimental contract from the fixed S14 scalar rule set.
+pub fn generate(
+    report: &Report,
+    policy: &crate::policy::AdvisoryPolicy,
+) -> Result<(Candidate, Vec<ManifestRow>)> {
+    policy.validate()?;
+    let policy_json = serde_json::to_string(
+        &serde_json::json!({"catalog_version":"s14-1","policy":policy,"request":report.request,"schema_version":3,"validator_version":"s14-1"}),
+    )?;
+    let signature = format!("sha256:{}", digest(policy_json.as_bytes()));
+    let defs = [
+        ("advisory", "short_title", "title_min", "title"),
+        ("advisory", "long_title", "title_max", "title"),
+        (
+            "advisory",
+            "short_description",
+            "description_min",
+            "description",
+        ),
+        (
+            "advisory",
+            "long_description",
+            "description_max",
+            "description",
+        ),
+        ("advisory", "little_content", "words_min", "words"),
+        ("advisory", "too_many_links", "links_max", "links"),
+        ("policy_violation", "noindex", "require_indexable", "robots"),
+        (
+            "policy_violation",
+            "http_redirect",
+            "forbid_redirects",
+            "status",
+        ),
+    ];
+    let mut contract = Candidate {
+        policy_canonical_json: policy_json,
+        policy_digest: signature.clone(),
+        records: vec![],
+        coverage: vec![],
+    };
+    let mut manifest = Vec::new();
+    for (category, rule, key, field) in defs {
+        let mut coverage = Coverage {
+            category: category.into(),
+            rule_id: rule.into(),
+            candidates: report.pages.len(),
+            emitted: 0,
+            omitted: 0,
+            eligibility_counts: BTreeMap::new(),
+            attempt_counts: BTreeMap::new(),
+            outcomes: BTreeMap::new(),
+            unknown_reasons: BTreeMap::new(),
+        };
+        let expected = format!("/policy/{key}");
+        let mut ids = Vec::new();
+        for (i, page) in report.pages.iter().enumerate() {
+            let entity = contract::entity_id(&page.url, page.is_resource);
+            ids.push(entity.clone());
+            let in_scope = url::Url::parse(&page.url).is_ok_and(|u| report.request.in_scope(&u));
+            let unavailable = page.blocked_by_robots
+                || page.error.is_some()
+                || page.status.is_none()
+                || page.extraction_truncated;
+            let applicable = in_scope
+                && !page.is_resource
+                && (rule == "http_redirect" || page.html())
+                && (rule != "noindex" || policy.require_indexable)
+                && (rule != "http_redirect" || policy.forbid_redirects)
+                && !(matches!(rule, "short_title" | "long_title") && page.title.is_empty())
+                && !(matches!(rule, "short_description" | "long_description")
+                    && page.description.is_empty());
+            let (eligibility, attempt, outcome, reason) = if unavailable {
+                (
+                    "unknown",
+                    "not_attempted",
+                    "unknown",
+                    Some("source_unavailable"),
+                )
+            } else if !applicable {
+                (
+                    "ineligible",
+                    "not_attempted",
+                    "not_applicable",
+                    Some("outside_applicability"),
+                )
+            } else {
+                let hit = match rule {
+                    "short_title" => page.title.chars().count() < policy.title_min,
+                    "long_title" => page.title.chars().count() > policy.title_max,
+                    "short_description" => {
+                        page.description.chars().count() < policy.description_min
+                    }
+                    "long_description" => page.description.chars().count() > policy.description_max,
+                    "little_content" => page.words < policy.words_min,
+                    "too_many_links" => page.links.len() > policy.links_max,
+                    "noindex" => page.noindex(),
+                    "http_redirect" => page.status.is_some_and(|s| (300..400).contains(&s)),
+                    _ => false,
+                };
+                (
+                    "eligible",
+                    "completed",
+                    if category == "advisory" {
+                        if hit {
+                            "advisory_triggered"
+                        } else {
+                            "advisory_not_triggered"
+                        }
+                    } else if hit {
+                        "violation"
+                    } else {
+                        "no_violation"
+                    },
+                    None,
+                )
+            };
+            *coverage
+                .eligibility_counts
+                .entry(eligibility.into())
+                .or_default() += 1;
+            *coverage.attempt_counts.entry(attempt.into()).or_default() += 1;
+            *coverage.outcomes.entry(outcome.into()).or_default() += 1;
+            if let Some(reason) = reason.filter(|_| outcome == "unknown") {
+                *coverage.unknown_reasons.entry(reason.into()).or_default() += 1;
+            }
+            if contract.records.len() >= 512 {
+                coverage.omitted += 1;
+                continue;
+            }
+            let mut record = Record {
+                record_id: String::new(),
+                category: category.into(),
+                rule_id: rule.into(),
+                rule_version: "s14-1".into(),
+                entity_id: entity,
+                discriminator: "self".into(),
+                eligibility: eligibility.into(),
+                attempt: attempt.into(),
+                outcome: outcome.into(),
+                actual: if attempt == "completed" {
+                    "source"
+                } else {
+                    "unavailable"
+                }
+                .into(),
+                source_locator: if attempt == "completed" {
+                    Some(format!("/pages/{i}/{field}"))
+                } else {
+                    None
+                },
+                expected: if attempt == "completed" {
+                    Some(expected.clone())
+                } else {
+                    None
+                },
+                confidence: if attempt == "completed" {
+                    "high"
+                } else {
+                    "unknown"
+                }
+                .into(),
+                interval_ref: "report.observed_at".into(),
+                policy_ref: signature.clone(),
+                reason: reason.map(str::to_owned),
+            };
+            record.record_id = record_id(&record);
+            contract.records.push(record);
+            coverage.emitted += 1;
+        }
+        manifest.push(ManifestRow {
+            category: category.into(),
+            rule_id: rule.into(),
+            rule_version: "s14-1".into(),
+            expected_pointer: Some(expected),
+            candidates: ids,
+        });
+        contract.coverage.push(coverage);
+    }
+    validate(&contract, report, &manifest)?;
+    Ok((contract, manifest))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,6 +606,39 @@ mod tests {
             }],
         };
         (c, report)
+    }
+    #[test]
+    fn producer_generates_scoped_advisories_and_unknowns() {
+        let (_, mut report) = sample();
+        report.pages[0].status = Some(200);
+        report.pages[0].content_type = "text/html".into();
+        report.pages[0].title = "short".into();
+        report.pages[0].error = None;
+        report.pages[0].blocked_by_robots = false;
+        report.pages[0].extraction_truncated = false;
+        let (candidate, manifest) =
+            generate(&report, &crate::policy::AdvisoryPolicy::default()).unwrap();
+        assert_eq!(manifest.len(), 8);
+        assert!(
+            candidate
+                .records
+                .iter()
+                .any(|r| r.rule_id == "short_title" && r.outcome == "advisory_triggered")
+        );
+        assert!(
+            candidate
+                .records
+                .iter()
+                .any(|r| r.rule_id == "noindex" && r.outcome == "not_applicable")
+        );
+        report.pages[0].extraction_truncated = true;
+        let (candidate, _) = generate(&report, &crate::policy::AdvisoryPolicy::default()).unwrap();
+        assert!(
+            candidate
+                .records
+                .iter()
+                .any(|r| r.rule_id == "short_title" && r.outcome == "unknown")
+        );
     }
     #[test]
     fn resolution_requires_same_policy_complete_coverage_and_scalar_verdict() {
