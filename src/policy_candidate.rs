@@ -21,6 +21,10 @@ pub struct Record {
     pub outcome: String,
     pub actual: String,
     pub source_locator: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_locator: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_locator: Option<String>,
     pub expected: Option<String>,
     pub confidence: String,
     pub interval_ref: String,
@@ -144,10 +148,15 @@ pub fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]
         let mut unique = HashSet::new();
         ensure!(
             row.candidates.iter().all(|id| unique.insert(id)
-                && report
-                    .pages
-                    .iter()
-                    .any(|p| contract::entity_id(&p.url, p.is_resource) == *id)),
+                && report.pages.iter().any(|p| {
+                    let entity = contract::entity_id(&p.url, p.is_resource);
+                    if *id == entity {
+                        return true;
+                    }
+                    id.strip_prefix(&(entity + "|edge:"))
+                        .and_then(|n| n.parse::<usize>().ok().filter(|i| i.to_string() == n))
+                        .is_some_and(|i| i < p.links.len())
+                })),
             "invalid candidate universe"
         );
     }
@@ -181,11 +190,58 @@ pub fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]
             .ok_or_else(|| anyhow::anyhow!("unknown rule"))?;
         ensure!(
             rule.rule_version == r.rule_version
-                && rule.candidates.contains(&r.entity_id)
+                && rule.candidates.contains(&if r.discriminator == "self" {
+                    r.entity_id.clone()
+                } else {
+                    format!("{}|{}", r.entity_id, r.discriminator)
+                })
                 && (r.attempt != "completed" || r.expected == rule.expected_pointer),
             "rule or scope mismatch"
         );
-        ensure!(r.discriminator == "self", "edge scope not implemented");
+        ensure!(
+            r.discriminator == "self"
+                || (r.category == "observation"
+                    && r.rule_id == "external_link"
+                    && r.discriminator.starts_with("edge:")),
+            "invalid edge scope"
+        );
+        if r.discriminator != "self" {
+            ensure!(r.context_locator.is_some(), "edge context required");
+            let edge = r
+                .context_locator
+                .as_ref()
+                .and_then(|p| original.pointer(p))
+                .and_then(|v| v.get("url"))
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("edge target absent"))?;
+            if r.outcome == "observed" {
+                let target = r
+                    .target_locator
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("target provenance required"))?;
+                let parts: Vec<_> = target.split('/').collect();
+                ensure!(
+                    parts.len() == 4
+                        && parts[0].is_empty()
+                        && parts[1] == "pages"
+                        && parts[3] == "status",
+                    "target pointer"
+                );
+                let n: usize = parts[2].parse()?;
+                ensure!(
+                    parts[2] == n.to_string()
+                        && report.pages.get(n).is_some_and(|p| p.url == edge
+                            && p.status.is_some()
+                            && p.error.is_none()
+                            && !p.blocked_by_robots),
+                    "target mismatch"
+                );
+            } else {
+                ensure!(r.target_locator.is_none(), "unknown target provenance");
+            }
+        } else {
+            ensure!(r.target_locator.is_none(), "unexpected target provenance");
+        }
         let row = tuples
             .iter()
             .find(|t| {
@@ -221,7 +277,7 @@ pub fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]
             },
             "invalid provenance"
         );
-        if let Some(pointer) = &r.source_locator {
+        for pointer in r.source_locator.iter().chain(r.context_locator.iter()) {
             ensure!(valid_pointer(pointer), "invalid source pointer");
             let parts: Vec<_> = pointer.split('/').collect();
             ensure!(
@@ -242,7 +298,7 @@ pub fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]
             ensure!(
                 r.discriminator == "self"
                     || (parts.len() >= 5
-                        && parts[3] == "relationships"
+                        && parts[3] == "links"
                         && r.discriminator == format!("edge:{}", parts[4])),
                 "relationship discriminator"
             );
@@ -561,6 +617,8 @@ pub fn generate(
                 } else {
                     None
                 },
+                context_locator: None,
+                target_locator: None,
                 expected: if attempt == "completed" {
                     expected.clone()
                 } else {
@@ -592,6 +650,118 @@ pub fn generate(
             && *coverage.outcomes.get("unknown").unwrap_or(&0) == 0;
         contract.coverage.push(coverage);
     }
+    // Each outgoing external link is a separate report-local edge, including unfetched targets.
+    let mut edge_manifest = ManifestRow {
+        category: "observation".into(),
+        rule_id: "external_link".into(),
+        rule_version: "s14-1".into(),
+        expected_pointer: None,
+        candidates: vec![],
+    };
+    let mut edge_coverage = Coverage {
+        category: "observation".into(),
+        rule_id: "external_link".into(),
+        candidates: 0,
+        emitted: 0,
+        omitted: 0,
+        complete: false,
+        eligibility_counts: BTreeMap::new(),
+        attempt_counts: BTreeMap::new(),
+        outcomes: BTreeMap::new(),
+        unknown_reasons: BTreeMap::new(),
+    };
+    for (page_index, page) in report.pages.iter().enumerate() {
+        if page.is_resource
+            || !url::Url::parse(&page.url).is_ok_and(|u| report.request.in_scope(&u))
+        {
+            continue;
+        }
+        for (link_index, link) in page.links.iter().enumerate() {
+            if !url::Url::parse(&link.url).is_ok_and(|u| !report.request.in_scope(&u)) {
+                continue;
+            }
+            let entity = contract::entity_id(&page.url, page.is_resource);
+            let discriminator = format!("edge:{link_index}");
+            edge_manifest
+                .candidates
+                .push(format!("{entity}|{discriminator}"));
+            edge_coverage.candidates += 1;
+            let target_index = report.pages.iter().position(|p| p.url == link.url);
+            let target = target_index.and_then(|i| report.pages.get(i));
+            let available = !page.extraction_truncated
+                && !page.blocked_by_robots
+                && page.error.is_none()
+                && target.is_some_and(|p| {
+                    p.status.is_some() && p.error.is_none() && !p.blocked_by_robots
+                });
+            let (eligibility, attempt, outcome, reason) = if available {
+                ("eligible", "completed", "observed", None)
+            } else {
+                (
+                    "unknown",
+                    "not_attempted",
+                    "unknown",
+                    Some("external_target_unavailable"),
+                )
+            };
+            *edge_coverage
+                .eligibility_counts
+                .entry(eligibility.into())
+                .or_default() += 1;
+            *edge_coverage
+                .attempt_counts
+                .entry(attempt.into())
+                .or_default() += 1;
+            *edge_coverage.outcomes.entry(outcome.into()).or_default() += 1;
+            if let Some(reason) = reason {
+                *edge_coverage
+                    .unknown_reasons
+                    .entry(reason.into())
+                    .or_default() += 1;
+            }
+            if contract.records.len() >= 512 {
+                edge_coverage.omitted += 1;
+                continue;
+            }
+            let pointer = format!("/pages/{page_index}/links/{link_index}");
+            let mut record = Record {
+                record_id: String::new(),
+                category: "observation".into(),
+                rule_id: "external_link".into(),
+                rule_version: "s14-1".into(),
+                entity_id: entity,
+                discriminator,
+                eligibility: eligibility.into(),
+                attempt: attempt.into(),
+                outcome: outcome.into(),
+                actual: if available { "source" } else { "unavailable" }.into(),
+                source_locator: if available {
+                    Some(pointer.clone())
+                } else {
+                    None
+                },
+                context_locator: Some(pointer),
+                target_locator: if available {
+                    target_index.map(|i| format!("/pages/{i}/status"))
+                } else {
+                    None
+                },
+                expected: None,
+                confidence: if available { "high" } else { "unknown" }.into(),
+                interval_ref: "report.observed_at".into(),
+                policy_ref: signature.clone(),
+                reason: reason.map(str::to_owned),
+            };
+            record.record_id = record_id(&record);
+            contract.records.push(record);
+            edge_coverage.emitted += 1;
+        }
+    }
+    edge_coverage.complete = report.coverage_complete
+        && edge_coverage.omitted == 0
+        && *edge_coverage.outcomes.get("unknown").unwrap_or(&0) == 0;
+    contract.coverage.push(edge_coverage);
+    manifest.push(edge_manifest);
     validate(&contract, report, &manifest)?;
     Ok((contract, manifest))
 }
@@ -630,6 +800,8 @@ mod tests {
             outcome: "advisory_triggered".into(),
             actual: "source".into(),
             source_locator: Some("/pages/0/title".into()),
+            context_locator: None,
+            target_locator: None,
             expected: Some("/threshold".into()),
             confidence: "high".into(),
             interval_ref: "report.observed_at".into(),
@@ -667,7 +839,7 @@ mod tests {
         report.pages[0].extraction_truncated = false;
         let (candidate, manifest) =
             generate(&report, &crate::policy::AdvisoryPolicy::default()).unwrap();
-        assert_eq!(manifest.len(), 12);
+        assert_eq!(manifest.len(), 13);
         assert!(
             validate_generated(
                 &candidate,
@@ -707,6 +879,63 @@ mod tests {
                 .records
                 .iter()
                 .any(|r| r.rule_id == "short_title" && r.outcome == "unknown")
+        );
+    }
+    #[test]
+    fn external_edges_preserve_missing_and_available_targets_without_crossrun_resolution() {
+        let (_, mut report) = sample();
+        let page = &mut report.pages[0];
+        page.status = Some(200);
+        page.content_type = "text/html".into();
+        page.error = None;
+        page.blocked_by_robots = false;
+        page.extraction_truncated = false;
+        page.links = vec![
+            crate::model::Link {
+                url: "https://outside.example/a".into(),
+                ..Default::default()
+            },
+            crate::model::Link {
+                url: "https://outside.example/b".into(),
+                ..Default::default()
+            },
+        ];
+        report.pages.push(crate::model::Page {
+            url: "https://outside.example/b".into(),
+            status: Some(200),
+            ..Default::default()
+        });
+        let policy = crate::policy::AdvisoryPolicy::default();
+        let (candidate, manifest) = generate(&report, &policy).unwrap();
+        let edges: Vec<_> = candidate
+            .records
+            .iter()
+            .filter(|r| r.rule_id == "external_link")
+            .collect();
+        assert_eq!(edges.len(), 2);
+        assert_eq!(edges[0].outcome, "unknown");
+        assert_eq!(
+            edges[0].context_locator.as_deref(),
+            Some("/pages/0/links/0")
+        );
+        assert_eq!(edges[1].outcome, "observed");
+        assert_ne!(edges[0].record_id, edges[1].record_id);
+        let mut bad = candidate.clone();
+        let edge = bad
+            .records
+            .iter_mut()
+            .find(|r| r.rule_id == "external_link")
+            .unwrap();
+        edge.context_locator = Some("/pages/0/links/1".into());
+        assert!(validate(&bad, &report, &manifest).is_err());
+        report.pages[0].extraction_truncated = true;
+        let (partial, _) = generate(&report, &policy).unwrap();
+        assert!(
+            partial
+                .records
+                .iter()
+                .filter(|r| r.rule_id == "external_link")
+                .all(|r| r.outcome == "unknown")
         );
     }
     #[test]
@@ -852,6 +1081,21 @@ mod tests {
         report.pages[0].error = None;
         report.pages[0].blocked_by_robots = false;
         report.pages[0].extraction_truncated = false;
+        report.pages[0].links = vec![
+            crate::model::Link {
+                url: "https://outside.example/missing".into(),
+                ..Default::default()
+            },
+            crate::model::Link {
+                url: "https://outside.example/available".into(),
+                ..Default::default()
+            },
+        ];
+        report.pages.push(crate::model::Page {
+            url: "https://outside.example/available".into(),
+            status: Some(200),
+            ..Default::default()
+        });
         crate::policy::apply_with_evidence(&mut report, &crate::policy::AdvisoryPolicy::default())
             .unwrap();
         std::fs::write(
