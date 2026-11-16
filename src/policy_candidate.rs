@@ -556,12 +556,14 @@ fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]) ->
 pub fn resolves(
     previous: &Record,
     current: &Record,
+    scope_equal: bool,
     policy_equal: bool,
     manifest_equal: bool,
     crawl_complete: bool,
     relevant_coverage_complete: bool,
 ) -> bool {
-    policy_equal
+    scope_equal
+        && policy_equal
         && manifest_equal
         && crawl_complete
         && relevant_coverage_complete
@@ -1165,7 +1167,7 @@ mod tests {
             .iter()
             .find(|r| r.rule_id == "external_link" && r.discriminator == "edge:1")
             .unwrap();
-        assert!(!resolves(old_edge, new_edge, true, true, true, true));
+        assert!(!resolves(old_edge, new_edge, true, true, true, true, true));
         report.pages[0].extraction_truncated = true;
         let (partial, _) = generate(&report, &policy).unwrap();
         assert!(
@@ -1427,15 +1429,16 @@ mod tests {
         old.record_id = record_id(&old);
         let mut new = old.clone();
         new.outcome = "no_violation".into();
-        assert!(resolves(&old, &new, true, true, true, true));
-        assert!(!resolves(&old, &new, false, true, true, true));
-        assert!(!resolves(&old, &new, true, true, true, false));
+        assert!(resolves(&old, &new, true, true, true, true, true));
+        assert!(!resolves(&old, &new, false, true, true, true, true));
+        assert!(!resolves(&old, &new, true, false, true, true, true));
+        assert!(!resolves(&old, &new, true, true, true, true, false));
         new.outcome = "unknown".into();
-        assert!(!resolves(&old, &new, true, true, true, true));
+        assert!(!resolves(&old, &new, true, true, true, true, true));
         new.outcome = "no_violation".into();
         old.discriminator = "edge:0".into();
         new.discriminator = "edge:0".into();
-        assert!(!resolves(&old, &new, true, true, true, true));
+        assert!(!resolves(&old, &new, true, true, true, true, true));
     }
     #[test]
     fn lifecycle_fixture_is_conservative() {
@@ -1455,6 +1458,7 @@ mod tests {
                 resolves(
                     &previous,
                     &current,
+                    case["scope_equal"].as_bool().unwrap(),
                     case["policy_equal"].as_bool().unwrap(),
                     case["manifest_equal"].as_bool().unwrap(),
                     case["crawl_complete"].as_bool().unwrap(),
