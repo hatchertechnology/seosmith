@@ -35,8 +35,19 @@ pub struct Coverage {
     pub candidates: usize,
     pub emitted: usize,
     pub omitted: usize,
+    pub eligibility_counts: BTreeMap<String, usize>,
+    pub attempt_counts: BTreeMap<String, usize>,
     pub outcomes: BTreeMap<String, usize>,
     pub unknown_reasons: BTreeMap<String, usize>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestRow {
+    pub category: String,
+    pub rule_id: String,
+    pub rule_version: String,
+    pub expected_pointer: Option<String>,
+    pub candidates: Vec<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -79,7 +90,8 @@ pub fn record_id(r: &Record) -> String {
     )
 }
 /// Validates bounded, local candidate vectors against their original report. Not suitable for accepting external bytes.
-pub fn validate(candidate: &Candidate, report: &Report, manifest: &[(&str, &str)]) -> Result<()> {
+#[allow(clippy::items_after_statements)]
+pub fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]) -> Result<()> {
     ensure!(
         candidate.policy_canonical_json.len() <= 65536,
         "policy limit"
@@ -115,6 +127,29 @@ pub fn validate(candidate: &Candidate, report: &Report, manifest: &[(&str, &str)
             && candidate.records.len() <= 512,
         "count limit"
     );
+    ensure!(
+        serde_json::to_vec(manifest)?.len() <= 262_144,
+        "manifest byte limit"
+    );
+    let mut manifest_keys = HashSet::new();
+    for row in manifest {
+        ensure!(
+            component(&row.category)
+                && component(&row.rule_id)
+                && component(&row.rule_version)
+                && manifest_keys.insert((&row.category, &row.rule_id)),
+            "invalid manifest"
+        );
+        let mut unique = HashSet::new();
+        ensure!(
+            row.candidates.iter().all(|id| unique.insert(id)
+                && report
+                    .pages
+                    .iter()
+                    .any(|p| contract::entity_id(&p.url, p.is_resource) == *id)),
+            "invalid candidate universe"
+        );
+    }
     let matrix: serde_json::Value =
         serde_json::from_str(include_str!("../fixtures/policies/state-matrix.json"))?;
     let tuples = matrix["tuples"]
@@ -138,10 +173,17 @@ pub fn validate(candidate: &Candidate, report: &Report, manifest: &[(&str, &str)
             r.record_id == record_id(r) && ids.insert(&r.record_id),
             "record identity"
         );
+        let rule = manifest
+            .iter()
+            .find(|m| m.category == r.category && m.rule_id == r.rule_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown rule"))?;
         ensure!(
-            manifest.contains(&(r.category.as_str(), r.rule_id.as_str())),
-            "unknown rule"
+            rule.rule_version == r.rule_version
+                && rule.candidates.contains(&r.entity_id)
+                && r.expected == rule.expected_pointer,
+            "rule or scope mismatch"
         );
+        ensure!(r.discriminator == "self", "edge scope not implemented");
         let row = tuples
             .iter()
             .find(|t| {
@@ -212,7 +254,9 @@ pub fn validate(candidate: &Candidate, report: &Report, manifest: &[(&str, &str)
     let mut covered = HashSet::new();
     for c in &candidate.coverage {
         ensure!(
-            manifest.contains(&(c.category.as_str(), c.rule_id.as_str()))
+            manifest.iter().any(|m| m.category == c.category
+                && m.rule_id == c.rule_id
+                && m.candidates.len() == c.candidates)
                 && covered.insert((&c.category, &c.rule_id)),
             "coverage manifest"
         );
@@ -225,6 +269,36 @@ pub fn validate(candidate: &Candidate, report: &Report, manifest: &[(&str, &str)
             selected.len() == c.emitted && c.emitted.checked_add(c.omitted) == Some(c.candidates),
             "coverage total"
         );
+        for (counts, allowed) in [
+            (
+                &c.eligibility_counts,
+                &["eligible", "ineligible", "unknown"][..],
+            ),
+            (
+                &c.attempt_counts,
+                &["completed", "not_attempted", "unknown"][..],
+            ),
+        ] {
+            ensure!(
+                counts.keys().all(|k| allowed.contains(&k.as_str()))
+                    && counts.values().try_fold(0usize, |a, b| a.checked_add(*b))
+                        == Some(c.candidates),
+                "coverage states"
+            );
+        }
+        for (counts, get) in [(&c.eligibility_counts, 0), (&c.attempt_counts, 1)] {
+            let mut seen = BTreeMap::<&str, usize>::new();
+            for r in &selected {
+                *seen
+                    .entry(if get == 0 { &r.eligibility } else { &r.attempt })
+                    .or_default() += 1;
+            }
+            ensure!(
+                seen.iter()
+                    .all(|(k, v)| counts.get(*k).is_some_and(|n| n >= v)),
+                "coverage state reconciliation"
+            );
+        }
         ensure!(
             c.outcomes
                 .values()
@@ -243,6 +317,34 @@ pub fn validate(candidate: &Candidate, report: &Report, manifest: &[(&str, &str)
             "outcome reconciliation"
         );
         ensure!(
+            c.outcomes.keys().all(|outcome| tuples
+                .iter()
+                .any(|t| t["category"] == c.category && t["outcome"] == *outcome)),
+            "unknown outcome"
+        );
+        ensure!(
+            c.unknown_reasons.len() <= 64
+                && c.unknown_reasons
+                    .keys()
+                    .all(|reason| !reason.is_empty() && reason.len() <= 256),
+            "reason bounds"
+        );
+        let mut emitted_reasons = BTreeMap::<&str, usize>::new();
+        for record in &selected {
+            if record.outcome == "unknown"
+                && let Some(reason) = &record.reason
+            {
+                *emitted_reasons.entry(reason).or_default() += 1;
+            }
+        }
+        ensure!(
+            emitted_reasons.iter().all(|(key, count)| c
+                .unknown_reasons
+                .get(*key)
+                .is_some_and(|total| total >= count)),
+            "unknown reason reconciliation"
+        );
+        ensure!(
             c.unknown_reasons
                 .values()
                 .try_fold(0usize, |a, b| a.checked_add(*b))
@@ -251,6 +353,32 @@ pub fn validate(candidate: &Candidate, report: &Report, manifest: &[(&str, &str)
         );
     }
     Ok(())
+}
+
+/// Conservative lifecycle rule: an edge or incomplete evaluation never resolves a violation.
+#[allow(clippy::fn_params_excessive_bools)]
+pub fn resolves(
+    previous: &Record,
+    current: &Record,
+    policy_equal: bool,
+    manifest_equal: bool,
+    crawl_complete: bool,
+    relevant_coverage_complete: bool,
+) -> bool {
+    policy_equal
+        && manifest_equal
+        && crawl_complete
+        && relevant_coverage_complete
+        && previous.category == "policy_violation"
+        && previous.outcome == "violation"
+        && previous.discriminator == "self"
+        && current.discriminator == "self"
+        && previous.record_id == current.record_id
+        && previous.rule_version == current.rule_version
+        && current.category == "policy_violation"
+        && current.eligibility == "eligible"
+        && current.attempt == "completed"
+        && current.outcome == "no_violation"
 }
 
 #[cfg(test)]
@@ -288,11 +416,32 @@ mod tests {
                 candidates: 1,
                 emitted: 1,
                 omitted: 0,
+                eligibility_counts: BTreeMap::from([("eligible".into(), 1)]),
+                attempt_counts: BTreeMap::from([("completed".into(), 1)]),
                 outcomes: BTreeMap::from([("advisory_triggered".into(), 1)]),
                 unknown_reasons: BTreeMap::new(),
             }],
         };
         (c, report)
+    }
+    #[test]
+    fn resolution_requires_same_policy_complete_coverage_and_scalar_verdict() {
+        let (c, _) = sample();
+        let mut old = c.records[0].clone();
+        old.category = "policy_violation".into();
+        old.outcome = "violation".into();
+        old.record_id = record_id(&old);
+        let mut new = old.clone();
+        new.outcome = "no_violation".into();
+        assert!(resolves(&old, &new, true, true, true, true));
+        assert!(!resolves(&old, &new, false, true, true, true));
+        assert!(!resolves(&old, &new, true, true, true, false));
+        new.outcome = "unknown".into();
+        assert!(!resolves(&old, &new, true, true, true, true));
+        new.outcome = "no_violation".into();
+        old.discriminator = "edge:0".into();
+        new.discriminator = "edge:0".into();
+        assert!(!resolves(&old, &new, true, true, true, true));
     }
     #[test]
     fn canonical_unicode_and_safe_integer_vectors() {
@@ -324,8 +473,20 @@ mod tests {
     #[test]
     fn validates_candidate_and_rejects_inconsistent_states() {
         let (c, r) = sample();
-        let manifest = [("advisory", "short_title")];
+        let manifest = [ManifestRow {
+            category: "advisory".into(),
+            rule_id: "short_title".into(),
+            rule_version: "s14-1".into(),
+            expected_pointer: Some("/threshold".into()),
+            candidates: vec![c.records[0].entity_id.clone()],
+        }];
         assert!(validate(&c, &r, &manifest).is_ok());
+        let mut wrong_scope = manifest.clone();
+        wrong_scope[0].candidates.clear();
+        assert!(validate(&c, &r, &wrong_scope).is_err());
+        let mut wrong_policy = manifest.clone();
+        wrong_policy[0].expected_pointer = Some("/other".into());
+        assert!(validate(&c, &r, &wrong_policy).is_err());
         let mut invalid = c.clone();
         invalid.records[0].expected = Some("/missing".into());
         assert!(validate(&invalid, &r, &manifest).is_err());
