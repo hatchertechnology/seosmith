@@ -28,7 +28,7 @@ binary, unknown command, timeout, bad JSON or incompatible version means
 unavailable/unsupported; never substitute `crawl` for an absent status operation.
 `--version` alone is insufficient (this additive adapter retains package 0.2.0).
 Capabilities do not access the database or network. Version fields describe this
-compiled producer, not every retained report. The global `--evidence-contract-v2` flag or `SEOSMITH_EVIDENCE_CONTRACT_V2=true` is rejected for operations, including capabilities. On the standalone adapter branch legacy commands accept this flag but still emit v1; actual legacy v2 production requires the separate S01 implementation. Advanced evidence-v2, authorized
+compiled producer, not every retained report. The global `--evidence-contract-v2` flag or `SEOSMITH_EVIDENCE_CONTRACT_V2=true` is rejected for operations, including capabilities. Legacy crawl and serve use the S01 evidence-v2 gate; operations remain v1-only. Advanced evidence-v2, authorized
 staging profiles (S13) and baseline CI (S16) are advertised false. Future support
 must be explicitly detected after those contracts ship; do not invent flags.
 
