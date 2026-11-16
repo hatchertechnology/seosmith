@@ -88,7 +88,7 @@ export function validateS14(raw) {
   validateRaw(c.policy_canonical_json); fail(nbytes(c.policy_canonical_json)<=65536 && canonical(p)===c.policy_canonical_json && sha(c.policy_canonical_json)===c.policy_digest,'policy canonical/digest')
   fail(typeof report.coverage_complete==='boolean','coverage_complete type');
   const safeUint = n => Number.isSafeInteger(n) && n>=0;
-  const absoluteHttp = value => { try { const u=new URL(value); return typeof value==='string' && ['http:','https:'].includes(u.protocol) && !!u.hostname && !u.username && !u.password } catch { return false } };
+  const absoluteHttp = value => { try { const u=new URL(value); return typeof value==='string' && /^https?:\/\//i.test(value) && ['http:','https:'].includes(u.protocol) && !!u.hostname && !u.username && !u.password } catch { return false } };
   fail(Array.isArray(report.pages),'page array');
   for(const page of report.pages) {
     fail(absoluteHttp(page.url) && typeof page.is_resource==='boolean' && typeof page.blocked_by_robots==='boolean' && typeof page.extraction_truncated==='boolean' && (page.error===null || typeof page.error==='string') && (page.status===null || (safeUint(page.status) && page.status<=65535)) && safeUint(page.words) && typeof page.content_type==='string' && typeof page.title==='string' && typeof page.description==='string' && typeof page.robots==='string' && Array.isArray(page.links) && Array.isArray(page.alternates), 'page field types');
