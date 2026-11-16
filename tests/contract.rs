@@ -254,3 +254,30 @@ async fn persisted_v2_retry_retains_exact_bytes_and_digest() {
     store.retry(&id, 1).await.unwrap();
     assert_eq!(store.report(&id).await.unwrap().unwrap(), bytes);
 }
+
+#[test]
+fn nesting_limit_counts_containers_not_string_characters() {
+    let mut r = report(false);
+    r.pages[0]
+        .structured_data
+        .push(seosmith::model::StructuredData {
+            format: "json_ld".into(),
+            data: Some(serde_json::json!({"text": "[[[\"{\\"})),
+            error: None,
+        });
+    assert!(contract::enable_v2(&mut r).is_ok());
+    let mut r = report(false);
+    let mut value = serde_json::json!(null);
+    for _ in 0..64 {
+        value = serde_json::json!([value]);
+    }
+    r.pages[0]
+        .structured_data
+        .push(seosmith::model::StructuredData {
+            format: "json_ld".into(),
+            data: Some(value),
+            error: None,
+        });
+    assert!(contract::enable_v2(&mut r).is_err());
+    assert_eq!(r.schema_version, 1);
+}

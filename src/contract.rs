@@ -130,19 +130,50 @@ pub fn entity_id(url: &str, resource: bool) -> String {
 
 /// Counting serialization prevents allocating another potentially large report string.
 pub fn serialized_size(value: &impl Serialize) -> Result<usize> {
-    struct Counter(usize);
+    #[derive(Default)]
+    struct Counter {
+        size: usize,
+        depth: usize,
+        string: bool,
+        escaped: bool,
+    }
     impl std::io::Write for Counter {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0 += bytes.len();
+            for &b in bytes {
+                if self.string {
+                    if self.escaped {
+                        self.escaped = false;
+                    } else if b == b'\\' {
+                        self.escaped = true;
+                    } else if b == b'"' {
+                        self.string = false;
+                    }
+                } else {
+                    match b {
+                        b'"' => self.string = true,
+                        b'{' | b'[' => {
+                            self.depth += 1;
+                            if self.depth > 64 {
+                                return Err(std::io::Error::other(
+                                    "report exceeds JSON nesting limit",
+                                ));
+                            }
+                        }
+                        b'}' | b']' => self.depth -= 1,
+                        _ => {}
+                    }
+                }
+            }
+            self.size += bytes.len();
             Ok(bytes.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
     }
-    let mut counter = Counter(0);
+    let mut counter = Counter::default();
     serde_json::to_writer(&mut counter, value)?;
-    Ok(counter.0)
+    Ok(counter.size)
 }
 
 /// Called once, before persistence; never during delivery/retry.
