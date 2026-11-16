@@ -205,7 +205,9 @@ pub fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]
                     && r.discriminator.starts_with("edge:")),
             "invalid edge scope"
         );
-        if r.discriminator != "self" {
+        if r.discriminator == "self" {
+            ensure!(r.target_locator.is_none(), "unexpected target provenance");
+        } else {
             ensure!(r.context_locator.is_some(), "edge context required");
             let edge = r
                 .context_locator
@@ -239,8 +241,6 @@ pub fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]
             } else {
                 ensure!(r.target_locator.is_none(), "unknown target provenance");
             }
-        } else {
-            ensure!(r.target_locator.is_none(), "unexpected target provenance");
         }
         let row = tuples
             .iter()
@@ -758,6 +758,18 @@ pub fn generate(
         }
     }
     edge_coverage.complete = report.coverage_complete
+        && report
+            .pages
+            .iter()
+            .filter(|p| {
+                !p.is_resource && url::Url::parse(&p.url).is_ok_and(|u| report.request.in_scope(&u))
+            })
+            .all(|p| {
+                !p.extraction_truncated
+                    && !p.blocked_by_robots
+                    && p.error.is_none()
+                    && p.status.is_some()
+            })
         && edge_coverage.omitted == 0
         && *edge_coverage.outcomes.get("unknown").unwrap_or(&0) == 0;
     contract.coverage.push(edge_coverage);
