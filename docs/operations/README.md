@@ -146,8 +146,7 @@ versions, `outcome`, `stop_reason`, `coverage_complete`, and any future evidence
 contract fields; unknown schema/evaluation states must remain unknown.
 
 Local retention is operator-managed; no pruning or HTP delivery worker runs here.
-`delivery_state=disabled` is independent of crawl completion. Do not launch
-`serve` on adapter state to attempt delivery. Optional HTP delivery requires an
+`delivery_state=disabled` is independent of crawl completion. Legacy `crawl` and `serve` reject adapter-owned databases before recovery; do not use them to attempt delivery. Optional HTP delivery requires an
 HTP-authorized orchestration path and separate scoped ingestion credentials.
 Delivery failure must remain distinct from local crawl completion.
 

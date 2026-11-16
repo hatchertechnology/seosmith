@@ -148,7 +148,9 @@ fn standalone_start_retry_and_changed_identity_are_safe() {
     assert_eq!(report_value["coverage_complete"], false);
     r.max_pages = 2;
     std::fs::write(&path, serde_json::to_vec(&r).unwrap()).unwrap();
-    assert!(!cli(&db, &args).status.success());
+    let conflict = cli(&db, &args);
+    assert!(!conflict.status.success());
+    assert!(String::from_utf8_lossy(&conflict.stderr).contains("request_id_conflict"));
     r.request_id = Uuid::new_v4();
     std::fs::write(&path, serde_json::to_vec(&r).unwrap()).unwrap();
     assert!(!cli(&db, &args).status.success());
@@ -320,4 +322,87 @@ fn legacy_rules_accepts_evidence_flag_while_operations_rejects_it() {
         String::from_utf8_lossy(&output.stderr)
     );
     let _: Value = serde_json::from_slice(&output.stdout).unwrap();
+}
+
+#[tokio::test]
+async fn legacy_crawl_and_serve_refuse_adapter_state_before_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("run.sqlite");
+    let (store, r) = fixture(dir.path(), "running").await;
+    let request_path = dir.path().join("request.json");
+    let other = request();
+    std::fs::write(&request_path, serde_json::to_vec(&other).unwrap()).unwrap();
+    for args in [
+        vec!["crawl", "--request", request_path.to_str().unwrap()],
+        vec!["serve"],
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_seosmith"))
+            .args(["--database", db.to_str().unwrap()])
+            .args(args)
+            .env_remove("SEOSMITH_API_TOKEN")
+            .env_remove("HTP_INGEST_URL")
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        assert!(
+            String::from_utf8_lossy(&out.stderr)
+                .contains("operations_database_legacy_command_refused")
+        );
+        assert_eq!(
+            store
+                .view(&r.request_id.to_string())
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            "running"
+        );
+        assert!(
+            store
+                .view(&other.request_id.to_string())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn legacy_crawl_still_operates_on_new_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("legacy.sqlite");
+    let path = dir.path().join("request.json");
+    std::fs::write(&path, serde_json::to_vec(&request()).unwrap()).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_seosmith"))
+        .args([
+            "--database",
+            db.to_str().unwrap(),
+            "crawl",
+            "--request",
+            path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["schema_version"], 1);
+}
+
+#[test]
+fn legacy_serve_still_reaches_its_normal_configuration_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("legacy.sqlite");
+    let out = Command::new(env!("CARGO_BIN_EXE_seosmith"))
+        .args(["--database", db.to_str().unwrap(), "serve"])
+        .env_remove("SEOSMITH_API_TOKEN")
+        .env_remove("SEOSMITH_API_TOKEN_FILE")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("SEOSMITH_API_TOKEN"));
+    assert!(db.exists());
 }

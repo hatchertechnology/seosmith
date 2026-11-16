@@ -107,6 +107,7 @@ async fn main() -> Result<()> {
         .open(format!("{}.lock", cli.database))?;
     fs2::FileExt::try_lock_exclusive(&lock)
         .context("another Seosmith process owns this database")?;
+    seosmith::operations::reject_legacy_database(std::path::Path::new(&cli.database)).await?;
     let store = Store::open(&cli.database).await?;
     store.recover().await?;
     match cli.command {

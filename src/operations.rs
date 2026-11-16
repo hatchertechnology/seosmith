@@ -111,6 +111,29 @@ fn worker_active(database: &Path) -> Result<Option<bool>> {
     }
 }
 
+/// Refuse legacy workers before opening or recovering an adapter-owned database.
+pub async fn reject_legacy_database(database: &Path) -> Result<()> {
+    if !database.exists() {
+        return Ok(());
+    }
+    let options = SqliteConnectOptions::new()
+        .filename(database)
+        .read_only(true)
+        .create_if_missing(false)
+        .busy_timeout(Duration::from_secs(2));
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await?;
+    let marked: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='operations_scope')",
+    )
+    .fetch_one(&pool)
+    .await?;
+    ensure!(!marked, "operations_database_legacy_command_refused");
+    Ok(())
+}
+
 async fn existing(database: &Path, write: bool) -> Result<Store> {
     ensure!(database.is_file(), "run_not_found");
     let options = SqliteConnectOptions::new()
@@ -231,11 +254,17 @@ async fn start(database: &Path, request_path: &Path) -> Result<Value> {
         .fetch_one(&store.0)
         .await?;
     ensure!(other == 0, "database_scope_conflict_use_fresh_database");
-    if !store.submit(&r).await? {
+    let present: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM jobs WHERE id=?)")
+        .bind(r.request_id.to_string())
+        .fetch_one(&store.0)
+        .await?;
+    if present {
+        verify_retry(&store, &r).await?;
         // Dropping only our own guard makes interrupted work truthfully unknown.
         drop(lock);
         return status(&store, database, r.request_id, false).await;
     }
+    store.submit(&r).await?;
     let job = store.claim().await?.context("run_not_queued")?;
     ensure!(job.request_id == r.request_id, "database_scope_conflict");
     run_bounded(&store, &r, crawler::crawl(&store, &r)).await?;
