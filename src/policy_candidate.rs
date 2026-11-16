@@ -454,7 +454,11 @@ fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]) ->
         );
         ensure!(
             (c.omitted == 0 && c.omission_reason.is_none())
-                || (c.omitted > 0 && c.omission_reason.as_deref() == Some("record_limit")),
+                || (c.omitted > 0
+                    && matches!(
+                        c.omission_reason.as_deref(),
+                        Some("record_limit" | "observation_limit")
+                    )),
             "omission reason"
         );
         ensure!(
@@ -733,7 +737,14 @@ pub fn generate(
                         >= 128)
             {
                 coverage.omitted += 1;
-                coverage.omission_reason = Some("record_limit".into());
+                coverage.omission_reason = Some(
+                    if contract.records.len() >= 512 {
+                        "record_limit"
+                    } else {
+                        "observation_limit"
+                    }
+                    .into(),
+                );
                 continue;
             }
             let mut record = Record {
@@ -898,7 +909,14 @@ pub fn generate(
                     >= 128
             {
                 edge_coverage.omitted += 1;
-                edge_coverage.omission_reason = Some("record_limit".into());
+                edge_coverage.omission_reason = Some(
+                    if contract.records.len() >= 512 {
+                        "record_limit"
+                    } else {
+                        "observation_limit"
+                    }
+                    .into(),
+                );
                 continue;
             }
             let pointer = format!("/pages/{page_index}/links/{link_index}");
