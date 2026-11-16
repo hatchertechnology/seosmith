@@ -1,0 +1,17 @@
+{
+  "status": "candidate-not-frozen",
+  "vectors": [
+    {
+      "canonical_utf8": "{\"\":1,\"😀\":2}",
+      "sha256": "sha256:871954531859c7572c6279f90eb83a594ddc3a289e8bdc28d2a84ffb8c1a1703"
+    },
+    {
+      "canonical_utf8": "{\"é\":\"é\",\"é\":\"é\"}",
+      "sha256": "sha256:2b8599359615227d4bffe298511d6d9520d9cf98c59adf9541e6e023e41ffe7b"
+    },
+    {
+      "canonical_utf8": "{\"quote\":\"\\\"\\\\/\\n\\u0001  \"}",
+      "sha256": "sha256:8e2b69df4e099a8f57e1d04594a7cdbf641e42a9eb19f8caddbe432aaecdea6b"
+    }
+  ]
+}

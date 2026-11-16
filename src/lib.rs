@@ -12,3 +12,5 @@ pub mod extract;
 pub mod contract;
 
 pub mod policy;
+
+pub mod policy_candidate;
