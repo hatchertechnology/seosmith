@@ -641,6 +641,34 @@ mod tests {
         );
     }
     #[test]
+    fn generated_policy_identity_and_explicit_intent() {
+        let (_, mut report) = sample();
+        let page = &mut report.pages[0];
+        page.status = Some(200);
+        page.content_type = "text/html".into();
+        page.error = None;
+        page.blocked_by_robots = false;
+        page.extraction_truncated = false;
+        page.robots = "noindex".into();
+        let mut policy = crate::policy::AdvisoryPolicy::default();
+        let (before, _) = generate(&report, &policy).unwrap();
+        assert!(
+            before
+                .records
+                .iter()
+                .any(|r| r.rule_id == "noindex" && r.outcome == "not_applicable")
+        );
+        policy.require_indexable = true;
+        let (after, _) = generate(&report, &policy).unwrap();
+        assert_ne!(before.policy_digest, after.policy_digest);
+        assert!(
+            after
+                .records
+                .iter()
+                .any(|r| r.rule_id == "noindex" && r.outcome == "violation")
+        );
+    }
+    #[test]
     fn resolution_requires_same_policy_complete_coverage_and_scalar_verdict() {
         let (c, _) = sample();
         let mut old = c.records[0].clone();
