@@ -1,0 +1,9 @@
+[
+  {"name":"unique escaped strings and braces","schema":2,"suffix":"{\"nested\":{\"a\":\"[{}]\",\"b\":1}}","accepted":true},
+  {"name":"duplicate nested key","schema":2,"suffix":"{\"nested\":{\"a\":1,\"a\":2}}","accepted":false},
+  {"name":"duplicate decoded key","schema":2,"suffix":"{\"nested\":{\"a\":1,\"\\u0061\":2}}","accepted":false},
+  {"name":"legacy duplicate key preserved","schema":1,"suffix":"{\"nested\":{\"a\":1,\"a\":2}}","accepted":true},
+  {"name":"depth 64","schema":2,"depth":64,"accepted":true},
+  {"name":"depth 65","schema":2,"depth":65,"accepted":false},
+  {"name":"legacy depth 65","schema":1,"depth":65,"accepted":true}
+]
