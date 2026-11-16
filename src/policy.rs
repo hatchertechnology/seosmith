@@ -136,7 +136,11 @@ fn apply(report: &mut Report, policy: &AdvisoryPolicy) {
         }
         if matches!(
             f.rule.as_str(),
-            "fetch_error" | "http_client_error" | "http_server_error"
+            "fetch_error"
+                | "http_client_error"
+                | "http_server_error"
+                | "robots_blocked"
+                | "sitemap_blocked"
         ) && url::Url::parse(&f.url).is_ok_and(|u| !report.request.in_scope(&u))
         {
             return false;
@@ -317,6 +321,49 @@ mod tests {
         assert_ne!(
             finding.key,
             digest(format!("short_title\n{}", finding.url).as_bytes())
+        );
+    }
+    #[test]
+    fn blocked_external_target_is_unknown_without_legacy_warning() {
+        let mut report = report();
+        report.request.check_external_links = true;
+        let target = crate::model::Page {
+            url: "https://outside.example/blocked".into(),
+            is_resource: true,
+            blocked_by_robots: true,
+            ..Default::default()
+        };
+        report.pages.push(target);
+        report.findings = crate::audit::analyze(&report.pages, &report.request.url);
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.url == "https://outside.example/blocked" && f.rule == "robots_blocked")
+        );
+        apply_with_evidence(&mut report, &AdvisoryPolicy::default()).unwrap();
+        assert!(
+            !report
+                .findings
+                .iter()
+                .any(|f| f.url == "https://outside.example/blocked"
+                    && (f.rule == "robots_blocked" || f.rule == "sitemap_blocked"))
+        );
+        let candidate = report
+            .policy_guidance
+            .as_ref()
+            .unwrap()
+            .candidate
+            .as_ref()
+            .unwrap();
+        let entity = crate::contract::entity_id("https://outside.example/blocked", true);
+        assert!(
+            candidate
+                .records
+                .iter()
+                .any(|r| r.rule_id == "external_target"
+                    && r.entity_id == entity
+                    && r.outcome == "unknown")
         );
     }
     #[test]

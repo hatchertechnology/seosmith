@@ -1076,6 +1076,11 @@ mod tests {
                 .all(|row| guidance.iter().any(|g| g.rule == row.rule_id))
         );
         assert!(
+            guidance
+                .iter()
+                .all(|entry| manifest.iter().any(|row| row.rule_id == entry.rule))
+        );
+        assert!(
             validate_generated(
                 &candidate,
                 &manifest,
@@ -1252,6 +1257,23 @@ mod tests {
         let report: Report =
             serde_json::from_str(include_str!("../fixtures/policies/v3-local-complete.json"))
                 .unwrap();
+        assert!(report.request.check_external_links);
+        assert!(
+            report
+                .findings
+                .iter()
+                .all(|f| report.pages.iter().any(|p| p.url == f.url))
+        );
+        assert!(
+            report
+                .pages
+                .iter()
+                .filter(|p| !url::Url::parse(&p.url)
+                    .unwrap()
+                    .host_str()
+                    .eq(&report.request.url.host_str()))
+                .all(|p| p.is_resource)
+        );
         let guidance = report.policy_guidance.as_ref().unwrap();
         let candidate = guidance.candidate.as_ref().unwrap();
         let manifest = guidance.manifest.as_ref().unwrap();
@@ -1382,6 +1404,7 @@ mod tests {
     fn export_candidate_fixture() {
         let (_, mut report) = sample();
         report.pages.retain(|page| page.status.is_some());
+        report.request.check_external_links = true;
         report.pages[0].status = Some(200);
         report.pages[0].content_type = "text/html".into();
         report.pages[0].title = "short".into();
@@ -1401,8 +1424,10 @@ mod tests {
         report.pages.push(crate::model::Page {
             url: "https://outside.example/available".into(),
             status: Some(200),
+            is_resource: true,
             ..Default::default()
         });
+        report.findings = crate::audit::analyze(&report.pages, &report.request.url);
         crate::policy::apply_with_evidence(&mut report, &crate::policy::AdvisoryPolicy::default())
             .unwrap();
         std::fs::write(
