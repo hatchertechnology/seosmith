@@ -78,7 +78,15 @@ def controlled_csv(data):
 
 
 def scrapy_fixture(data):
-    items = json.loads(data)
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate JSON object key")
+            result[key] = value
+        return result
+
+    items = json.loads(data, object_pairs_hook=unique_object)
     if not isinstance(items, list):
         raise ValueError("invalid Scrapy feed")
     rows = {}
@@ -89,7 +97,7 @@ def scrapy_fixture(data):
     def lookup(url, rule):
         item = rows.get(url)
         field = {"missing_title": "title", "missing_description": "description"}.get(rule)
-        if not item or not field or item.get("file_status") != 200 or field not in item:
+        if not item or not field or type(item.get("file_status")) is not int or item["file_status"] != 200 or field not in item:
             return None
         value = item[field]
         if value is not None and not isinstance(value, str):
