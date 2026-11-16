@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 struct Site(Mutex<Vec<String>>, bool);
 impl Transport for Site {
+    #[allow(clippy::unused_async_trait_impl)] // Mirrors the production transport interface.
     async fn get(&self, url: &Url) -> anyhow::Result<Response> {
         self.0.lock().unwrap().push(url.to_string());
         let labeled = self.1;
