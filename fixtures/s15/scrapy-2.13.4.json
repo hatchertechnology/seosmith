@@ -1,0 +1,6 @@
+[
+{"profile": "s15-scrapy-fixture-v1", "url": "https://fixture.invalid/missing-title", "file_status": 200, "title": null, "description": "A present description."},
+{"profile": "s15-scrapy-fixture-v1", "url": "https://fixture.invalid/has-title", "file_status": 200, "title": "A sufficiently descriptive title", "description": null},
+{"profile": "s15-scrapy-fixture-v1", "url": "https://fixture.invalid/missing-description", "file_status": 200, "title": "A sufficiently descriptive title", "description": null},
+{"profile": "s15-scrapy-fixture-v1", "url": "https://fixture.invalid/has-description", "file_status": 200, "title": "A sufficiently descriptive title", "description": "A present description."}
+]
