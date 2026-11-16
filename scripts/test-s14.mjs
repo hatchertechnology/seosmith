@@ -1,9 +1,10 @@
 import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import assert from 'node:assert/strict'
-import { validateS14, scopeHash, manifestHash, resolvesS14 } from './check-s14.mjs'
+import { validateS14, scopeHash, manifestHash, resolvesS14, canonicalSeed } from './check-s14.mjs'
 const read = p => readFileSync(new URL('../fixtures/policies/'+p,import.meta.url),'utf8')
 const raw=read('v3-local-complete.json'), base=JSON.parse(raw)
+for (const vector of JSON.parse(read('seed-url-vectors.json'))) assert.equal(canonicalSeed(vector.value),vector.accepted,vector.value)
 for(const name of ['v3-local-complete.json','v3-local-partial.json','v3-local-omitted.json','v3-local-intent.json','v3-local-blocked.json','v3-local-reordered.json','v3-local-resolved.json']) assert.equal(validateS14(read(name)),true,name)
 const intent=JSON.parse(read('v3-local-intent.json'));
 assert.ok(intent.policy_guidance.candidate.records.some(r=>r.rule_id==='noindex'&&r.category==='policy_violation'&&r.outcome==='violation'));
@@ -57,12 +58,38 @@ const mutations={
  missing_coverage:r=>r.policy_guidance.candidate.coverage.pop(),
  unsafe_integer:r=>r.policy_guidance.config.title_min=9007199254740992,
  policy_limit:r=>r.policy_guidance.candidate.policy_canonical_json='x'.repeat(65537),
+ schema1:r=>r.schema_version=1,
+ schema2:r=>r.schema_version=2,
+ unknown_self_target:r=>{const a=r.policy_guidance.candidate.records.find(x=>x.discriminator==='self'&&x.outcome==='unknown'); if(a) a.target_locator='/pages/0/status'; else {const x=r.policy_guidance.candidate.records[0];x.target_locator='/pages/0/status'}},
+ coverage_string:r=>r.coverage_complete='false',
+ external_string:r=>r.request.check_external_links='true',
+ status_string:r=>r.pages[0].status='200',
+ words_string:r=>r.pages[0].words='0',
+ pages_string:r=>r.request.max_pages='500',
+ self_target:r=>r.policy_guidance.candidate.records[0].target_locator='/pages/0/status',
+ self_context:r=>r.policy_guidance.candidate.records[0].context_locator='/pages/0/title',
+ bad_external_url:r=>r.pages[0].links[0].url='not a url',
+ negative_reason:r=>r.policy_guidance.candidate.coverage[0].unknown_reasons={a:-1,b:1},
+ zero_reason:r=>r.policy_guidance.candidate.coverage[0].unknown_reasons={extra:0},
+ seed_uppercase:r=>r.request.url='https://EXAMPLE.com/',
+ seed_no_slash:r=>r.request.url='https://example.com',
+ uuid_uppercase:r=>r.request.website_id='AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA',
+
 }
 for(const t of JSON.parse(read('negative-cases.json'))) {
  let text
  if(t.mutation==='duplicate_key') text=raw.replace('{"schema_version":3','{"schema_version":3,"schema_version":3')
  else if(t.mutation==='depth_65') text=raw.replace(/}$/,',"deep":'+ '['.repeat(65)+'0'+']'.repeat(65)+'}')
- else {const r=structuredClone(base);mutations[t.mutation](r);text=JSON.stringify(r)}
+ else {const r=structuredClone(base);mutations[t.mutation](r);
+   if(['external_string','pages_string','seed_uppercase','seed_no_slash'].includes(t.mutation)) {
+     const c=r.policy_guidance.candidate,p=JSON.parse(c.policy_canonical_json);
+     p.collection.seed_url=r.request.url; p.collection.max_pages=r.request.max_pages; p.collection.check_external_links=r.request.check_external_links;
+     c.policy_canonical_json=JSON.stringify(p); c.policy_digest='sha256:'+createHash('sha256').update(c.policy_canonical_json).digest('hex');
+     for(const record of c.records) record.policy_ref=c.policy_digest;
+   }
+   text=JSON.stringify(r)}
  assert.throws(()=>validateS14(text),undefined,t.name)
 }
+const malformedResolution=JSON.parse(read('v3-local-resolved.json')); malformedResolution.coverage_complete='false';
+assert.equal(resolvesS14(read('v3-local-intent.json'),JSON.stringify(malformedResolution),noindex.record_id),false);
 console.log('Validated 7 positive reports, '+vectors.length+' policy vectors, and '+JSON.parse(read('negative-cases.json')).length+' negative cases')

@@ -70,6 +70,9 @@ const defs = [
 const matrix=JSON.parse(readFileSync(new URL('../fixtures/policies/state-matrix.json',import.meta.url))).tuples
 function pointer(obj,p) { fail(typeof p==='string' && nbytes(p)<=1024 && /^(\/(?:[^~]|~[01])*)+$/.test(p),'pointer'); let value=obj; for(const part of p.slice(1).split('/')) { const k=part.replace(/~1/g,'/').replace(/~0/g,'~'); fail(value!==null && typeof value==='object' && Object.hasOwn(value,k),'missing pointer'); value=value[k] } return value }
 function entity(page) { return sha(`seosmith-entity-v1\n${page.is_resource?'resource':'page'}\n${page.url}`) }
+export function canonicalSeed(value) {
+  try { const u=new URL(value); return typeof value==='string' && ['http:','https:'].includes(u.protocol) && !!u.hostname && !u.username && !u.password && !u.port && !u.search && !u.hash && u.href===value; } catch { return false; }
+}
 export function validateS14(raw) {
   fail(nbytes(raw)<=16*1024*1024,'report limit'); validateRaw(raw); const report=JSON.parse(raw)
   const stringsBounded = v => typeof v==='string' ? nbytes(v)<=16384 : Array.isArray(v) ? v.every(stringsBounded) : v && typeof v==='object' ? Object.entries(v).every(([k,x])=>nbytes(k)<=16384 && stringsBounded(x)) : true;
@@ -83,7 +86,17 @@ export function validateS14(raw) {
   for(const key of policyKeys) fail(['forbid_redirects','require_indexable'].includes(key)?typeof g.config[key]==='boolean':Number.isSafeInteger(g.config[key]) && g.config[key]>=0 && g.config[key]<=1000000,'policy types');
   fail(g.config.title_min<=g.config.title_max && g.config.description_min<=g.config.description_max,'policy ranges');
   validateRaw(c.policy_canonical_json); fail(nbytes(c.policy_canonical_json)<=65536 && canonical(p)===c.policy_canonical_json && sha(c.policy_canonical_json)===c.policy_digest,'policy canonical/digest')
+  fail(typeof report.coverage_complete==='boolean','coverage_complete type');
+  const safeUint = n => Number.isSafeInteger(n) && n>=0;
+  const absoluteHttp = value => { try { const u=new URL(value); return typeof value==='string' && ['http:','https:'].includes(u.protocol) && !!u.hostname && !u.username && !u.password } catch { return false } };
+  fail(Array.isArray(report.pages),'page array');
+  for(const page of report.pages) {
+    fail(absoluteHttp(page.url) && typeof page.is_resource==='boolean' && typeof page.blocked_by_robots==='boolean' && typeof page.extraction_truncated==='boolean' && (page.error===null || typeof page.error==='string') && (page.status===null || (safeUint(page.status) && page.status<=65535)) && safeUint(page.words) && typeof page.content_type==='string' && typeof page.title==='string' && typeof page.description==='string' && typeof page.robots==='string' && Array.isArray(page.links) && Array.isArray(page.alternates), 'page field types');
+    for(const link of page.links) fail(link && absoluteHttp(link.url),'invalid link URL');
+    for(const alternate of page.alternates) fail(alternate && typeof alternate.language==='string' && absoluteHttp(alternate.url),'invalid alternate');
+  }
   const req=report.request; fail(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(req.website_id) && Number.isSafeInteger(req.binding_generation) && req.binding_generation>=0,'scope fields');
+  fail(canonicalSeed(req.url) && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(req.request_id) && typeof req.check_external_links==='boolean' && ['max_pages','max_resources','max_duration_seconds','delay_ms'].every(k=>safeUint(req[k])) && req.max_pages>=1 && req.max_pages<=20000 && req.max_resources<=20000 && req.max_duration_seconds>=10 && req.max_duration_seconds<=7200 && req.delay_ms>=1000 && req.delay_ms<=60000,'request field types or canonical seed');
   const expected={catalog_version:'s14-1',collection:{check_external_links:req.check_external_links,max_pages:req.max_pages,max_resources:req.max_resources,seed_url:req.url},policy:g.config,schema_version:3,validator_version:'s14-1'}
   fail(canonical(expected)===c.policy_canonical_json,'policy/request')
   fail(c.scope_digest===scopeHash(req) && c.manifest_digest===manifestHash(m),'scope/manifest digest')
@@ -130,6 +143,7 @@ export function validateS14(raw) {
     if(tuple.expected==='policy_source') { fail(r.expected===row.expected_pointer,'expected rule'); pointer(p,r.expected) } else fail(r.expected===null,'expected null')
     fail((r.category==='observation' && r.attempt==='completed')===Object.hasOwn(r,'observed_fact'),'observation fact presence');
     if(r.discriminator!=='self') fail(typeof r.context_locator==='string','edge context required');
+    else fail(r.context_locator==null && r.target_locator==null,'self provenance forbidden');
     const loc=r.source_locator??r.context_locator; if(loc) { const match=/^\/pages\/(0|[1-9]\d*)\/(.+)$/.exec(loc); fail(match,'source'); const page=report.pages[Number(match[1])]; fail(page && entity(page)===r.entity_id,'source entity'); pointer(report,loc); if(r.discriminator==='self') { fail(match[2]===d[3],'source field');
     if(r.attempt==='completed' && r.category!=='observation') {
       const threshold=p.policy[d[2]]; let triggered;
@@ -149,7 +163,7 @@ export function validateS14(raw) {
     fail(Object.keys(O).every(k=>allowed.includes(k)),'outcome states');
     const eligible=(E.eligible??0), ineligible=(E.ineligible??0), unknown=(E.unknown??0);
     fail((A.completed??0)===eligible && (A.not_attempted??0)===ineligible+unknown && (A.unknown??0)===0 && (O.unknown??0)===unknown && (O.not_applicable??0)===ineligible && Object.entries(O).filter(([k])=>!['unknown','not_applicable'].includes(k)).reduce((n,[,v])=>n+v,0)===eligible,'coverage tuple reconciliation');
-    fail(Object.keys(cRow.unknown_reasons).length<=64 && Object.keys(cRow.unknown_reasons).every(k=>nbytes(k)>0 && nbytes(k)<=256) && Object.values(cRow.unknown_reasons).reduce((a,b)=>a+b,0)===(cRow.outcomes.unknown??0),'unknown sum');
+    fail(Object.keys(cRow.unknown_reasons).length<=64 && Object.keys(cRow.unknown_reasons).every(k=>nbytes(k)>0 && nbytes(k)<=256) && Object.values(cRow.unknown_reasons).every(v=>Number.isSafeInteger(v)&&v>0) && Object.values(cRow.unknown_reasons).reduce((a,b)=>a+b,0)===(cRow.outcomes.unknown??0),'unknown sum');
     for(const reason of new Set(emitted.filter(r=>r.outcome==='unknown').map(r=>r.reason))) fail((cRow.unknown_reasons[reason]??0)>=emitted.filter(r=>r.outcome==='unknown'&&r.reason===reason).length,'unknown emitted reason'); fail(!cRow.complete || (report.coverage_complete && cRow.omitted===0 && !(cRow.outcomes.unknown>0) && (!['external_link','external_target'].includes(cRow.rule_id) || req.check_external_links) && (cRow.rule_id!=='external_link' || report.pages.filter(p=>!p.is_resource&&inScope(p.url)).every(p=>!p.extraction_truncated&&!p.blocked_by_robots&&!p.error&&p.status!==null))),'complete') }
   return true
 }

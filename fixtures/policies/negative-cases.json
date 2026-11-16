@@ -1,17 +1,126 @@
 [
- {"name":"invalid tuple","mutation":"tuple"},
- {"name":"missing manifest row","mutation":"missing_manifest"},
- {"name":"wrong rule expected pointer","mutation":"wrong_policy_pointer"},
- {"name":"source belongs to another page","mutation":"wrong_source"},
- {"name":"wrong policy digest","mutation":"digest"},
- {"name":"wrong scope digest","mutation":"scope"},
- {"name":"wrong manifest digest","mutation":"manifest_digest"},
- {"name":"coverage tuple impossible","mutation":"coverage_tuple"},
- {"name":"coverage omitted residual","mutation":"omitted"},
- {"name":"duplicate record","mutation":"duplicate_record"},
- {"name":"missing coverage row","mutation":"missing_coverage"},
- {"name":"unsafe integer","mutation":"unsafe_integer"},
- {"name":"overlong policy","mutation":"policy_limit"},
- {"name":"duplicate decoded key","mutation":"duplicate_key"},
- {"name":"depth 65","mutation":"depth_65"}
+  {
+    "name": "invalid tuple",
+    "mutation": "tuple"
+  },
+  {
+    "name": "missing manifest row",
+    "mutation": "missing_manifest"
+  },
+  {
+    "name": "wrong rule expected pointer",
+    "mutation": "wrong_policy_pointer"
+  },
+  {
+    "name": "source belongs to another page",
+    "mutation": "wrong_source"
+  },
+  {
+    "name": "wrong policy digest",
+    "mutation": "digest"
+  },
+  {
+    "name": "wrong scope digest",
+    "mutation": "scope"
+  },
+  {
+    "name": "wrong manifest digest",
+    "mutation": "manifest_digest"
+  },
+  {
+    "name": "coverage tuple impossible",
+    "mutation": "coverage_tuple"
+  },
+  {
+    "name": "coverage omitted residual",
+    "mutation": "omitted"
+  },
+  {
+    "name": "duplicate record",
+    "mutation": "duplicate_record"
+  },
+  {
+    "name": "missing coverage row",
+    "mutation": "missing_coverage"
+  },
+  {
+    "name": "unsafe integer",
+    "mutation": "unsafe_integer"
+  },
+  {
+    "name": "overlong policy",
+    "mutation": "policy_limit"
+  },
+  {
+    "name": "duplicate decoded key",
+    "mutation": "duplicate_key"
+  },
+  {
+    "name": "depth 65",
+    "mutation": "depth_65"
+  },
+  {
+    "name": "coverage complete must be boolean",
+    "mutation": "coverage_string"
+  },
+  {
+    "name": "external check must be boolean",
+    "mutation": "external_string"
+  },
+  {
+    "name": "page status must be integer",
+    "mutation": "status_string"
+  },
+  {
+    "name": "page words must be integer",
+    "mutation": "words_string"
+  },
+  {
+    "name": "page limit must be integer",
+    "mutation": "pages_string"
+  },
+  {
+    "name": "self target locator forbidden",
+    "mutation": "self_target"
+  },
+  {
+    "name": "self context locator forbidden",
+    "mutation": "self_context"
+  },
+  {
+    "name": "malformed external URL forbidden",
+    "mutation": "bad_external_url"
+  },
+  {
+    "name": "negative reason count forbidden",
+    "mutation": "negative_reason"
+  },
+  {
+    "name": "zero reason count forbidden",
+    "mutation": "zero_reason"
+  },
+  {
+    "name": "uppercase seed URL noncanonical",
+    "mutation": "seed_uppercase"
+  },
+  {
+    "name": "seed missing trailing slash noncanonical",
+    "mutation": "seed_no_slash"
+  },
+  {
+    "name": "uppercase website UUID noncanonical",
+    "mutation": "uuid_uppercase"
+  },
+  {
+    "name": "schema1 candidate rejected",
+    "mutation": "schema1"
+  },
+  {
+    "name": "schema2 candidate rejected",
+    "mutation": "schema2"
+  },
+  {
+    "name": "unknown self target forbidden",
+    "mutation": "unknown_self_target"
+  }
 ]

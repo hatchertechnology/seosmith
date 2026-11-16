@@ -358,7 +358,10 @@ fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]) ->
             "invalid edge scope"
         );
         if r.discriminator == "self" {
-            ensure!(r.target_locator.is_none(), "unexpected target provenance");
+            ensure!(
+                r.target_locator.is_none() && r.context_locator.is_none(),
+                "unexpected self provenance"
+            );
         } else {
             ensure!(r.context_locator.is_some(), "edge context required");
             let edge = r
@@ -578,6 +581,10 @@ fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]) ->
             "unknown outcome"
         );
         ensure!(
+            c.unknown_reasons.values().all(|count| *count > 0),
+            "zero unknown reason count"
+        );
+        ensure!(
             c.unknown_reasons.len() <= 64
                 && c.unknown_reasons
                     .keys()
@@ -645,6 +652,9 @@ pub fn resolves(
     previous: &Record,
     current: &Record,
 ) -> bool {
+    if previous_report.schema_version != 3 || current_report.schema_version != 3 {
+        return false;
+    }
     let Some(old_guidance) = previous_report.policy_guidance.as_ref() else {
         return false;
     };
@@ -695,6 +705,7 @@ pub fn generate(
     report: &Report,
     policy: &crate::policy::AdvisoryPolicy,
 ) -> Result<(Candidate, Vec<ManifestRow>)> {
+    report.request.validate()?;
     policy.validate()?;
     ensure!(
         report.request.binding_generation <= 9_007_199_254_740_991,
@@ -1714,6 +1725,16 @@ mod tests {
             .find(|r| r.category == "policy_violation" && r.rule_id == "noindex")
             .unwrap();
         assert!(resolves(&old, &new, old_record, new_record));
+        let mut wrong_schema = old.clone();
+        wrong_schema.schema_version = 1;
+        assert!(!resolves(&wrong_schema, &new, old_record, new_record));
+        wrong_schema.schema_version = 2;
+        assert!(!resolves(&wrong_schema, &new, old_record, new_record));
+        let mut wrong_schema = new.clone();
+        wrong_schema.schema_version = 1;
+        assert!(!resolves(&old, &wrong_schema, old_record, new_record));
+        wrong_schema.schema_version = 2;
+        assert!(!resolves(&old, &wrong_schema, old_record, new_record));
         let mut wrong_scope = new.clone();
         wrong_scope.request.binding_generation += 1;
         assert!(!resolves(&old, &wrong_scope, old_record, new_record));
@@ -1753,6 +1774,13 @@ mod tests {
             scope_digest(&changed),
             vectors["scope"]["different_binding"].as_str().unwrap()
         );
+        let mut other_site = report.clone();
+        other_site.request.website_id =
+            uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000999").unwrap();
+        assert_eq!(
+            scope_digest(&other_site),
+            vectors["scope"]["different_website"].as_str().unwrap()
+        );
         let mut manifest = report
             .policy_guidance
             .as_ref()
@@ -1770,6 +1798,37 @@ mod tests {
             vectors["manifest"]["different_population"]
                 .as_str()
                 .unwrap()
+        );
+        let baseline = report
+            .policy_guidance
+            .as_ref()
+            .unwrap()
+            .manifest
+            .clone()
+            .unwrap();
+        let mut different_expected = baseline.clone();
+        different_expected[0].expected_pointer = Some("/policy/title_max".into());
+        assert_eq!(
+            manifest_digest(&different_expected),
+            vectors["manifest"]["different_expected"].as_str().unwrap()
+        );
+        let mut removed = baseline.clone();
+        removed.pop();
+        assert_eq!(
+            manifest_digest(&removed),
+            vectors["manifest"]["removed_rule"].as_str().unwrap()
+        );
+        let mut added = baseline;
+        added.push(ManifestRow {
+            category: "observation".into(),
+            rule_id: "added".into(),
+            rule_version: "s14-1".into(),
+            expected_pointer: None,
+            candidates: vec![],
+        });
+        assert_eq!(
+            manifest_digest(&added),
+            vectors["manifest"]["added_rule"].as_str().unwrap()
         );
         manifest[0].rule_version = "s14-2".into();
         assert_eq!(
