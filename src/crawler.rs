@@ -404,5 +404,6 @@ async fn report(
         coverage_complete: complete,
         pages,
         findings,
+        evidence_contract: None,
     })
 }

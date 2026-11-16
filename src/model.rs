@@ -211,6 +211,8 @@ pub struct Report {
     pub coverage_complete: bool,
     pub pages: Vec<Page>,
     pub findings: Vec<Finding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_contract: Option<crate::contract::EvidenceContract>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DeliveryEnvelope {
