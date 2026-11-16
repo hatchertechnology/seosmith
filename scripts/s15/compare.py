@@ -77,6 +77,27 @@ def controlled_csv(data):
     return lambda url, rule: rows.get((url, rule)), mapped, unmapped, {"format": "controlled-csv-v1"}
 
 
+def scrapy_fixture(data):
+    items = json.loads(data)
+    if not isinstance(items, list):
+        raise ValueError("invalid Scrapy feed")
+    rows = {}
+    for item in items:
+        if not isinstance(item, dict) or item.get("profile") != "s15-scrapy-fixture-v1" or not isinstance(item.get("url"), str) or item["url"] in rows:
+            raise ValueError("invalid or duplicate fixture item")
+        rows[item["url"]] = item
+    def lookup(url, rule):
+        item = rows.get(url)
+        field = {"missing_title": "title", "missing_description": "description"}.get(rule)
+        if not item or not field or item.get("file_status") != 200 or field not in item:
+            return None
+        value = item[field]
+        if value is not None and not isinstance(value, str):
+            return None
+        return not bool(value and value.strip())
+    return lookup, items, [], {"profile": "s15-scrapy-fixture-v1", "producer": "custom Scrapy fixture profile; version not verified by feed"}
+
+
 def compare(labels, lookup):
     families, rules, cases, seen = {}, {}, [], set()
     if not isinstance(labels, dict) or not isinstance(labels.get("cases"), list):
@@ -105,14 +126,14 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--labels", required=True)
     parser.add_argument("--export", required=True)
-    parser.add_argument("--adapter", required=True, choices=("seosmith-v1", "controlled-csv-v1"))
+    parser.add_argument("--adapter", required=True, choices=("seosmith-v1", "controlled-csv-v1", "scrapy-fixture-v1"))
     parser.add_argument("--assume-unmodified-v1", action="store_true", help="assert the controlled producer uses the unmodified known v1 ruleset")
     args = parser.parse_args()
     labels_bytes, source = read_bounded(args.labels), read_bounded(args.export)
     labels = json.loads(labels_bytes)
     if type(labels.get("version")) is not int or labels.get("version") != 1 or labels.get("semantics") != "s15-metadata-1":
         raise ValueError("unsupported labels")
-    lookup, mapped, unmapped, provenance = seosmith(source, args.assume_unmodified_v1) if args.adapter == "seosmith-v1" else controlled_csv(source)
+    lookup, mapped, unmapped, provenance = seosmith(source, args.assume_unmodified_v1) if args.adapter == "seosmith-v1" else scrapy_fixture(source) if args.adapter == "scrapy-fixture-v1" else controlled_csv(source)
     provenance["unmodified_v1_asserted"] = args.assume_unmodified_v1 if args.adapter == "seosmith-v1" else None
     families, rules, cases = compare(labels, lookup)
     print(json.dumps({"version": 1, "label_sha256": hashlib.sha256(labels_bytes).hexdigest(), "source_sha256": hashlib.sha256(source).hexdigest(), "adapter": args.adapter, "provenance": provenance, "families": families, "rules": rules, "cases": cases, "mapped_evidence": mapped, "unmapped": unmapped}, indent=2))
