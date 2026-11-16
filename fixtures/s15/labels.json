@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "semantics": "s15-metadata-1",
+  "cases": [
+    {"url":"https://fixture.invalid/missing-title", "html":"missing-title.html", "family":"metadata", "rule":"missing_title", "expected":true},
+    {"url":"https://fixture.invalid/has-title", "html":"has-title.html", "family":"metadata", "rule":"missing_title", "expected":false},
+    {"url":"https://fixture.invalid/missing-description", "html":"missing-description.html", "family":"metadata", "rule":"missing_description", "expected":true},
+    {"url":"https://fixture.invalid/has-description", "html":"has-description.html", "family":"metadata", "rule":"missing_description", "expected":false},
+    {"url":"https://fixture.invalid/unavailable", "html":null, "family":"metadata", "rule":"missing_title", "expected":null}
+  ]
+}
