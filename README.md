@@ -75,6 +75,15 @@ Use a fresh request UUID for each intended audit. Reusing the UUID with differen
 configuration fails. The CLI prints a report and persists it; automatic delivery
 runs in `serve` mode. Use a dedicated database for isolated CLI audits.
 
+## Agent operations (Wave 0)
+
+The new `seosmith operations capabilities` command detects bounded standalone
+start/status/cancel/report/export support. These operations require no HTP
+credentials and use an isolated absolute database path per immutable request.
+See the [operation contract and executable invocation guidance](docs/operations/README.md)
+and [adapter decision](docs/operations/DESIGN.md). Older binaries do not have
+these commands; hosts must detect capabilities first.
+
 ## Service configuration
 
 ```text

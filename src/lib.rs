@@ -10,3 +10,4 @@ pub mod store;
 pub mod extract;
 
 pub mod contract;
+pub mod operations;
