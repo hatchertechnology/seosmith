@@ -35,6 +35,7 @@ pub struct Coverage {
     pub candidates: usize,
     pub emitted: usize,
     pub omitted: usize,
+    pub complete: bool,
     pub eligibility_counts: BTreeMap<String, usize>,
     pub attempt_counts: BTreeMap<String, usize>,
     pub outcomes: BTreeMap<String, usize>,
@@ -266,6 +267,13 @@ pub fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]
             .filter(|r| r.category == c.category && r.rule_id == c.rule_id)
             .collect();
         ensure!(
+            !c.complete
+                || (report.coverage_complete
+                    && c.omitted == 0
+                    && *c.outcomes.get("unknown").unwrap_or(&0) == 0),
+            "invalid completeness"
+        );
+        ensure!(
             selected.len() == c.emitted && c.emitted.checked_add(c.omitted) == Some(c.candidates),
             "coverage total"
         );
@@ -408,6 +416,10 @@ pub fn generate(
         ),
         ("advisory", "little_content", "words_min", "words"),
         ("advisory", "too_many_links", "links_max", "links"),
+        ("observation", "noindex", "", "robots"),
+        ("observation", "http_redirect", "", "status"),
+        ("observation", "missing_hreflang_xdefault", "", "alternates"),
+        ("observation", "external_target", "", "status"),
         ("policy_violation", "noindex", "require_indexable", "robots"),
         (
             "policy_violation",
@@ -427,24 +439,39 @@ pub fn generate(
         let mut coverage = Coverage {
             category: category.into(),
             rule_id: rule.into(),
-            candidates: report.pages.len(),
+            candidates: 0,
             emitted: 0,
             omitted: 0,
+            complete: false,
             eligibility_counts: BTreeMap::new(),
             attempt_counts: BTreeMap::new(),
             outcomes: BTreeMap::new(),
             unknown_reasons: BTreeMap::new(),
         };
-        let expected = format!("/policy/{key}");
+        let expected = if category == "observation" {
+            None
+        } else {
+            Some(format!("/policy/{key}"))
+        };
         let mut ids = Vec::new();
         for (i, page) in report.pages.iter().enumerate() {
+            let in_scope = url::Url::parse(&page.url).is_ok_and(|u| report.request.in_scope(&u));
+            if category == "observation"
+                && ((rule == "external_target" && in_scope)
+                    || (rule != "external_target" && (!in_scope || page.is_resource)))
+            {
+                continue;
+            }
+            coverage.candidates += 1;
             let entity = contract::entity_id(&page.url, page.is_resource);
             ids.push(entity.clone());
-            let in_scope = url::Url::parse(&page.url).is_ok_and(|u| report.request.in_scope(&u));
             let unavailable = page.blocked_by_robots
                 || page.error.is_some()
                 || page.status.is_none()
-                || page.extraction_truncated;
+                || page.extraction_truncated
+                || (category == "observation"
+                    && matches!(rule, "noindex" | "missing_hreflang_xdefault")
+                    && !page.html());
             let applicable = in_scope
                 && !page.is_resource
                 && (rule == "http_redirect" || page.html())
@@ -460,6 +487,8 @@ pub fn generate(
                     "unknown",
                     Some("source_unavailable"),
                 )
+            } else if category == "observation" {
+                ("eligible", "completed", "observed", None)
             } else if !applicable {
                 (
                     "ineligible",
@@ -533,7 +562,7 @@ pub fn generate(
                     None
                 },
                 expected: if attempt == "completed" {
-                    Some(expected.clone())
+                    expected.clone()
                 } else {
                     None
                 },
@@ -555,13 +584,32 @@ pub fn generate(
             category: category.into(),
             rule_id: rule.into(),
             rule_version: "s14-1".into(),
-            expected_pointer: Some(expected),
+            expected_pointer: expected,
             candidates: ids,
         });
+        coverage.complete = report.coverage_complete
+            && coverage.omitted == 0
+            && *coverage.outcomes.get("unknown").unwrap_or(&0) == 0;
         contract.coverage.push(coverage);
     }
     validate(&contract, report, &manifest)?;
     Ok((contract, manifest))
+}
+
+/// Independently recompute the fixed manifest, scope and records from the report and effective policy.
+pub fn validate_generated(
+    candidate: &Candidate,
+    manifest: &[ManifestRow],
+    report: &Report,
+    policy: &crate::policy::AdvisoryPolicy,
+) -> Result<()> {
+    let (expected, expected_manifest) = generate(report, policy)?;
+    ensure!(
+        serde_json::to_value(candidate)? == serde_json::to_value(expected)?
+            && serde_json::to_value(manifest)? == serde_json::to_value(expected_manifest)?,
+        "generated contract differs from authoritative rules or request scope"
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -599,6 +647,7 @@ mod tests {
                 candidates: 1,
                 emitted: 1,
                 omitted: 0,
+                complete: false,
                 eligibility_counts: BTreeMap::from([("eligible".into(), 1)]),
                 attempt_counts: BTreeMap::from([("completed".into(), 1)]),
                 outcomes: BTreeMap::from([("advisory_triggered".into(), 1)]),
@@ -618,7 +667,27 @@ mod tests {
         report.pages[0].extraction_truncated = false;
         let (candidate, manifest) =
             generate(&report, &crate::policy::AdvisoryPolicy::default()).unwrap();
-        assert_eq!(manifest.len(), 8);
+        assert_eq!(manifest.len(), 12);
+        assert!(
+            validate_generated(
+                &candidate,
+                &manifest,
+                &report,
+                &crate::policy::AdvisoryPolicy::default()
+            )
+            .is_ok()
+        );
+        let mut wrong = manifest.clone();
+        wrong.pop();
+        assert!(
+            validate_generated(
+                &candidate,
+                &wrong,
+                &report,
+                &crate::policy::AdvisoryPolicy::default()
+            )
+            .is_err()
+        );
         assert!(
             candidate
                 .records
@@ -639,6 +708,81 @@ mod tests {
                 .iter()
                 .any(|r| r.rule_id == "short_title" && r.outcome == "unknown")
         );
+    }
+    #[test]
+    fn observations_keep_intent_and_unavailable_targets_separate() {
+        let (_, mut report) = sample();
+        let page = &mut report.pages[0];
+        page.status = Some(200);
+        page.content_type = "text/html".into();
+        page.robots = "noindex".into();
+        page.error = None;
+        page.blocked_by_robots = false;
+        page.extraction_truncated = false;
+        let mut external = crate::model::Page {
+            url: "https://outside.example/".into(),
+            ..Default::default()
+        };
+        external.error = Some("fetch_failed".into());
+        report.pages.push(external);
+        let (c, _) = generate(&report, &crate::policy::AdvisoryPolicy::default()).unwrap();
+        assert!(c.records.iter().any(|r| r.category == "observation"
+            && r.rule_id == "noindex"
+            && r.outcome == "observed"));
+        assert!(
+            c.records
+                .iter()
+                .any(|r| r.rule_id == "missing_hreflang_xdefault"
+                    && r.source_locator.as_deref() == Some("/pages/0/alternates"))
+        );
+        assert!(
+            c.records
+                .iter()
+                .any(|r| r.rule_id == "external_target" && r.outcome == "unknown")
+        );
+        report.pages[0].extraction_truncated = true;
+        let (c, _) = generate(&report, &crate::policy::AdvisoryPolicy::default()).unwrap();
+        assert!(
+            c.records
+                .iter()
+                .any(|r| r.rule_id == "missing_hreflang_xdefault" && r.outcome == "unknown")
+        );
+    }
+    #[test]
+    fn generated_interchange_fixture_and_negative_mutations() {
+        let report: Report =
+            serde_json::from_str(include_str!("../fixtures/policies/v3-local-complete.json"))
+                .unwrap();
+        let guidance = report.policy_guidance.as_ref().unwrap();
+        let candidate = guidance.candidate.as_ref().unwrap();
+        let manifest = guidance.manifest.as_ref().unwrap();
+        assert!(validate_generated(candidate, manifest, &report, &guidance.config).is_ok());
+        let mut changed = candidate.clone();
+        changed.records[0].outcome = "violation".into();
+        assert!(validate_generated(&changed, manifest, &report, &guidance.config).is_err());
+        let mut changed_manifest = manifest.clone();
+        changed_manifest.pop();
+        assert!(
+            validate_generated(candidate, &changed_manifest, &report, &guidance.config).is_err()
+        );
+        let partial: Report =
+            serde_json::from_str(include_str!("../fixtures/policies/v3-local-partial.json"))
+                .unwrap();
+        let partial_guidance = partial.policy_guidance.as_ref().unwrap();
+        let partial_candidate = partial_guidance.candidate.as_ref().unwrap();
+        assert!(
+            validate_generated(
+                partial_candidate,
+                partial_guidance.manifest.as_ref().unwrap(),
+                &partial,
+                &partial_guidance.config
+            )
+            .is_ok()
+        );
+        assert!(partial_candidate.coverage.iter().all(|row| !row.complete));
+        let mut altered = guidance.config.clone();
+        altered.title_min += 1;
+        assert!(validate_generated(candidate, manifest, &report, &altered).is_err());
     }
     #[test]
     fn generated_policy_identity_and_explicit_intent() {
@@ -667,6 +811,35 @@ mod tests {
                 .iter()
                 .any(|r| r.rule_id == "noindex" && r.outcome == "violation")
         );
+    }
+    #[test]
+    #[ignore = "regenerate local S14 interchange fixture"]
+    fn export_candidate_fixture() {
+        let (_, mut report) = sample();
+        report.pages[0].status = Some(200);
+        report.pages[0].content_type = "text/html".into();
+        report.pages[0].title = "short".into();
+        report.pages[0].error = None;
+        report.pages[0].blocked_by_robots = false;
+        report.pages[0].extraction_truncated = false;
+        crate::policy::apply_with_evidence(&mut report, &crate::policy::AdvisoryPolicy::default())
+            .unwrap();
+        std::fs::write(
+            "fixtures/policies/v3-local-complete.json",
+            serde_json::to_vec(&report).unwrap(),
+        )
+        .unwrap();
+        report.pages[0].extraction_truncated = true;
+        report.coverage_complete = false;
+        report.schema_version = 1;
+        report.policy_guidance = None;
+        crate::policy::apply_with_evidence(&mut report, &crate::policy::AdvisoryPolicy::default())
+            .unwrap();
+        std::fs::write(
+            "fixtures/policies/v3-local-partial.json",
+            serde_json::to_vec(&report).unwrap(),
+        )
+        .unwrap();
     }
     #[test]
     fn resolution_requires_same_policy_complete_coverage_and_scalar_verdict() {

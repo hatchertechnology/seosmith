@@ -1,0 +1,26 @@
+diff --git a/supabase/tests/seosmith-versioned.test.mjs b/supabase/tests/seosmith-versioned.test.mjs
+index 565a5d0..3c5502c 100644
+--- a/supabase/tests/seosmith-versioned.test.mjs
++++ b/supabase/tests/seosmith-versioned.test.mjs
+@@ -253,3 +253,21 @@ test('token-heavy schema-2 input at the 16 MiB bound stays bounded', async () =>
+     assert.ok(performance.now()-start<120000,'bounded token scan exceeded two minutes')
+   } finally { await db.close() }
+ })
++
++test('S14 generated schema 3 rejected by both paths without receipt', async () => {
++  const db=await setup()
++  try {
++    await upgrade(db)
++    const raw=await readFile(new URL('fixtures/contracts/s14-v3.json',import.meta.url),'utf8')
++    const report=JSON.parse(raw)
++    await db.query('delete from public.websites where id=$1',[site])
++    await db.query("insert into public.websites(id,owner_id,fqdn) values($1,$2,'example.com')",[report.request.website_id,owner])
++    await db.query('insert into public.seosmith_bindings(website_id,token_sha256) values($1,$2)',[report.request.website_id,hash('x'.repeat(64))])
++    await db.exec('reset role;set role anon')
++    await assert.rejects(()=>db.query('select public.ingest_seosmith_audit($1,$2,$3,$4)',['x'.repeat(64),report.request.request_id,hash(raw),raw]))
++    await identity(db)
++    await assert.rejects(()=>db.query('select public.import_seosmith_audit($1,$2)',[report.request.website_id,raw]))
++    await db.exec('reset role')
++    assert.equal((await db.query('select count(*)::int as n from public.seosmith_audits')).rows[0].n,0)
++  } finally { await db.close() }
++})
