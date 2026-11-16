@@ -306,3 +306,18 @@ async fn missing_lock_is_unknown_and_terminal_state_is_not_active() {
     assert_eq!(status["worker_active"], true);
     assert_eq!(status["execution_state"], "terminal");
 }
+
+#[test]
+fn legacy_rules_accepts_evidence_flag_while_operations_rejects_it() {
+    let output = Command::new(env!("CARGO_BIN_EXE_seosmith"))
+        .args(["--evidence-contract-v2", "rules"])
+        .env_remove("SEOSMITH_EVIDENCE_CONTRACT_V2")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _: Value = serde_json::from_slice(&output.stdout).unwrap();
+}

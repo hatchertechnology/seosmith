@@ -90,7 +90,6 @@ async fn main() -> Result<()> {
         }
         return Ok(());
     }
-    ensure!(!cli.evidence_contract_v2, "evidence_v2_unsupported");
     if matches!(cli.command, Command::Rules) {
         println!(
             "{}",
