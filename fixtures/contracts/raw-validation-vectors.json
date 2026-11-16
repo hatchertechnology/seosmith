@@ -1,9 +1,74 @@
 [
-  {"name":"unique escaped strings and braces","schema":2,"suffix":"{\"nested\":{\"a\":\"[{}]\",\"b\":1}}","accepted":true},
-  {"name":"duplicate nested key","schema":2,"suffix":"{\"nested\":{\"a\":1,\"a\":2}}","accepted":false},
-  {"name":"duplicate decoded key","schema":2,"suffix":"{\"nested\":{\"a\":1,\"\\u0061\":2}}","accepted":false},
-  {"name":"legacy duplicate key preserved","schema":1,"suffix":"{\"nested\":{\"a\":1,\"a\":2}}","accepted":true},
-  {"name":"depth 64","schema":2,"depth":64,"accepted":true},
-  {"name":"depth 65","schema":2,"depth":65,"accepted":false},
-  {"name":"legacy depth 65","schema":1,"depth":65,"accepted":true}
+  {
+    "name": "unique escaped strings and braces",
+    "schema": 2,
+    "suffix": "{\"nested\":{\"a\":\"[{}]\",\"b\":1}}",
+    "accepted": true
+  },
+  {
+    "name": "duplicate nested key",
+    "schema": 2,
+    "suffix": "{\"nested\":{\"a\":1,\"a\":2}}",
+    "accepted": false
+  },
+  {
+    "name": "duplicate decoded key",
+    "schema": 2,
+    "suffix": "{\"nested\":{\"a\":1,\"\\u0061\":2}}",
+    "accepted": false
+  },
+  {
+    "name": "legacy duplicate key preserved",
+    "schema": 1,
+    "suffix": "{\"nested\":{\"a\":1,\"a\":2}}",
+    "accepted": true
+  },
+  {
+    "name": "depth 64",
+    "schema": 2,
+    "depth": 64,
+    "accepted": true
+  },
+  {
+    "name": "depth 65",
+    "schema": 2,
+    "depth": 65,
+    "accepted": false
+  },
+  {
+    "name": "legacy depth 65",
+    "schema": 1,
+    "depth": 65,
+    "accepted": true
+  },
+  {
+    "name": "whitespace tab",
+    "raw": "{\"schema_version\"\t:\t2\t,\"x\":{\"a\":1,\"a\":2}}",
+    "accepted": false
+  },
+  {
+    "name": "whitespace lf",
+    "raw": "{\"schema_version\"\n:\n2\n,\"x\":{\"a\":1,\"a\":2}}",
+    "accepted": false
+  },
+  {
+    "name": "whitespace cr",
+    "raw": "{\"schema_version\"\r:\r2\r,\"x\":{\"a\":1,\"a\":2}}",
+    "accepted": false
+  },
+  {
+    "name": "string version before numeric",
+    "raw": "{\"schema_version\":\"1\",\"schema_version\":2,\"x\":{\"a\":1,\"a\":2}}",
+    "accepted": false
+  },
+  {
+    "name": "string version before numeric",
+    "raw": "{\"schema_version\":\"2\",\"schema_version\":2,\"x\":{\"a\":1,\"a\":2}}",
+    "accepted": false
+  },
+  {
+    "name": "string version before numeric",
+    "raw": "{\"schema_version\":\"\\u0032\",\"schema_version\":2,\"x\":{\"a\":1,\"a\":2}}",
+    "accepted": false
+  }
 ]
