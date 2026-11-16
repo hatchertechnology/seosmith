@@ -1,0 +1,7 @@
+url,rule,state
+https://fixture.invalid/missing-title,missing_title,present
+https://fixture.invalid/has-title,missing_title,absent
+https://fixture.invalid/missing-description,missing_description,present
+https://fixture.invalid/has-description,missing_description,absent
+https://fixture.invalid/unavailable,missing_title,unknown
+https://fixture.invalid/has-title,other_rule,present

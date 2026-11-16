@@ -121,15 +121,9 @@ async fn main() -> Result<()> {
             let mut report = crawler::crawl(&store, &job).await?;
             if let Some(policy) = &policy {
                 seosmith::policy::apply(&mut report, policy);
-            }
-            if cli.evidence_contract_v2 {
-                seosmith::contract::enable_v2(&mut report)?;
-            }
-            if policy.is_some() {
-                // Experimental output is local only; never enqueue unsupported payloads.
                 store.fail(&job.request_id.to_string()).await?;
-            } else {
-                store.finish(&report).await?;
+            } else if !finalize_job(&store, &mut report, cli.evidence_contract_v2).await? {
+                anyhow::bail!("report finalization failed");
             }
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
@@ -219,18 +213,100 @@ async fn process_jobs(
     }
 }
 
-async fn finalize_job(store: &Store, report: &mut seosmith::model::Report, v2: bool) -> Result<()> {
+async fn finalize_job(
+    store: &Store,
+    report: &mut seosmith::model::Report,
+    v2: bool,
+) -> Result<bool> {
     if v2 && let Err(error) = seosmith::contract::enable_v2(report) {
         store.fail(&report.request.request_id.to_string()).await?;
         tracing::error!(run_id=%report.request.request_id, %error, "evidence finalization failed");
-        return Ok(());
+        return Ok(false);
     }
-    store.finish(report).await
+    match store.finish(report).await {
+        Ok(()) => Ok(true),
+        Err(error) if error.is::<seosmith::store::ReportTooLarge>() => {
+            store.fail(&report.request.request_id.to_string()).await?;
+            tracing::error!(run_id=%report.request.request_id, %error, "report finalization failed");
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn oversized_job_fails_and_next_job_survives_restart() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("jobs.sqlite");
+        let store = Store::open(path.to_str().unwrap()).await?;
+        let mut bad: seosmith::model::Report =
+            serde_json::from_str(include_str!("../fixtures/contracts/legacy.json"))?;
+        bad.request.request_id = uuid::Uuid::new_v4();
+        store.submit(&bad.request).await?;
+        store.claim().await?.unwrap();
+        bad.pages[0]
+            .structured_data
+            .push(seosmith::model::StructuredData {
+                format: "x".repeat(17 * 1024 * 1024),
+                data: None,
+                error: None,
+            });
+        assert!(!finalize_job(&store, &mut bad, false).await?);
+        drop(store);
+        let store = Store::open(path.to_str().unwrap()).await?;
+        store.recover().await?;
+        assert_eq!(
+            store
+                .view(&bad.request.request_id.to_string())
+                .await?
+                .unwrap()
+                .state,
+            "failed"
+        );
+        assert!(store.claim().await?.is_none());
+        let mut good: seosmith::model::Report =
+            serde_json::from_str(include_str!("../fixtures/contracts/legacy.json"))?;
+        good.request.request_id = uuid::Uuid::new_v4();
+        store.submit(&good.request).await?;
+        store.claim().await?.unwrap();
+        assert!(finalize_job(&store, &mut good, false).await?);
+        let (_, body, hash, _) = store.pending().await?.unwrap();
+        assert_eq!(hash, seosmith::model::digest(body.as_bytes()));
+        assert_eq!(body, serde_json::to_string(&good)?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn storage_error_is_not_report_rejection() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(dir.path().join("jobs.sqlite").to_str().unwrap()).await?;
+        let mut report: seosmith::model::Report =
+            serde_json::from_str(include_str!("../fixtures/contracts/legacy.json"))?;
+        report.request.request_id = uuid::Uuid::new_v4();
+        store.submit(&report.request).await?;
+        store.claim().await?.unwrap();
+        sqlx::query("CREATE TRIGGER reject_finish BEFORE UPDATE OF report ON jobs BEGIN SELECT RAISE(FAIL, 'storage unavailable'); END").execute(&store.0).await?;
+        assert!(finalize_job(&store, &mut report, false).await.is_err());
+        assert_eq!(
+            store
+                .view(&report.request.request_id.to_string())
+                .await?
+                .unwrap()
+                .state,
+            "running"
+        );
+        sqlx::query("DROP TRIGGER reject_finish")
+            .execute(&store.0)
+            .await?;
+        store.recover().await?;
+        assert!(store.claim().await?.is_some());
+        assert!(finalize_job(&store, &mut report, false).await?);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn invalid_v2_job_fails_and_next_job_completes_after_recovery() -> Result<()> {
