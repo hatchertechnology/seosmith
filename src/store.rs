@@ -7,6 +7,15 @@ use sqlx::{
 use std::{path::Path, time::Duration};
 #[derive(Clone)]
 pub struct Store(pub SqlitePool);
+
+#[derive(Debug)]
+pub struct ReportTooLarge;
+impl std::fmt::Display for ReportTooLarge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "report exceeds delivery limit")
+    }
+}
+impl std::error::Error for ReportTooLarge {}
 #[derive(serde::Serialize)]
 pub struct JobView {
     pub request_id: String,
@@ -205,10 +214,9 @@ impl Store {
     }
     pub async fn finish(&self, r: &Report) -> Result<()> {
         let body = serde_json::to_string(r)?;
-        ensure!(
-            body.len() <= 16 * 1024 * 1024,
-            "report exceeds delivery limit"
-        );
+        if body.len() > 16 * 1024 * 1024 {
+            return Err(ReportTooLarge.into());
+        }
         sqlx::query("UPDATE jobs SET report=?,report_hash=?,state=? WHERE id=?")
             .bind(&body)
             .bind(digest(body.as_bytes()))
