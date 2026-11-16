@@ -15,6 +15,8 @@ use tokio::sync::watch;
 struct Cli {
     #[arg(long, env = "SEOSMITH_DB", default_value = "data/seosmith.sqlite")]
     database: String,
+    #[arg(long, env = "SEOSMITH_EVIDENCE_CONTRACT_V2", default_value_t = false)]
+    evidence_contract_v2: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -95,7 +97,10 @@ async fn main() -> Result<()> {
                 job.request_id == r.request_id,
                 "database contains another queued job; use serve to drain it"
             );
-            let report = crawler::crawl(&store, &job).await?;
+            let mut report = crawler::crawl(&store, &job).await?;
+            if cli.evidence_contract_v2 {
+                seosmith::contract::enable_v2(&mut report)?;
+            }
             store.finish(&report).await?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
@@ -113,7 +118,8 @@ async fn main() -> Result<()> {
             let crawl_store = store.clone();
             let worker_stop = stop.clone();
             let worker = tokio::spawn(async move {
-                let result = process_jobs(crawl_store, &mut stopped).await;
+                let result =
+                    process_jobs(crawl_store, &mut stopped, cli.evidence_contract_v2).await;
                 let _ = worker_stop.send(true);
                 result
             });
@@ -150,7 +156,11 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn process_jobs(store: Store, stopped: &mut watch::Receiver<bool>) -> Result<()> {
+async fn process_jobs(
+    store: Store,
+    stopped: &mut watch::Receiver<bool>,
+    evidence_contract_v2: bool,
+) -> Result<()> {
     loop {
         if *stopped.borrow() {
             return Ok(());
@@ -161,8 +171,8 @@ async fn process_jobs(store: Store, stopped: &mut watch::Receiver<bool>) -> Resu
                 result = crawler::crawl(&store, &request) => result,
                 _ = stopped.changed() => return Ok(()),
             };
-            if let Ok(report) = result {
-                store.finish(&report).await?;
+            if let Ok(mut report) = result {
+                finalize_job(&store, &mut report, evidence_contract_v2).await?;
             } else {
                 store.fail(&request.request_id.to_string()).await?;
                 tracing::error!(run_id=%request.request_id, "crawl failed");
@@ -173,5 +183,60 @@ async fn process_jobs(store: Store, stopped: &mut watch::Receiver<bool>) -> Resu
                 _ = stopped.changed() => return Ok(()),
             }
         }
+    }
+}
+
+async fn finalize_job(store: &Store, report: &mut seosmith::model::Report, v2: bool) -> Result<()> {
+    if v2 && let Err(error) = seosmith::contract::enable_v2(report) {
+        store.fail(&report.request.request_id.to_string()).await?;
+        tracing::error!(run_id=%report.request.request_id, %error, "evidence finalization failed");
+        return Ok(());
+    }
+    store.finish(report).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn invalid_v2_job_fails_and_next_job_completes_after_recovery() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(dir.path().join("jobs.sqlite").to_str().unwrap()).await?;
+        let mut bad: seosmith::model::Report =
+            serde_json::from_str(include_str!("../fixtures/contracts/legacy.json"))?;
+        bad.request.request_id = uuid::Uuid::new_v4();
+        store.submit(&bad.request).await?;
+        store.claim().await?.unwrap();
+        let mut value = serde_json::json!(null);
+        for _ in 0..64 {
+            value = serde_json::json!([value]);
+        }
+        bad.pages[0]
+            .structured_data
+            .push(seosmith::model::StructuredData {
+                format: "json_ld".into(),
+                data: Some(value),
+                error: None,
+            });
+        finalize_job(&store, &mut bad, true).await?;
+        let id = bad.request.request_id.to_string();
+        assert_eq!(store.view(&id).await?.unwrap().state, "failed");
+        assert!(store.report(&id).await?.is_none());
+        store.recover().await?;
+        assert!(store.claim().await?.is_none());
+        let mut good: seosmith::model::Report =
+            serde_json::from_str(include_str!("../fixtures/contracts/legacy.json"))?;
+        good.request.request_id = uuid::Uuid::new_v4();
+        store.submit(&good.request).await?;
+        store.claim().await?.unwrap();
+        finalize_job(&store, &mut good, true).await?;
+        assert!(
+            store
+                .report(&good.request.request_id.to_string())
+                .await?
+                .is_some()
+        );
+        Ok(())
     }
 }
