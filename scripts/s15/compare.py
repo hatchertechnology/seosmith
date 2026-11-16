@@ -32,13 +32,14 @@ def seosmith(data):
         if not isinstance(url, str) or url in page_by_url:
             raise ValueError("invalid or duplicate page URL")
         page_by_url[url] = page
-    observed, unmapped = set(), []
+    observed, unmapped, mapped = set(), [], []
     for finding in findings:
         if not isinstance(finding, dict) or not isinstance(finding.get("url"), str) or not isinstance(finding.get("rule"), str):
             raise ValueError("invalid finding")
         key = (finding["url"], finding["rule"])
         if finding["rule"] in RULES:
             observed.add(key)
+            mapped.append(finding)
         else:
             unmapped.append(finding)
     complete = report.get("coverage_complete") is True and report.get("outcome") == "completed"
@@ -50,7 +51,7 @@ def seosmith(data):
         if not isinstance(status, int) or not 200 <= status < 300 or not isinstance(content_type, str) or content_type.split(';')[0].strip().lower() not in ("text/html", "application/xhtml+xml", "application/vnd.wap.xhtml+xml"):
             return None
         return (url, rule) in observed
-    return lookup, unmapped, {"schema_version": report["schema_version"], "engine_version": report.get("engine_version"), "ruleset_version": report.get("ruleset_version"), "outcome": report.get("outcome"), "stop_reason": report.get("stop_reason"), "coverage_complete": report.get("coverage_complete")}
+    return lookup, mapped, unmapped, {"schema_version": report["schema_version"], "engine_version": report.get("engine_version"), "ruleset_version": report.get("ruleset_version"), "outcome": report.get("outcome"), "stop_reason": report.get("stop_reason"), "coverage_complete": report.get("coverage_complete")}
 
 
 def controlled_csv(data):
@@ -58,7 +59,7 @@ def controlled_csv(data):
     reader = csv.DictReader(io.StringIO(data.decode("utf-8-sig"), newline=""))
     if reader.fieldnames != ["url", "rule", "state"]:
         raise ValueError("CSV columns must be url,rule,state")
-    rows, unmapped = {}, []
+    rows, mapped, unmapped = {}, [], []
     for row in reader:
         if None in row or not row["url"] or not row["rule"] or row["state"] not in ("present", "absent", "unknown"):
             raise ValueError("invalid CSV row")
@@ -68,7 +69,9 @@ def controlled_csv(data):
         rows[key] = {"present": True, "absent": False, "unknown": None}[row["state"]]
         if row["rule"] not in RULES:
             unmapped.append(row)
-    return lambda url, rule: rows.get((url, rule)), unmapped, {"format": "controlled-csv-v1"}
+        else:
+            mapped.append(row)
+    return lambda url, rule: rows.get((url, rule)), mapped, unmapped, {"format": "controlled-csv-v1"}
 
 
 def compare(labels, lookup):
@@ -106,9 +109,9 @@ def main():
     labels = json.loads(labels_bytes)
     if labels.get("version") != 1 or labels.get("semantics") != "s15-metadata-1":
         raise ValueError("unsupported labels")
-    lookup, unmapped, provenance = (seosmith if args.adapter == "seosmith-v1" else controlled_csv)(source)
+    lookup, mapped, unmapped, provenance = (seosmith if args.adapter == "seosmith-v1" else controlled_csv)(source)
     families, cases = compare(labels, lookup)
-    print(json.dumps({"version": 1, "label_sha256": hashlib.sha256(labels_bytes).hexdigest(), "source_sha256": hashlib.sha256(source).hexdigest(), "adapter": args.adapter, "provenance": provenance, "families": families, "cases": cases, "unmapped": unmapped}, indent=2))
+    print(json.dumps({"version": 1, "label_sha256": hashlib.sha256(labels_bytes).hexdigest(), "source_sha256": hashlib.sha256(source).hexdigest(), "adapter": args.adapter, "provenance": provenance, "families": families, "cases": cases, "mapped_evidence": mapped, "unmapped": unmapped}, indent=2))
 
 
 if __name__ == "__main__":

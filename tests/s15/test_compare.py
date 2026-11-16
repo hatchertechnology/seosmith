@@ -13,18 +13,19 @@ class CompareTests(unittest.TestCase):
         self.labels = json.loads((ROOT / 'fixtures/s15/labels.json').read_text())
 
     def test_controlled_labels_and_unmapped(self):
-        lookup, unmapped, _ = c.controlled_csv((ROOT / 'fixtures/s15/controlled.csv').read_bytes())
+        lookup, mapped, unmapped, _ = c.controlled_csv((ROOT / 'fixtures/s15/controlled.csv').read_bytes())
         families, _ = c.compare(self.labels, lookup)
         self.assertEqual(families['metadata'], {'tp': 2, 'tn': 2, 'fp': 0, 'fn': 0, 'unknown_truth': 1, 'unknown_observation': 0, 'precision': 1.0, 'recall': 1.0})
         self.assertEqual(len(unmapped), 1)
+        self.assertEqual(len(mapped), 5)
 
     def test_partial_and_missing_page_are_unknown(self):
         page = {'url': 'https://fixture.invalid/has-title', 'status': 200, 'content_type': 'text/html', 'error': None, 'extraction_truncated': False}
         report = {'schema_version': 1, 'coverage_complete': False, 'outcome': 'partial', 'pages': [page], 'findings': []}
-        lookup, _, _ = c.seosmith(json.dumps(report).encode())
+        lookup, _, _, _ = c.seosmith(json.dumps(report).encode())
         self.assertIsNone(lookup(page['url'], 'missing_title'))
         report.update(coverage_complete=True, outcome='completed')
-        lookup, _, _ = c.seosmith(json.dumps(report).encode())
+        lookup, _, _, _ = c.seosmith(json.dumps(report).encode())
         self.assertFalse(lookup(page['url'], 'missing_title'))
         self.assertIsNone(lookup('https://fixture.invalid/missing-title', 'missing_title'))
         self.assertEqual(c.compare(self.labels, lookup)[0]['metadata']['unknown_observation'], 3)
