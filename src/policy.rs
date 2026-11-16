@@ -84,9 +84,8 @@ pub fn catalog() -> Vec<Guidance> {
             "short_description" | "long_description" => ("advisory", "Successfully extracted HTML with a nonempty description", "Character count crosses a configured review threshold; search snippets vary by query and display.", "page.description; Unicode scalar count", "https://developers.google.com/search/docs/appearance/snippet", "Review whether the description accurately summarizes the page."),
             "little_content" => ("advisory", "Successfully extracted HTML page", "Extracted word count falls below a configured review threshold; word count alone does not determine content quality.", "page.words; extracted word count", "https://developers.google.com/search/docs/fundamentals/creating-helpful-content", "Assess whether the page answers its users' needs; do not add words solely to meet a count."),
             "too_many_links" => ("advisory", "Successfully extracted HTML page", "Outgoing link count exceeds a configured review threshold; this is not a universal link limit.", "page.links; extracted link count", "https://developers.google.com/search/docs/crawling-indexing/links-crawlable", "Review whether links are useful, contextual and crawlable."),
-            "noindex" => ("observation_or_policy_violation", "HTML page with an observed noindex directive; violation requires explicit indexability intent", "A noindex directive is an observation and may be intentional.", "page.robots; observed directive", "https://developers.google.com/search/docs/crawling-indexing/block-indexing", "If this page should be indexed, review its robots directives."),
-            "http_redirect" => ("observation_or_policy_violation", "Observed HTTP 3xx response; violation requires explicit redirect prohibition", "A redirect is an observation and may be intentional.", "page.status; observed HTTP status", "https://developers.google.com/search/docs/crawling-indexing/301-redirects", "Review the redirect only when it conflicts with the intended URL policy."),
-            "missing_hreflang_xdefault" => ("observation", "Page contains alternate language links", "An x-default alternate is optional; its absence alone is not a defect.", "page.alternates; observed hreflang values", "https://developers.google.com/search/docs/specialty/international/localized-versions", "Add x-default only if a fallback page serves the site's audience."),
+            "noindex" => ("observation_or_policy_violation", "Successfully fetched in-scope HTML page; violation requires explicit indexability intent", "A noindex directive is an observation and may be intentional.", "page.robots; observed directive", "https://developers.google.com/search/docs/crawling-indexing/block-indexing", "If this page should be indexed, review its robots directives."),
+            "http_redirect" => ("observation_or_policy_violation", "Successfully fetched in-scope page with an HTTP status; violation requires explicit redirect prohibition", "A redirect is an observation and may be intentional.", "page.status; observed HTTP status", "https://developers.google.com/search/docs/crawling-indexing/301-redirects", "Review the redirect only when it conflicts with the intended URL policy."),
             _ => return None,
         };
         Some(Guidance { rule: r.id.into(), version: "s14-1".into(), kind: kind.into(), applicability: applicability.into(), explanation: explanation.into(), evidence_schema: evidence.into(), source: source.into(), reviewed_at: "2026-11-16".into(), confidence: "observed_data_only".into(), fix_guidance: fix.into() })
@@ -201,6 +200,7 @@ fn apply(report: &mut Report, policy: &AdvisoryPolicy) {
             }
         }
         if scoped
+            && !crate::policy_candidate::source_unavailable(p)
             && policy.forbid_redirects
             && let Some(status) = p.status.filter(|s| (300..400).contains(s))
         {
@@ -336,6 +336,61 @@ mod tests {
         assert!(!r.findings.iter().any(|f| f.rule == "http_redirect"));
     }
     #[test]
+    fn redirect_findings_require_matching_completed_violation() {
+        let mut report = report();
+        report.pages.clear();
+        for (i, condition) in ["available", "truncated", "error", "blocked"]
+            .iter()
+            .enumerate()
+        {
+            let mut page = crate::model::Page {
+                url: format!("https://example.com/{i}"),
+                status: Some(301),
+                ..Default::default()
+            };
+            match *condition {
+                "truncated" => page.extraction_truncated = true,
+                "error" => page.error = Some("fetch_failed".into()),
+                "blocked" => page.blocked_by_robots = true,
+                _ => {}
+            }
+            report.pages.push(page);
+        }
+        let config = AdvisoryPolicy {
+            forbid_redirects: true,
+            ..Default::default()
+        };
+        apply_with_evidence(&mut report, &config).unwrap();
+        let candidate = report
+            .policy_guidance
+            .as_ref()
+            .unwrap()
+            .candidate
+            .as_ref()
+            .unwrap();
+        for page in &report.pages {
+            let id = crate::contract::entity_id(&page.url, page.is_resource);
+            let record = candidate
+                .records
+                .iter()
+                .find(|r| {
+                    r.category == "policy_violation"
+                        && r.rule_id == "http_redirect"
+                        && r.entity_id == id
+                })
+                .unwrap();
+            let finding = report.findings.iter().any(|f| {
+                f.url == page.url
+                    && f.rule == "http_redirect"
+                    && f.details["classification"] == "policy_violation"
+            });
+            assert_eq!(finding, record.outcome == "violation");
+            if crate::policy_candidate::source_unavailable(page) {
+                assert_eq!(record.outcome, "unknown");
+            }
+        }
+    }
+    #[test]
     fn catalog_documents_only_reviewed_rules() {
         let catalog = catalog();
         assert!(
@@ -346,9 +401,30 @@ mod tests {
         assert!(
             catalog
                 .iter()
-                .any(|g| g.rule == "missing_hreflang_xdefault" && g.kind == "observation")
+                .any(|g| g.rule == "alternates_observed" && g.kind == "observation")
         );
         assert!(!catalog.iter().any(|g| g.rule == "missing_title"));
+        assert!(
+            !catalog
+                .iter()
+                .any(|g| g.rule == "missing_hreflang_xdefault")
+        );
+        assert!(
+            catalog
+                .iter()
+                .find(|g| g.rule == "noindex")
+                .unwrap()
+                .applicability
+                .contains("Successfully fetched")
+        );
+        assert!(
+            catalog
+                .iter()
+                .find(|g| g.rule == "http_redirect")
+                .unwrap()
+                .applicability
+                .contains("HTTP status")
+        );
         assert!(catalog.iter().all(|g| !g.applicability.is_empty()
             && !g.evidence_schema.is_empty()
             && !g.fix_guidance.is_empty()));

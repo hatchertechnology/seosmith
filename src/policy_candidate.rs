@@ -579,6 +579,13 @@ pub fn resolves(
         && current.outcome == "no_violation"
 }
 
+pub(crate) fn source_unavailable(page: &crate::model::Page) -> bool {
+    page.blocked_by_robots
+        || page.error.is_some()
+        || page.status.is_none()
+        || page.extraction_truncated
+}
+
 /// Produce a bounded experimental contract from the fixed S14 scalar rule set.
 pub fn generate(
     report: &Report,
@@ -658,10 +665,7 @@ pub fn generate(
             coverage.candidates += 1;
             let entity = contract::entity_id(&page.url, page.is_resource);
             ids.push(entity.clone());
-            let unavailable = page.blocked_by_robots
-                || page.error.is_some()
-                || page.status.is_none()
-                || page.extraction_truncated
+            let unavailable = source_unavailable(page)
                 || (category == "observation"
                     && matches!(rule, "noindex" | "alternates_observed")
                     && !page.html());
