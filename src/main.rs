@@ -70,6 +70,13 @@ async fn main() -> Result<()> {
         .init();
     let cli = Cli::parse();
     if let Command::Operations { operation } = cli.command {
+        if cli.evidence_contract_v2 {
+            eprintln!(
+                "{}",
+                serde_json::json!({"error":"operation_failed", "reason":"evidence_v2_unsupported"})
+            );
+            std::process::exit(1);
+        }
         if let Err(error) =
             seosmith::operations::execute(operation, std::path::Path::new(&cli.database)).await
         {
@@ -83,6 +90,7 @@ async fn main() -> Result<()> {
         }
         return Ok(());
     }
+    ensure!(!cli.evidence_contract_v2, "evidence_v2_unsupported");
     if matches!(cli.command, Command::Rules) {
         println!(
             "{}",

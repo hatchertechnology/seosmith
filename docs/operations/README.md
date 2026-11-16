@@ -28,7 +28,7 @@ binary, unknown command, timeout, bad JSON or incompatible version means
 unavailable/unsupported; never substitute `crawl` for an absent status operation.
 `--version` alone is insufficient (this additive adapter retains package 0.2.0).
 Capabilities do not access the database or network. Version fields describe this
-compiled producer, not every retained report. Advanced evidence-v2, authorized
+compiled producer, not every retained report. The global `--evidence-contract-v2` flag or `SEOSMITH_EVIDENCE_CONTRACT_V2=true` is rejected for operations, including capabilities. Advanced evidence-v2, authorized
 staging profiles (S13) and baseline CI (S16) are advertised false. Future support
 must be explicitly detected after those contracts ship; do not invent flags.
 
@@ -102,7 +102,7 @@ Status includes `request_id`, `state`, `execution_state`, `worker_active`,
 `report_available`, `delivery_state` and sanitized `error`. Core states are
 queued/running/completed/partial/failed/cancelled. `execution_state=unknown` means
 a queued/running record has no worker lock owner (for example a killed process).
-Status never resumes work. `worker_active` is an advisory lock observation, not
+Status never resumes work. `worker_active` is null if the lock file is missing; no worker absence or terminal cancellation is inferred. `worker_active` is an advisory lock observation, not
 proof of progress. These reads do not create databases or run migrations.
 
 Cancel includes `cancel_accepted` and `cancellation_terminal`. Accepted means the

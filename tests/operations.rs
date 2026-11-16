@@ -263,3 +263,46 @@ async fn service_databases_are_rejected_without_recovery_or_cancel() {
         "running"
     );
 }
+
+#[test]
+fn evidence_v2_is_rejected_before_any_operation() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("run.sqlite");
+    let out = Command::new(env!("CARGO_BIN_EXE_seosmith"))
+        .args([
+            "--database",
+            db.to_str().unwrap(),
+            "--evidence-contract-v2",
+            "operations",
+            "capabilities",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("evidence_v2_unsupported"));
+    assert!(!db.exists());
+}
+
+#[tokio::test]
+async fn missing_lock_is_unknown_and_terminal_state_is_not_active() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("run.sqlite");
+    let (store, r) = fixture(dir.path(), "running").await;
+    let id = r.request_id.to_string();
+    std::fs::remove_file(dir.path().join("run.sqlite.lock")).unwrap();
+    let status = success(&cli(&db, &["status", "--id", &id]));
+    assert!(status["worker_active"].is_null());
+    assert_eq!(status["execution_state"], "unknown");
+    let cancelled = success(&cli(&db, &["cancel", "--id", &id]));
+    assert_eq!(cancelled["cancellation_terminal"], false);
+    std::fs::write(dir.path().join("run.sqlite.lock"), b"").unwrap();
+    let lock = std::fs::File::open(dir.path().join("run.sqlite.lock")).unwrap();
+    fs2::FileExt::try_lock_exclusive(&lock).unwrap();
+    sqlx::query("UPDATE jobs SET state='completed'")
+        .execute(&store.0)
+        .await
+        .unwrap();
+    let status = success(&cli(&db, &["status", "--id", &id]));
+    assert_eq!(status["worker_active"], true);
+    assert_eq!(status["execution_state"], "terminal");
+}

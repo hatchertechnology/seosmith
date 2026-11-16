@@ -98,11 +98,15 @@ fn lock_path(database: &Path) -> PathBuf {
     name.into()
 }
 
-fn worker_active(database: &Path) -> Result<bool> {
-    let file = File::open(lock_path(database)).context("worker_lock_missing")?;
+fn worker_active(database: &Path) -> Result<Option<bool>> {
+    let file = match File::open(lock_path(database)) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
     match fs2::FileExt::try_lock_exclusive(&file) {
-        Ok(()) => Ok(false),
-        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(true),
+        Ok(()) => Ok(Some(false)),
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(Some(true)),
         Err(e) => Err(e.into()),
     }
 }
@@ -133,7 +137,11 @@ async fn status(store: &Store, database: &Path, id: Uuid, own_worker: bool) -> R
         .view(&id.to_string())
         .await?
         .context("run_not_found")?;
-    let active = own_worker || worker_active(database)?;
+    let active = if own_worker {
+        Some(true)
+    } else {
+        worker_active(database)?
+    };
     let unfinished = matches!(view.state.as_str(), "queued" | "running");
     let available: bool = sqlx::query_scalar("SELECT report IS NOT NULL FROM jobs WHERE id=?")
         .bind(id.to_string())
@@ -141,7 +149,7 @@ async fn status(store: &Store, database: &Path, id: Uuid, own_worker: bool) -> R
         .await?;
     Ok(
         json!({"adapter_version":1, "request_id":id, "state":view.state,
-        "execution_state": if active {"active"} else if unfinished {"unknown"} else {"terminal"},
+        "execution_state": if !unfinished {"terminal"} else if active == Some(true) {"active"} else {"unknown"},
         "worker_active": active, "report_available": available,
         "delivery_state":"disabled", "error": view.error}),
     )
@@ -311,8 +319,7 @@ pub async fn execute(operation: Operation, database: &Path) -> Result<()> {
             result["cancel_accepted"] = json!(accepted);
             // The worker may still be unwinding; this is not a terminal ack.
             result["cancellation_terminal"] = json!(
-                !result["worker_active"].as_bool().unwrap_or(true)
-                    && result["state"] == "cancelled"
+                result["worker_active"].as_bool() == Some(false) && result["state"] == "cancelled"
             );
             println!("{result}");
         }
