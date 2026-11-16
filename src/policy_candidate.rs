@@ -157,6 +157,7 @@ pub fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("invalid matrix"))?;
     let mut ids = HashSet::new();
+    let original = serde_json::to_value(report)?;
     for r in &candidate.records {
         ensure!(
             [
@@ -237,7 +238,6 @@ pub fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]
                 r.entity_id == contract::entity_id(&page.url, page.is_resource),
                 "source entity mismatch"
             );
-            let original = serde_json::to_value(report)?;
             ensure!(original.pointer(pointer).is_some(), "source missing");
             ensure!(
                 r.discriminator == "self"
@@ -707,6 +707,36 @@ mod tests {
                 .records
                 .iter()
                 .any(|r| r.rule_id == "short_title" && r.outcome == "unknown")
+        );
+    }
+    #[test]
+    fn omitted_records_are_counted_and_never_complete() {
+        let (_, mut report) = sample();
+        let original = report.pages[0].clone();
+        for i in 0..55 {
+            let mut page = original.clone();
+            page.url = format!("https://example.com/item-{i}");
+            report.pages.push(page);
+        }
+        let (candidate, manifest) =
+            generate(&report, &crate::policy::AdvisoryPolicy::default()).unwrap();
+        assert_eq!(candidate.records.len(), 512);
+        assert!(candidate.coverage.iter().any(|c| c.omitted > 0));
+        assert!(
+            candidate
+                .coverage
+                .iter()
+                .filter(|c| c.omitted > 0)
+                .all(|c| !c.complete)
+        );
+        assert!(
+            validate_generated(
+                &candidate,
+                &manifest,
+                &report,
+                &crate::policy::AdvisoryPolicy::default()
+            )
+            .is_ok()
         );
     }
     #[test]
