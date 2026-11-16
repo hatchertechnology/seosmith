@@ -90,12 +90,16 @@ pub fn catalog() -> Vec<Guidance> {
             _ => return None,
         };
         Some(Guidance { rule: r.id.into(), version: "s14-1".into(), kind: kind.into(), applicability: applicability.into(), explanation: explanation.into(), evidence_schema: evidence.into(), source: source.into(), reviewed_at: "2026-11-16".into(), confidence: "observed_data_only".into(), fix_guidance: fix.into() })
-    }).collect()
+    }).chain([
+        Guidance { rule: "alternates_observed".into(), version: "s14-1".into(), kind: "observation".into(), applicability: "Successfully extracted HTML page".into(), explanation: "Observed alternate collection; an empty collection is not a defect.".into(), evidence_schema: "page.alternates".into(), source: "https://developers.google.com/search/docs/specialty/international/localized-versions".into(), reviewed_at: "2026-11-16".into(), confidence: "observed_data_only".into(), fix_guidance: "Review alternate language references when relevant.".into() },
+        Guidance { rule: "external_target".into(), version: "s14-1".into(), kind: "observation".into(), applicability: "External target recorded as a page".into(), explanation: "A fetch status is an observation; unavailable is unknown.".into(), evidence_schema: "page.status and fetch state".into(), source: "https://developers.google.com/search/docs/crawling-indexing/links-crawlable".into(), reviewed_at: "2026-11-16".into(), confidence: "observed_data_only".into(), fix_guidance: "Inspect the target only when the status conflicts with its intended destination.".into() },
+        Guidance { rule: "external_link".into(), version: "s14-1".into(), kind: "observation".into(), applicability: "External link from an in-scope page".into(), explanation: "A referenced target may be unavailable or outside the crawl; this is not a defect by itself.".into(), evidence_schema: "page.links and target status when fetched".into(), source: "https://developers.google.com/search/docs/crawling-indexing/links-crawlable".into(), reviewed_at: "2026-11-16".into(), confidence: "observed_data_only".into(), fix_guidance: "Inspect the link in context if its destination needs review.".into() }
+    ]).collect()
 }
 
 fn add(findings: &mut Vec<Finding>, page: &Page, rule: &str, evidence: String) {
     findings.push(Finding {
-        key: digest(format!("{}\n{}", rule, page.url).as_bytes()),
+        key: digest(format!("seosmith-s14-finding-v1\n{}\n{}", rule, page.url).as_bytes()),
         rule: rule.into(),
         severity: Severity::Warning,
         url: page.url.clone(),
@@ -104,7 +108,7 @@ fn add(findings: &mut Vec<Finding>, page: &Page, rule: &str, evidence: String) {
         details: serde_json::json!({"classification":"advisory"}),
     });
 }
-pub fn apply(report: &mut Report, policy: &AdvisoryPolicy) {
+fn apply(report: &mut Report, policy: &AdvisoryPolicy) {
     let affected = [
         "short_title",
         "long_title",
@@ -116,11 +120,35 @@ pub fn apply(report: &mut Report, policy: &AdvisoryPolicy) {
         "http_redirect",
         "missing_hreflang_xdefault",
     ];
-    report
-        .findings
-        .retain(|f| !affected.contains(&f.rule.as_str()));
+    report.findings.retain(|f| {
+        if affected.contains(&f.rule.as_str())
+            || matches!(
+                f.rule.as_str(),
+                "external_link_broken"
+                    | "external_link_redirect"
+                    | "sitemap_noindex"
+                    | "canonical_to_noindex"
+                    | "hreflang_to_noindex"
+                    | "canonical_to_redirect"
+                    | "hreflang_to_redirect"
+            )
+        {
+            return false;
+        }
+        if matches!(
+            f.rule.as_str(),
+            "fetch_error" | "http_client_error" | "http_server_error"
+        ) && url::Url::parse(&f.url).is_ok_and(|u| !report.request.in_scope(&u))
+        {
+            return false;
+        }
+        true
+    });
     for p in &report.pages {
-        if p.html()
+        let scoped =
+            url::Url::parse(&p.url).is_ok_and(|u| report.request.in_scope(&u)) && !p.is_resource;
+        if scoped
+            && p.html()
             && !p.is_resource
             && !p.extraction_truncated
             && p.error.is_none()
@@ -172,7 +200,8 @@ pub fn apply(report: &mut Report, policy: &AdvisoryPolicy) {
                 }
             }
         }
-        if policy.forbid_redirects
+        if scoped
+            && policy.forbid_redirects
             && let Some(status) = p.status.filter(|s| (300..400).contains(s))
         {
             add(&mut report.findings, p, "http_redirect", status.to_string());
@@ -203,6 +232,10 @@ pub fn apply_with_evidence(report: &mut Report, policy: &AdvisoryPolicy) -> anyh
         guidance.candidate = Some(candidate);
         guidance.manifest = Some(manifest);
     }
+    anyhow::ensure!(
+        crate::contract::serialized_size(report)? <= crate::contract::MAX_REPORT_BYTES,
+        "policy report exceeds delivery size limit"
+    );
     Ok(())
 }
 
@@ -245,6 +278,45 @@ mod tests {
             r.findings
                 .iter()
                 .any(|f| f.rule == "noindex" && f.details["classification"] == "policy_violation")
+        );
+    }
+    #[test]
+    fn external_pages_do_not_gain_policy_findings_or_reuse_legacy_keys() {
+        let mut r = report();
+        let external = crate::model::Page {
+            url: "https://outside.example/a".into(),
+            status: Some(301),
+            content_type: "text/html".into(),
+            title: "short".into(),
+            ..Default::default()
+        };
+        let local = &mut r.pages[0];
+        local.status = Some(200);
+        local.content_type = "text/html".into();
+        local.title = "short".into();
+        local.error = None;
+        local.blocked_by_robots = false;
+        local.extraction_truncated = false;
+        r.pages.push(external);
+        let policy = AdvisoryPolicy {
+            forbid_redirects: true,
+            ..Default::default()
+        };
+        apply(&mut r, &policy);
+        assert!(
+            !r.findings
+                .iter()
+                .any(|f| f.url == "https://outside.example/a"
+                    && (f.rule == "http_redirect" || f.rule == "short_title"))
+        );
+        let finding = r
+            .findings
+            .iter()
+            .find(|f| f.rule == "short_title" && f.url == r.pages[0].url)
+            .unwrap();
+        assert_ne!(
+            finding.key,
+            digest(format!("short_title\n{}", finding.url).as_bytes())
         );
     }
     #[test]

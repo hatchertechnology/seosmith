@@ -80,8 +80,13 @@ async fn main() -> Result<()> {
         .advisory_policy
         .as_ref()
         .map(|path| -> Result<_> {
-            let policy: seosmith::policy::AdvisoryPolicy =
-                serde_json::from_slice(&std::fs::read(path)?)?;
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            std::fs::File::open(path)?
+                .take(65_537)
+                .read_to_end(&mut bytes)?;
+            ensure!(bytes.len() <= 65_536, "advisory policy exceeds 64 KiB");
+            let policy: seosmith::policy::AdvisoryPolicy = serde_json::from_slice(&bytes)?;
             policy.validate()?;
             Ok(policy)
         })
@@ -119,6 +124,10 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     if matches!(cli.command, Command::Rules) {
+        ensure!(
+            policy.is_none(),
+            "advisory policy guidance is available in local policy output"
+        );
         println!(
             "{}",
             serde_json::to_string_pretty(&seosmith::audit::rules())?
@@ -156,7 +165,11 @@ async fn main() -> Result<()> {
             let mut report = crawler::crawl(&store, &job).await?;
             if let Some(policy) = &policy {
                 let result = seosmith::policy::apply_with_evidence(&mut report, policy);
-                store.fail(&job.request_id.to_string()).await?;
+                if result.is_ok() {
+                    store.finish_local_only(&job.request_id.to_string()).await?;
+                } else {
+                    store.fail(&job.request_id.to_string()).await?;
+                }
                 result?;
             } else if !finalize_job(&store, &mut report, cli.evidence_contract_v2).await? {
                 anyhow::bail!("report finalization failed");
@@ -178,7 +191,7 @@ async fn main() -> Result<()> {
             let worker_stop = stop.clone();
             let worker = tokio::spawn(async move {
                 let result =
-                    process_jobs(crawl_store, &mut stopped, cli.evidence_contract_v2, policy).await;
+                    process_jobs(crawl_store, &mut stopped, cli.evidence_contract_v2).await;
                 let _ = worker_stop.send(true);
                 result
             });
@@ -219,7 +232,6 @@ async fn process_jobs(
     store: Store,
     stopped: &mut watch::Receiver<bool>,
     evidence_contract_v2: bool,
-    policy: Option<seosmith::policy::AdvisoryPolicy>,
 ) -> Result<()> {
     loop {
         if *stopped.borrow() {
@@ -232,9 +244,6 @@ async fn process_jobs(
                 _ = stopped.changed() => return Ok(()),
             };
             if let Ok(mut report) = result {
-                if let Some(policy) = &policy {
-                    seosmith::policy::apply_with_evidence(&mut report, policy)?;
-                }
                 finalize_job(&store, &mut report, evidence_contract_v2).await?;
             } else {
                 store.fail(&request.request_id.to_string()).await?;

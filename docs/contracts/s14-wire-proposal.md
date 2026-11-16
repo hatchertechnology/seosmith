@@ -41,3 +41,6 @@ The conformance bundle must include existing legacy/v2 acceptance, v3 complete a
 ## H01 source-binding clarifications
 
 An absent x-default is evidenced by the existing enclosing page alternates collection, not a pointer to a nonexistent array element. Claim absence only after complete extraction of that collection; unavailable or truncated extraction yields unknown. The policy_source expected value is an RFC 6901 pointer into the parsed canonical policy string, not the report. It must resolve to the effective threshold or directive applicable to the record's rule and scope; malformed, dangling, wrong-rule or wrong-scope policy pointers are invalid. Full scope binding requires the frozen manifest and is not yet implemented by the local candidate validator.
+
+
+Policy comparison identity excludes per-run request ID, website ID and binding generation. Compare only runs within the same independently verified website and binding scope; policy digest covers the seed and effective collection options and must not substitute for this scope check. The `alternates_observed` record refers to the complete observed collection, including an empty collection; it makes no assertion that a missing x-default is a defect.

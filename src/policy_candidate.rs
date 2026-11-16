@@ -20,6 +20,8 @@ pub struct Record {
     pub attempt: String,
     pub outcome: String,
     pub actual: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_fact: Option<serde_json::Value>,
     pub source_locator: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_locator: Option<String>,
@@ -39,6 +41,7 @@ pub struct Coverage {
     pub candidates: usize,
     pub emitted: usize,
     pub omitted: usize,
+    pub omission_reason: Option<String>,
     pub complete: bool,
     pub eligibility_counts: BTreeMap<String, usize>,
     pub attempt_counts: BTreeMap<String, usize>,
@@ -59,6 +62,7 @@ pub struct ManifestRow {
 pub struct Candidate {
     pub policy_canonical_json: String,
     pub policy_digest: String,
+    pub observed_at: crate::contract::Interval,
     pub records: Vec<Record>,
     pub coverage: Vec<Coverage>,
 }
@@ -94,29 +98,70 @@ pub fn record_id(r: &Record) -> String {
         )
     )
 }
+fn integers(v: &serde_json::Value) -> bool {
+    match v {
+        serde_json::Value::Number(n) => n
+            .as_i64()
+            .is_some_and(|x| (-9_007_199_254_740_991..=9_007_199_254_740_991).contains(&x)),
+        serde_json::Value::Array(a) => a.iter().all(integers),
+        serde_json::Value::Object(o) => o.values().all(integers),
+        _ => true,
+    }
+}
+
+fn canonical_policy(report: &Report, policy: &crate::policy::AdvisoryPolicy) -> Result<String> {
+    Ok(serde_json::to_string(
+        &serde_json::json!({"catalog_version":"s14-1","policy":policy,"collection":{"seed_url":report.request.url,"max_pages":report.request.max_pages,"max_resources":report.request.max_resources,"check_external_links":report.request.check_external_links},"schema_version":3,"validator_version":"s14-1"}),
+    )?)
+}
 /// Validates bounded, local candidate vectors against their original report. Not suitable for accepting external bytes.
 #[allow(clippy::items_after_statements)]
-pub fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]) -> Result<()> {
+fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]) -> Result<()> {
+    ensure!(
+        candidate.observed_at.started_at == report.started_at
+            && candidate.observed_at.finished_at == report.finished_at,
+        "observation interval mismatch"
+    );
     ensure!(
         candidate.policy_canonical_json.len() <= 65536,
         "policy limit"
     );
     let value: serde_json::Value = serde_json::from_str(&candidate.policy_canonical_json)?;
-    fn integers(v: &serde_json::Value) -> bool {
+    fn bounded_strings(v: &serde_json::Value) -> bool {
         match v {
-            serde_json::Value::Number(n) => n
-                .as_i64()
-                .is_some_and(|x| (-9_007_199_254_740_991..=9_007_199_254_740_991).contains(&x)),
-            serde_json::Value::Array(a) => a.iter().all(integers),
-            serde_json::Value::Object(o) => o.values().all(integers),
+            serde_json::Value::String(s) => s.len() <= 16_384,
+            serde_json::Value::Array(a) => a.iter().all(bounded_strings),
+            serde_json::Value::Object(o) => o
+                .iter()
+                .all(|(k, v)| k.len() <= 16_384 && bounded_strings(v)),
             _ => true,
         }
     }
+    ensure!(bounded_strings(&value), "policy string limit");
     ensure!(
         value.is_object()
             && integers(&value)
             && serde_json::to_string(&value)? == candidate.policy_canonical_json,
         "noncanonical policy"
+    );
+    let config: crate::policy::AdvisoryPolicy = serde_json::from_value(
+        value
+            .get("policy")
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("policy missing"))?,
+    )?;
+    config.validate()?;
+    ensure!(
+        canonical_policy(report, &config)? == candidate.policy_canonical_json,
+        "policy fields or request mismatch"
+    );
+    ensure!(
+        contract::serialized_size(report)? <= contract::MAX_REPORT_BYTES,
+        "report size or depth"
+    );
+    ensure!(
+        bounded_strings(&serde_json::to_value(report)?),
+        "report string limit"
     );
     ensure!(
         candidate.policy_digest
@@ -125,6 +170,15 @@ pub fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]
                 digest(candidate.policy_canonical_json.as_bytes())
             ),
         "policy digest"
+    );
+    ensure!(
+        candidate
+            .records
+            .iter()
+            .filter(|r| r.category == "observation")
+            .count()
+            <= 128,
+        "observation limit"
     );
     ensure!(
         manifest.len() <= 256
@@ -188,6 +242,45 @@ pub fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]
             .iter()
             .find(|m| m.category == r.category && m.rule_id == r.rule_id)
             .ok_or_else(|| anyhow::anyhow!("unknown rule"))?;
+        let binding = match r.rule_id.as_str() {
+            "short_title" => Some(("title_min", "title")),
+            "long_title" => Some(("title_max", "title")),
+            "short_description" => Some(("description_min", "description")),
+            "long_description" => Some(("description_max", "description")),
+            "little_content" => Some(("words_min", "words")),
+            "too_many_links" => Some(("links_max", "links")),
+            "noindex" if r.category == "policy_violation" => Some(("require_indexable", "robots")),
+            "http_redirect" if r.category == "policy_violation" => {
+                Some(("forbid_redirects", "status"))
+            }
+            _ => None,
+        };
+        if r.category == "observation" && r.discriminator == "self" {
+            let field = match r.rule_id.as_str() {
+                "noindex" => "robots",
+                "http_redirect" | "external_target" => "status",
+                "alternates_observed" => "alternates",
+                _ => anyhow::bail!("unknown observation rule"),
+            };
+            if let Some(pointer) = &r.source_locator {
+                ensure!(
+                    pointer.ends_with(&format!("/{field}")) && pointer.split('/').count() == 4,
+                    "wrong observation source field"
+                );
+            }
+        }
+        if let Some((key, field)) = binding {
+            ensure!(
+                rule.expected_pointer.as_deref() == Some(format!("/policy/{key}").as_str()),
+                "wrong rule policy source"
+            );
+            if let Some(pointer) = &r.source_locator {
+                ensure!(
+                    pointer.ends_with(&format!("/{field}")) && pointer.split('/').count() == 4,
+                    "wrong rule source field"
+                );
+            }
+        }
         ensure!(
             rule.rule_version == r.rule_version
                 && rule.candidates.contains(&if r.discriminator == "self" {
@@ -254,7 +347,7 @@ pub fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]
             .ok_or_else(|| anyhow::anyhow!("invalid tuple"))?;
         ensure!(
             row["confidence"] == r.confidence
-                && r.interval_ref == "report.observed_at"
+                && r.interval_ref == "candidate.observed_at"
                 && r.policy_ref == candidate.policy_digest,
             "confidence or inheritance"
         );
@@ -267,6 +360,10 @@ pub fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]
                 r.expected.is_none()
             },
             "expected policy source"
+        );
+        ensure!(
+            (r.category == "observation" && r.attempt == "completed") == r.observed_fact.is_some(),
+            "observation fact state"
         );
         let needs_reason = row["reason"] == "required";
         ensure!(
@@ -295,6 +392,32 @@ pub fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]
                 "source entity mismatch"
             );
             ensure!(original.pointer(pointer).is_some(), "source missing");
+            if r.category == "observation" && r.attempt == "completed" {
+                let expected_fact = match r.rule_id.as_str() {
+                    "noindex" => serde_json::json!(page.noindex()),
+                    "http_redirect" => {
+                        serde_json::json!(page.status.is_some_and(|s| (300..400).contains(&s)))
+                    }
+                    "alternates_observed" => {
+                        serde_json::json!({"count":page.alternates.len(), "x_default_present":page.alternates.iter().any(|a| a.language.eq_ignore_ascii_case("x-default"))})
+                    }
+                    "external_target" => serde_json::json!(page.status),
+                    "external_link" => {
+                        let target = r
+                            .target_locator
+                            .as_deref()
+                            .and_then(|p| original.pointer(p))
+                            .ok_or_else(|| anyhow::anyhow!("target status missing"))?;
+                        target.clone()
+                    }
+                    _ => anyhow::bail!("unknown observation"),
+                };
+                ensure!(
+                    r.observed_fact.as_ref() == Some(&expected_fact),
+                    "observation fact mismatch"
+                );
+            }
+
             ensure!(
                 r.discriminator == "self"
                     || (parts.len() >= 5
@@ -328,6 +451,11 @@ pub fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]
                     && c.omitted == 0
                     && *c.outcomes.get("unknown").unwrap_or(&0) == 0),
             "invalid completeness"
+        );
+        ensure!(
+            (c.omitted == 0 && c.omission_reason.is_none())
+                || (c.omitted > 0 && c.omission_reason.as_deref() == Some("record_limit")),
+            "omission reason"
         );
         ensure!(
             selected.len() == c.emitted && c.emitted.checked_add(c.omitted) == Some(c.candidates),
@@ -451,9 +579,7 @@ pub fn generate(
     policy: &crate::policy::AdvisoryPolicy,
 ) -> Result<(Candidate, Vec<ManifestRow>)> {
     policy.validate()?;
-    let policy_json = serde_json::to_string(
-        &serde_json::json!({"catalog_version":"s14-1","policy":policy,"request":report.request,"schema_version":3,"validator_version":"s14-1"}),
-    )?;
+    let policy_json = canonical_policy(report, policy)?;
     let signature = format!("sha256:{}", digest(policy_json.as_bytes()));
     let defs = [
         ("advisory", "short_title", "title_min", "title"),
@@ -474,7 +600,7 @@ pub fn generate(
         ("advisory", "too_many_links", "links_max", "links"),
         ("observation", "noindex", "", "robots"),
         ("observation", "http_redirect", "", "status"),
-        ("observation", "missing_hreflang_xdefault", "", "alternates"),
+        ("observation", "alternates_observed", "", "alternates"),
         ("observation", "external_target", "", "status"),
         ("policy_violation", "noindex", "require_indexable", "robots"),
         (
@@ -487,6 +613,10 @@ pub fn generate(
     let mut contract = Candidate {
         policy_canonical_json: policy_json,
         policy_digest: signature.clone(),
+        observed_at: crate::contract::Interval {
+            started_at: report.started_at.clone(),
+            finished_at: report.finished_at.clone(),
+        },
         records: vec![],
         coverage: vec![],
     };
@@ -498,6 +628,7 @@ pub fn generate(
             candidates: 0,
             emitted: 0,
             omitted: 0,
+            omission_reason: None,
             complete: false,
             eligibility_counts: BTreeMap::new(),
             attempt_counts: BTreeMap::new(),
@@ -526,7 +657,7 @@ pub fn generate(
                 || page.status.is_none()
                 || page.extraction_truncated
                 || (category == "observation"
-                    && matches!(rule, "noindex" | "missing_hreflang_xdefault")
+                    && matches!(rule, "noindex" | "alternates_observed")
                     && !page.html());
             let applicable = in_scope
                 && !page.is_resource
@@ -592,8 +723,17 @@ pub fn generate(
             if let Some(reason) = reason.filter(|_| outcome == "unknown") {
                 *coverage.unknown_reasons.entry(reason.into()).or_default() += 1;
             }
-            if contract.records.len() >= 512 {
+            if contract.records.len() >= 512
+                || (category == "observation"
+                    && contract
+                        .records
+                        .iter()
+                        .filter(|r| r.category == "observation")
+                        .count()
+                        >= 128)
+            {
                 coverage.omitted += 1;
+                coverage.omission_reason = Some("record_limit".into());
                 continue;
             }
             let mut record = Record {
@@ -612,6 +752,21 @@ pub fn generate(
                     "unavailable"
                 }
                 .into(),
+                observed_fact: if category == "observation" && attempt == "completed" {
+                    Some(match rule {
+                        "noindex" => serde_json::json!(page.noindex()),
+                        "http_redirect" => {
+                            serde_json::json!(page.status.is_some_and(|s| (300..400).contains(&s)))
+                        }
+                        "alternates_observed" => {
+                            serde_json::json!({"count":page.alternates.len(), "x_default_present":page.alternates.iter().any(|a| a.language.eq_ignore_ascii_case("x-default"))})
+                        }
+                        "external_target" => serde_json::json!(page.status),
+                        _ => serde_json::Value::Null,
+                    })
+                } else {
+                    None
+                },
                 source_locator: if attempt == "completed" {
                     Some(format!("/pages/{i}/{field}"))
                 } else {
@@ -630,7 +785,7 @@ pub fn generate(
                     "unknown"
                 }
                 .into(),
-                interval_ref: "report.observed_at".into(),
+                interval_ref: "candidate.observed_at".into(),
                 policy_ref: signature.clone(),
                 reason: reason.map(str::to_owned),
             };
@@ -646,6 +801,7 @@ pub fn generate(
             candidates: ids,
         });
         coverage.complete = report.coverage_complete
+            && (rule != "external_target" || report.request.check_external_links)
             && coverage.omitted == 0
             && *coverage.outcomes.get("unknown").unwrap_or(&0) == 0;
         contract.coverage.push(coverage);
@@ -664,6 +820,7 @@ pub fn generate(
         candidates: 0,
         emitted: 0,
         omitted: 0,
+        omission_reason: None,
         complete: false,
         eligibility_counts: BTreeMap::new(),
         attempt_counts: BTreeMap::new(),
@@ -701,7 +858,20 @@ pub fn generate(
                     "unknown",
                     "not_attempted",
                     "unknown",
-                    Some("external_target_unavailable"),
+                    Some(
+                        if page.extraction_truncated
+                            || page.blocked_by_robots
+                            || page.error.is_some()
+                        {
+                            "source_unavailable"
+                        } else if target.is_some() {
+                            "external_target_unavailable"
+                        } else if report.request.check_external_links {
+                            "external_target_not_fetched"
+                        } else {
+                            "external_check_disabled"
+                        },
+                    ),
                 )
             };
             *edge_coverage
@@ -719,8 +889,16 @@ pub fn generate(
                     .entry(reason.into())
                     .or_default() += 1;
             }
-            if contract.records.len() >= 512 {
+            if contract.records.len() >= 512
+                || contract
+                    .records
+                    .iter()
+                    .filter(|r| r.category == "observation")
+                    .count()
+                    >= 128
+            {
                 edge_coverage.omitted += 1;
+                edge_coverage.omission_reason = Some("record_limit".into());
                 continue;
             }
             let pointer = format!("/pages/{page_index}/links/{link_index}");
@@ -735,6 +913,11 @@ pub fn generate(
                 attempt: attempt.into(),
                 outcome: outcome.into(),
                 actual: if available { "source" } else { "unavailable" }.into(),
+                observed_fact: if available {
+                    Some(serde_json::json!(target.and_then(|p| p.status)))
+                } else {
+                    None
+                },
                 source_locator: if available {
                     Some(pointer.clone())
                 } else {
@@ -748,7 +931,7 @@ pub fn generate(
                 },
                 expected: None,
                 confidence: if available { "high" } else { "unknown" }.into(),
-                interval_ref: "report.observed_at".into(),
+                interval_ref: "candidate.observed_at".into(),
                 policy_ref: signature.clone(),
                 reason: reason.map(str::to_owned),
             };
@@ -758,6 +941,7 @@ pub fn generate(
         }
     }
     edge_coverage.complete = report.coverage_complete
+        && report.request.check_external_links
         && report
             .pages
             .iter()
@@ -800,6 +984,9 @@ mod tests {
     fn sample() -> (Candidate, Report) {
         let report: Report =
             serde_json::from_str(include_str!("../fixtures/contracts/legacy.json")).unwrap();
+        let canonical =
+            canonical_policy(&report, &crate::policy::AdvisoryPolicy::default()).unwrap();
+        let signature = format!("sha256:{}", digest(canonical.as_bytes()));
         let mut r = Record {
             record_id: String::new(),
             category: "advisory".into(),
@@ -811,19 +998,24 @@ mod tests {
             attempt: "completed".into(),
             outcome: "advisory_triggered".into(),
             actual: "source".into(),
+            observed_fact: None,
             source_locator: Some("/pages/0/title".into()),
             context_locator: None,
             target_locator: None,
-            expected: Some("/threshold".into()),
+            expected: Some("/policy/title_min".into()),
             confidence: "high".into(),
-            interval_ref: "report.observed_at".into(),
-            policy_ref: format!("sha256:{}", digest(br#"{"threshold":15}"#)),
+            interval_ref: "candidate.observed_at".into(),
+            policy_ref: signature.clone(),
             reason: None,
         };
         r.record_id = record_id(&r);
         let c = Candidate {
-            policy_canonical_json: r#"{"threshold":15}"#.into(),
-            policy_digest: format!("sha256:{}", digest(br#"{"threshold":15}"#)),
+            policy_canonical_json: canonical,
+            policy_digest: signature,
+            observed_at: crate::contract::Interval {
+                started_at: report.started_at.clone(),
+                finished_at: report.finished_at.clone(),
+            },
             records: vec![r],
             coverage: vec![Coverage {
                 category: "advisory".into(),
@@ -831,6 +1023,7 @@ mod tests {
                 candidates: 1,
                 emitted: 1,
                 omitted: 0,
+                omission_reason: None,
                 complete: false,
                 eligibility_counts: BTreeMap::from([("eligible".into(), 1)]),
                 attempt_counts: BTreeMap::from([("completed".into(), 1)]),
@@ -852,6 +1045,12 @@ mod tests {
         let (candidate, manifest) =
             generate(&report, &crate::policy::AdvisoryPolicy::default()).unwrap();
         assert_eq!(manifest.len(), 13);
+        let guidance = crate::policy::catalog();
+        assert!(
+            manifest
+                .iter()
+                .all(|row| guidance.iter().any(|g| g.rule == row.rule_id))
+        );
         assert!(
             validate_generated(
                 &candidate,
@@ -940,6 +1139,15 @@ mod tests {
             .unwrap();
         edge.context_locator = Some("/pages/0/links/1".into());
         assert!(validate(&bad, &report, &manifest).is_err());
+        report.pages[0].links.reverse();
+        let (reordered, _) = generate(&report, &policy).unwrap();
+        let old_edge = edges[1];
+        let new_edge = reordered
+            .records
+            .iter()
+            .find(|r| r.rule_id == "external_link" && r.discriminator == "edge:1")
+            .unwrap();
+        assert!(!resolves(old_edge, new_edge, true, true, true, true));
         report.pages[0].extraction_truncated = true;
         let (partial, _) = generate(&report, &policy).unwrap();
         assert!(
@@ -1000,12 +1208,8 @@ mod tests {
         assert!(c.records.iter().any(|r| r.category == "observation"
             && r.rule_id == "noindex"
             && r.outcome == "observed"));
-        assert!(
-            c.records
-                .iter()
-                .any(|r| r.rule_id == "missing_hreflang_xdefault"
-                    && r.source_locator.as_deref() == Some("/pages/0/alternates"))
-        );
+        assert!(c.records.iter().any(|r| r.rule_id == "alternates_observed"
+            && r.source_locator.as_deref() == Some("/pages/0/alternates")));
         assert!(
             c.records
                 .iter()
@@ -1016,7 +1220,7 @@ mod tests {
         assert!(
             c.records
                 .iter()
-                .any(|r| r.rule_id == "missing_hreflang_xdefault" && r.outcome == "unknown")
+                .any(|r| r.rule_id == "alternates_observed" && r.outcome == "unknown")
         );
     }
     #[test]
@@ -1027,6 +1231,12 @@ mod tests {
         let guidance = report.policy_guidance.as_ref().unwrap();
         let candidate = guidance.candidate.as_ref().unwrap();
         let manifest = guidance.manifest.as_ref().unwrap();
+        assert!(
+            candidate
+                .coverage
+                .iter()
+                .any(|row| row.category == "advisory" && row.complete)
+        );
         assert!(validate_generated(candidate, manifest, &report, &guidance.config).is_ok());
         let mut changed = candidate.clone();
         changed.records[0].outcome = "violation".into();
@@ -1054,6 +1264,66 @@ mod tests {
         let mut altered = guidance.config.clone();
         altered.title_min += 1;
         assert!(validate_generated(candidate, manifest, &report, &altered).is_err());
+    }
+    #[test]
+    fn policy_identity_excludes_run_and_website_ids() {
+        let (_, mut report) = sample();
+        let policy = crate::policy::AdvisoryPolicy::default();
+        let (before, _) = generate(&report, &policy).unwrap();
+        report.request.request_id = uuid::Uuid::new_v4();
+        report.request.website_id = uuid::Uuid::new_v4();
+        report.request.binding_generation += 1;
+        report.request.delay_ms += 1000;
+        report.request.max_duration_seconds += 10;
+        let (after, _) = generate(&report, &policy).unwrap();
+        assert_eq!(before.policy_digest, after.policy_digest);
+        report.request.max_pages += 1;
+        assert_ne!(
+            before.policy_digest,
+            generate(&report, &policy).unwrap().0.policy_digest
+        );
+    }
+    #[test]
+    fn observation_facts_distinguish_xdefault_and_reject_interval_tampering() {
+        let (_, mut report) = sample();
+        let page = &mut report.pages[0];
+        page.status = Some(200);
+        page.content_type = "text/html".into();
+        page.error = None;
+        page.blocked_by_robots = false;
+        page.extraction_truncated = false;
+        page.alternates.clear();
+        let policy = crate::policy::AdvisoryPolicy::default();
+        let (absent, manifest) = generate(&report, &policy).unwrap();
+        let fact = absent
+            .records
+            .iter()
+            .find(|r| r.rule_id == "alternates_observed")
+            .unwrap()
+            .observed_fact
+            .as_ref()
+            .unwrap();
+        assert_eq!(fact["x_default_present"], false);
+        let mut invalid = absent.clone();
+        invalid.observed_at.started_at = "different".into();
+        assert!(validate(&invalid, &report, &manifest).is_err());
+        let page_url = report.pages[0].url.clone();
+        report.pages[0].alternates.push(crate::model::Alternate {
+            language: "x-default".into(),
+            url: page_url,
+        });
+        let (present, _) = generate(&report, &policy).unwrap();
+        assert_eq!(
+            present
+                .records
+                .iter()
+                .find(|r| r.rule_id == "alternates_observed")
+                .unwrap()
+                .observed_fact
+                .as_ref()
+                .unwrap()["x_default_present"],
+            true
+        );
     }
     #[test]
     fn generated_policy_identity_and_explicit_intent() {
@@ -1087,6 +1357,7 @@ mod tests {
     #[ignore = "regenerate local S14 interchange fixture"]
     fn export_candidate_fixture() {
         let (_, mut report) = sample();
+        report.pages.retain(|page| page.status.is_some());
         report.pages[0].status = Some(200);
         report.pages[0].content_type = "text/html".into();
         report.pages[0].title = "short".into();
@@ -1117,6 +1388,8 @@ mod tests {
         .unwrap();
         report.pages[0].extraction_truncated = true;
         report.coverage_complete = false;
+        report.outcome = "partial".into();
+        report.stop_reason = "discovery_or_extraction_limit".into();
         report.schema_version = 1;
         report.policy_guidance = None;
         crate::policy::apply_with_evidence(&mut report, &crate::policy::AdvisoryPolicy::default())
@@ -1147,30 +1420,52 @@ mod tests {
         assert!(!resolves(&old, &new, true, true, true, true));
     }
     #[test]
+    fn lifecycle_fixture_is_conservative() {
+        let cases: serde_json::Value =
+            serde_json::from_str(include_str!("../fixtures/policies/lifecycle-cases.json"))
+                .unwrap();
+        let (candidate, _) = sample();
+        for case in cases.as_array().unwrap() {
+            let mut previous = candidate.records[0].clone();
+            previous.category = "policy_violation".into();
+            previous.outcome = "violation".into();
+            previous.discriminator = case["discriminator"].as_str().unwrap().into();
+            previous.record_id = record_id(&previous);
+            let mut current = previous.clone();
+            current.outcome = case["outcome"].as_str().unwrap().into();
+            assert_eq!(
+                resolves(
+                    &previous,
+                    &current,
+                    case["policy_equal"].as_bool().unwrap(),
+                    case["manifest_equal"].as_bool().unwrap(),
+                    case["crawl_complete"].as_bool().unwrap(),
+                    case["coverage_complete"].as_bool().unwrap()
+                ),
+                case["resolves"].as_bool().unwrap()
+            );
+        }
+    }
+    #[test]
     fn canonical_unicode_and_safe_integer_vectors() {
         let vectors: serde_json::Value = serde_json::from_str(include_str!(
             "../fixtures/policies/canonical-unicode-vectors.json"
         ))
         .unwrap();
-        let (_, report) = sample();
         for vector in vectors["vectors"].as_array().unwrap() {
-            let candidate = Candidate {
-                policy_canonical_json: vector["canonical_utf8"].as_str().unwrap().into(),
-                policy_digest: vector["sha256"].as_str().unwrap().into(),
-                records: vec![],
-                coverage: vec![],
-            };
-            assert!(validate(&candidate, &report, &[]).is_ok());
+            let text = vector["canonical_utf8"].as_str().unwrap();
+            let value: serde_json::Value = serde_json::from_str(text).unwrap();
+            assert!(integers(&value));
+            assert_eq!(serde_json::to_string(&value).unwrap(), text);
+            assert_eq!(
+                format!("sha256:{}", digest(text.as_bytes())),
+                vector["sha256"].as_str().unwrap()
+            );
         }
         for vector in vectors["negative_vectors"].as_array().unwrap() {
-            let text = vector["canonical_utf8"].as_str().unwrap();
-            let candidate = Candidate {
-                policy_canonical_json: text.into(),
-                policy_digest: format!("sha256:{}", digest(text.as_bytes())),
-                records: vec![],
-                coverage: vec![],
-            };
-            assert!(validate(&candidate, &report, &[]).is_err());
+            let value: serde_json::Value =
+                serde_json::from_str(vector["canonical_utf8"].as_str().unwrap()).unwrap();
+            assert!(!integers(&value));
         }
     }
     #[test]
@@ -1180,13 +1475,25 @@ mod tests {
             category: "advisory".into(),
             rule_id: "short_title".into(),
             rule_version: "s14-1".into(),
-            expected_pointer: Some("/threshold".into()),
+            expected_pointer: Some("/policy/title_min".into()),
             candidates: vec![c.records[0].entity_id.clone()],
         }];
         assert!(validate(&c, &r, &manifest).is_ok());
+        let mut empty_policy = c.clone();
+        empty_policy.policy_canonical_json = "{}".into();
+        empty_policy.policy_digest = format!("sha256:{}", digest(b"{}"));
+        assert!(validate(&empty_policy, &r, &manifest).is_err());
+        let mut too_long = r.clone();
+        too_long.pages[0].title = "x".repeat(16_385);
+        assert!(validate(&c, &too_long, &manifest).is_err());
         let mut wrong_scope = manifest.clone();
         wrong_scope[0].candidates.clear();
         assert!(validate(&c, &r, &wrong_scope).is_err());
+        let mut wrong_policy = manifest.clone();
+        wrong_policy[0].expected_pointer = Some("/policy/title_max".into());
+        let mut wrong_candidate = c.clone();
+        wrong_candidate.records[0].expected = Some("/policy/title_max".into());
+        assert!(validate(&wrong_candidate, &r, &wrong_policy).is_err());
         let mut wrong_policy = manifest.clone();
         wrong_policy[0].expected_pointer = Some("/other".into());
         assert!(validate(&c, &r, &wrong_policy).is_err());

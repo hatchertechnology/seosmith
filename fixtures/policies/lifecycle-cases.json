@@ -1,0 +1,6 @@
+[
+  {"name":"same policy scalar complete resolves", "policy_equal":true,"manifest_equal":true,"crawl_complete":true,"coverage_complete":true,"discriminator":"self","outcome":"no_violation","resolves":true},
+  {"name":"changed policy never resolves", "policy_equal":false,"manifest_equal":true,"crawl_complete":true,"coverage_complete":true,"discriminator":"self","outcome":"no_violation","resolves":false},
+  {"name":"unknown never resolves", "policy_equal":true,"manifest_equal":true,"crawl_complete":true,"coverage_complete":false,"discriminator":"self","outcome":"unknown","resolves":false},
+  {"name":"edge ordinal never resolves", "policy_equal":true,"manifest_equal":true,"crawl_complete":true,"coverage_complete":true,"discriminator":"edge:0","outcome":"no_violation","resolves":false}
+]
