@@ -49,6 +49,23 @@ pub struct Candidate {
 fn component(s: &str) -> bool {
     !s.is_empty() && s.len() <= 256 && s.bytes().all(|c| (0x20..=0x7e).contains(&c))
 }
+fn valid_pointer(pointer: &str) -> bool {
+    if !pointer.starts_with('/') || pointer.len() > 1024 {
+        return false;
+    }
+    let bytes = pointer.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'~' {
+            if i + 1 == bytes.len() || !matches!(bytes[i + 1], b'0' | b'1') {
+                return false;
+            }
+            i += 1;
+        }
+        i += 1;
+    }
+    true
+}
 pub fn record_id(r: &Record) -> String {
     format!(
         "sha256:{}",
@@ -143,9 +160,9 @@ pub fn validate(candidate: &Candidate, report: &Report, manifest: &[(&str, &str)
         );
         ensure!(
             if row["expected"] == "policy_source" {
-                r.expected.as_ref().is_some_and(|p| {
-                    p.starts_with('/') && p.len() <= 1024 && value.pointer(p).is_some()
-                })
+                r.expected
+                    .as_ref()
+                    .is_some_and(|p| valid_pointer(p) && value.pointer(p).is_some())
             } else {
                 r.expected.is_none()
             },
@@ -161,7 +178,7 @@ pub fn validate(candidate: &Candidate, report: &Report, manifest: &[(&str, &str)
             "invalid provenance"
         );
         if let Some(pointer) = &r.source_locator {
-            ensure!(pointer.len() <= 1024, "pointer limit");
+            ensure!(valid_pointer(pointer), "invalid source pointer");
             let parts: Vec<_> = pointer.split('/').collect();
             ensure!(
                 parts.len() >= 3 && parts[0].is_empty() && parts[1] == "pages",
@@ -311,6 +328,9 @@ mod tests {
         assert!(validate(&c, &r, &manifest).is_ok());
         let mut invalid = c.clone();
         invalid.records[0].expected = Some("/missing".into());
+        assert!(validate(&invalid, &r, &manifest).is_err());
+        let mut invalid = c.clone();
+        invalid.records[0].expected = Some("/threshold~2".into());
         assert!(validate(&invalid, &r, &manifest).is_err());
         let mut invalid = c.clone();
         invalid.records[0].confidence = "unknown".into();
