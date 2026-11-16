@@ -231,6 +231,40 @@ mod tests {
         );
     }
     #[test]
+    fn redirect_requires_explicit_intent_and_observed_status() {
+        let mut r = report();
+        r.pages[0].status = Some(301);
+        let mut config = AdvisoryPolicy::default();
+        apply(&mut r, &config);
+        assert!(!r.findings.iter().any(|f| f.rule == "http_redirect"));
+        config.forbid_redirects = true;
+        apply(&mut r, &config);
+        assert!(r.findings.iter().any(
+            |f| f.rule == "http_redirect" && f.details["classification"] == "policy_violation"
+        ));
+        r.pages[0].status = None;
+        apply(&mut r, &config);
+        assert!(!r.findings.iter().any(|f| f.rule == "http_redirect"));
+    }
+    #[test]
+    fn catalog_documents_only_reviewed_rules() {
+        let catalog = catalog();
+        assert!(
+            catalog.iter().any(
+                |g| g.rule == "little_content" && g.source.contains("creating-helpful-content")
+            )
+        );
+        assert!(
+            catalog
+                .iter()
+                .any(|g| g.rule == "missing_hreflang_xdefault" && g.kind == "observation")
+        );
+        assert!(!catalog.iter().any(|g| g.rule == "missing_title"));
+        assert!(catalog.iter().all(|g| !g.applicability.is_empty()
+            && !g.evidence_schema.is_empty()
+            && !g.fix_guidance.is_empty()));
+    }
+    #[test]
     fn unavailable_page_does_not_create_advisory_and_bad_ranges_fail() {
         let mut r = report();
         r.pages[0].extraction_truncated = true;
