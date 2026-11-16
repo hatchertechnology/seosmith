@@ -405,5 +405,6 @@ async fn report(
         pages,
         findings,
         evidence_contract: None,
+        policy_guidance: None,
     })
 }

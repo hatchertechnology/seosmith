@@ -17,6 +17,9 @@ struct Cli {
     database: String,
     #[arg(long, env = "SEOSMITH_EVIDENCE_CONTRACT_V2", default_value_t = false)]
     evidence_contract_v2: bool,
+    /// Experimental S14 policy JSON; requires compatible H04 display before activation.
+    #[arg(long, env = "SEOSMITH_ADVISORY_POLICY")]
+    advisory_policy: Option<std::path::PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -64,6 +67,24 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
     let cli = Cli::parse();
+    ensure!(
+        !(cli.evidence_contract_v2 && cli.advisory_policy.is_some()),
+        "S14 and S01 cannot be combined until their wire contract is agreed"
+    );
+    let policy: Option<seosmith::policy::AdvisoryPolicy> = cli
+        .advisory_policy
+        .as_ref()
+        .map(|path| -> Result<_> {
+            let policy: seosmith::policy::AdvisoryPolicy =
+                serde_json::from_slice(&std::fs::read(path)?)?;
+            policy.validate()?;
+            Ok(policy)
+        })
+        .transpose()?;
+    ensure!(
+        !(policy.is_some() && matches!(cli.command, Command::Serve { .. })),
+        "S14 policy reports cannot be delivered until H04 and receiver support are ready"
+    );
     if matches!(cli.command, Command::Rules) {
         println!(
             "{}",
@@ -98,10 +119,18 @@ async fn main() -> Result<()> {
                 "database contains another queued job; use serve to drain it"
             );
             let mut report = crawler::crawl(&store, &job).await?;
+            if let Some(policy) = &policy {
+                seosmith::policy::apply(&mut report, policy);
+            }
             if cli.evidence_contract_v2 {
                 seosmith::contract::enable_v2(&mut report)?;
             }
-            store.finish(&report).await?;
+            if policy.is_some() {
+                // Experimental output is local only; never enqueue unsupported payloads.
+                store.fail(&job.request_id.to_string()).await?;
+            } else {
+                store.finish(&report).await?;
+            }
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::Serve { bind } => {
@@ -119,7 +148,7 @@ async fn main() -> Result<()> {
             let worker_stop = stop.clone();
             let worker = tokio::spawn(async move {
                 let result =
-                    process_jobs(crawl_store, &mut stopped, cli.evidence_contract_v2).await;
+                    process_jobs(crawl_store, &mut stopped, cli.evidence_contract_v2, policy).await;
                 let _ = worker_stop.send(true);
                 result
             });
@@ -160,6 +189,7 @@ async fn process_jobs(
     store: Store,
     stopped: &mut watch::Receiver<bool>,
     evidence_contract_v2: bool,
+    policy: Option<seosmith::policy::AdvisoryPolicy>,
 ) -> Result<()> {
     loop {
         if *stopped.borrow() {
@@ -172,6 +202,9 @@ async fn process_jobs(
                 _ = stopped.changed() => return Ok(()),
             };
             if let Ok(mut report) = result {
+                if let Some(policy) = &policy {
+                    seosmith::policy::apply(&mut report, policy);
+                }
                 finalize_job(&store, &mut report, evidence_contract_v2).await?;
             } else {
                 store.fail(&request.request_id.to_string()).await?;
