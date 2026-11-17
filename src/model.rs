@@ -213,6 +213,8 @@ pub struct Report {
     pub findings: Vec<Finding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence_contract: Option<crate::contract::EvidenceContract>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_guidance: Option<crate::policy::PolicyMetadata>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DeliveryEnvelope {

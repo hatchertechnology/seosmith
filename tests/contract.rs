@@ -58,6 +58,7 @@ fn report(partial: bool) -> Report {
         pages,
         findings,
         evidence_contract: None,
+        policy_guidance: None,
     }
 }
 

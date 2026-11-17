@@ -213,6 +213,10 @@ impl Store {
             .await?)
     }
     pub async fn finish(&self, r: &Report) -> Result<()> {
+        ensure!(
+            r.schema_version != 3,
+            "schema 3 local output cannot be persisted for delivery"
+        );
         let body = serde_json::to_string(r)?;
         if body.len() > 16 * 1024 * 1024 {
             return Err(ReportTooLarge.into());
@@ -222,6 +226,13 @@ impl Store {
             .bind(digest(body.as_bytes()))
             .bind(&r.outcome)
             .bind(r.request.request_id.to_string())
+            .execute(&self.0)
+            .await?;
+        Ok(())
+    }
+    pub async fn finish_local_only(&self, id: &str) -> Result<()> {
+        sqlx::query("UPDATE jobs SET state='local_only',error=NULL WHERE id=? AND state='running'")
+            .bind(id)
             .execute(&self.0)
             .await?;
         Ok(())

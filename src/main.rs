@@ -17,6 +17,9 @@ struct Cli {
     database: String,
     #[arg(long, env = "SEOSMITH_EVIDENCE_CONTRACT_V2", default_value_t = false)]
     evidence_contract_v2: bool,
+    /// Experimental S14 policy JSON; requires compatible H04 display before activation.
+    #[arg(long, env = "SEOSMITH_ADVISORY_POLICY")]
+    advisory_policy: Option<std::path::PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -69,7 +72,37 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
     let cli = Cli::parse();
+    ensure!(
+        !(cli.evidence_contract_v2 && cli.advisory_policy.is_some()),
+        "S14 and S01 cannot be combined until their wire contract is agreed"
+    );
+    let policy: Option<seosmith::policy::AdvisoryPolicy> = cli
+        .advisory_policy
+        .as_ref()
+        .map(|path| -> Result<_> {
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            std::fs::File::open(path)?
+                .take(65_537)
+                .read_to_end(&mut bytes)?;
+            ensure!(bytes.len() <= 65_536, "advisory policy exceeds 64 KiB");
+            let policy: seosmith::policy::AdvisoryPolicy = serde_json::from_slice(&bytes)?;
+            policy.validate()?;
+            Ok(policy)
+        })
+        .transpose()?;
+    ensure!(
+        !(policy.is_some() && matches!(cli.command, Command::Serve { .. })),
+        "S14 policy reports cannot be delivered until H04 and receiver support are ready"
+    );
     if let Command::Operations { operation } = cli.command {
+        if policy.is_some() {
+            eprintln!(
+                "{}",
+                serde_json::json!({"error":"operation_failed", "reason":"advisory_policy_unsupported"})
+            );
+            std::process::exit(1);
+        }
         if cli.evidence_contract_v2 {
             eprintln!(
                 "{}",
@@ -91,6 +124,10 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     if matches!(cli.command, Command::Rules) {
+        ensure!(
+            policy.is_none(),
+            "advisory policy guidance is available in local policy output"
+        );
         println!(
             "{}",
             serde_json::to_string_pretty(&seosmith::audit::rules())?
@@ -126,7 +163,15 @@ async fn main() -> Result<()> {
                 "database contains another queued job; use serve to drain it"
             );
             let mut report = crawler::crawl(&store, &job).await?;
-            if !finalize_job(&store, &mut report, cli.evidence_contract_v2).await? {
+            if let Some(policy) = &policy {
+                let result = seosmith::policy::apply_with_evidence(&mut report, policy);
+                if result.is_ok() {
+                    store.finish_local_only(&job.request_id.to_string()).await?;
+                } else {
+                    store.fail(&job.request_id.to_string()).await?;
+                }
+                result?;
+            } else if !finalize_job(&store, &mut report, cli.evidence_contract_v2).await? {
                 anyhow::bail!("report finalization failed");
             }
             println!("{}", serde_json::to_string_pretty(&report)?);

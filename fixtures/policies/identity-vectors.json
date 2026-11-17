@@ -1,0 +1,17 @@
+{
+  "scope": {
+    "website_id": "00000000-0000-4000-8000-000000000002",
+    "binding_generation": 1,
+    "digest": "sha256:da087543207e2eeb8ceaa54edb26127f9188d69bbda3dd495ad32c0ecb2047fb",
+    "different_website": "sha256:f3b1fde9be926e49815efba2d223d0306050b489823e5502e3c68f61ce23b478",
+    "different_binding": "sha256:a246aae7be8098498b1b1b99e888c3f771fd412157df850c6b34f453dc2ec06a"
+  },
+  "manifest": {
+    "digest": "sha256:afb5b53f473e5f60b76c96fe2d59f5beb1fce0bf2bd24c2668f10c4a986218ca",
+    "different_population": "sha256:afb5b53f473e5f60b76c96fe2d59f5beb1fce0bf2bd24c2668f10c4a986218ca",
+    "different_version": "sha256:db8925bae2d78cecdf2f411e0ff2ab5b5bf3609f826781c3135252124c139f06",
+    "different_expected": "sha256:c4412ecdd9f8ae7cc1d3392711ec24e224fdf8467b59c2c4df30f2e792cf00b9",
+    "removed_rule": "sha256:3c06874932b535e6eacf4e238bc75d0dba75ac2aca8fce4624d5a7f1ccff4113",
+    "added_rule": "sha256:7000df579dfeed9d3ee21a0913e606bd322b9f86a43e459a00ccddfd5d811f96"
+  }
+}

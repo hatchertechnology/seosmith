@@ -1,0 +1,8 @@
+[
+  {"value":"https://example.com/","accepted":true},
+  {"value":"https://EXAMPLE.com/","accepted":false},
+  {"value":"https://example.com","accepted":false},
+  {"value":"https://example.com:443/","accepted":false},
+  {"value":"https://example.com/?query=1","accepted":false},
+  {"value":"https://user@example.com/","accepted":false}
+]
