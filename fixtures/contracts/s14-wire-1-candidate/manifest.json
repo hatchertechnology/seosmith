@@ -3,10 +3,22 @@
   "note": "Report validation expectations exclude authentication and trusted ingestion scope; see ingestion-cases-candidate.json.",
   "files": [
     {
+      "path": "edge-cases-candidate.json",
+      "bytes": 3033,
+      "sha256": "e52487d60170ff5b4db186a2ba06b28b6ff37a19071ed4f2d60a6357bdfd6f5c",
+      "expected_report_validation": "reference"
+    },
+    {
       "path": "ingestion-cases-candidate.json",
       "bytes": 4654,
       "sha256": "6c396d1d848558269b1409aae8707f913126a22eca2b0525ad6b00870682e763",
       "expected_report_validation": "reference"
+    },
+    {
+      "path": "invalid-ambiguous-external-target.json",
+      "bytes": 50086,
+      "sha256": "d32fed45c444fc31701106d6df3b9db79575ca5adbc42cab74d87b7f64462c95",
+      "expected_report_validation": "reject"
     },
     {
       "path": "invalid-cap-plus-one.json",
@@ -162,6 +174,72 @@
       "path": "v4-candidate-depth64.json",
       "bytes": 46094,
       "sha256": "cb4eb3cef93f3048e5dc1d67ab499e72c4e301239d89172b9f736327a60ffd3e",
+      "expected_report_validation": "accept"
+    },
+    {
+      "path": "v4-candidate-edge-control.json",
+      "bytes": 43513,
+      "sha256": "e24aacc2cae1f57bf91ede4ec0e1280fd8899c0723000c804099d29598a7573a",
+      "expected_report_validation": "accept"
+    },
+    {
+      "path": "v4-candidate-edge-omitted.json",
+      "bytes": 425676,
+      "sha256": "a04ee5fe1042223e4e01942e0ec1aaebf3b118292fb314aa45429e3f61af234c",
+      "expected_report_validation": "accept"
+    },
+    {
+      "path": "v4-candidate-edge-source_blocked.json",
+      "bytes": 43226,
+      "sha256": "1cde4cb9bc98dc1a2bc71179a9dca9eb193e8bfc0db61b821a19175951388aff",
+      "expected_report_validation": "accept"
+    },
+    {
+      "path": "v4-candidate-edge-source_error.json",
+      "bytes": 43237,
+      "sha256": "da1ed6c726c235bd5a7c688347fa49afb8638a10f9686de0d5e5dec828e48e5c",
+      "expected_report_validation": "accept"
+    },
+    {
+      "path": "v4-candidate-edge-source_missing_status.json",
+      "bytes": 43228,
+      "sha256": "c5c6fc88b7cff029ddc577b53efa2aad55068558fa904c46ffacd1de6d756eb6",
+      "expected_report_validation": "accept"
+    },
+    {
+      "path": "v4-candidate-edge-source_non_html.json",
+      "bytes": 42906,
+      "sha256": "683b41bf058104646fbf80454ba28cb07c6acfa8307b5fcc086c77d25a0c75f8",
+      "expected_report_validation": "accept"
+    },
+    {
+      "path": "v4-candidate-edge-source_non_success.json",
+      "bytes": 42899,
+      "sha256": "f601bdfb04e237af9b437a05f68e513558ac2b421719d4a7c2e8106c6c5a45a7",
+      "expected_report_validation": "accept"
+    },
+    {
+      "path": "v4-candidate-edge-source_truncated.json",
+      "bytes": 43226,
+      "sha256": "2307481f816e6299acd58a2b7ffaf9b6c868c60a6aa5866101c1909cf834c5dd",
+      "expected_report_validation": "accept"
+    },
+    {
+      "path": "v4-candidate-edge-target_blocked.json",
+      "bytes": 43760,
+      "sha256": "0e84edfe030d5f75909ab4ad156958779dd603778774505c2c5ed01ec83ce420",
+      "expected_report_validation": "accept"
+    },
+    {
+      "path": "v4-candidate-edge-target_error.json",
+      "bytes": 43771,
+      "sha256": "8b326a37ec0edadf0c0a6ae338285fba3eacbfb083f4493728554a38056dfc39",
+      "expected_report_validation": "accept"
+    },
+    {
+      "path": "v4-candidate-edge-target_missing_status.json",
+      "bytes": 43762,
+      "sha256": "3e9fa34336c10a283044c235abe590b2e96642e9ebaf3b3c476b1320fbe1e3d9",
       "expected_report_validation": "accept"
     },
     {

@@ -214,8 +214,8 @@ impl Store {
     }
     pub async fn finish(&self, r: &Report) -> Result<()> {
         ensure!(
-            r.schema_version != 3,
-            "schema 3 local output cannot be persisted for delivery"
+            matches!(r.schema_version, 1 | 2),
+            "unsupported or local-only schema cannot be persisted for delivery"
         );
         let body = serde_json::to_string(r)?;
         if body.len() > 16 * 1024 * 1024 {
