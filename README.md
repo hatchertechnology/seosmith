@@ -181,9 +181,10 @@ built-in recurring scheduler or outbound job-claim protocol.
 
 ## Thor deployment
 
-[deploy/kubernetes.yaml](deploy/kubernetes.yaml) contains a one-replica Recreate
-Deployment, retained-state PVC, private ClusterIP Service and network policy.
-It is a deployment example, not an applied or fully provisioned installation.
+[deploy/thor/](deploy/thor/) contains the `htp-prod` Thor deployment and
+[deploy/thor-application.yaml](deploy/thor-application.yaml) its manually synced
+Argo application. [deploy/kubernetes.yaml](deploy/kubernetes.yaml) is a generic
+example, not the Thor configuration.
 
 Before applying through Argo:
 
@@ -194,8 +195,9 @@ Before applying through Argo:
 4. Deploy/provision the HTP receiver and matching website/generation/token hash.
 5. Verify DNS selectors, CNI enforcement and required egress. The example permits
    public IPv4 HTTP(S); IPv6-only sites need a reviewed matching egress policy.
-6. Expose only a private Tailscale/operator route. Label only its authorized
-   namespace `seosmith-access=true` after checking namespace ownership.
+6. Use the private Tailscale route and `tailscale` namespace / proxy pod selectors
+   in `deploy/thor/`; verify generated proxy labels and tailnet access. Do not
+   label a namespace `seosmith-access=true` for the Thor deployment.
 7. Back up SQLite consistently using its backup API or stop the service for a
    coordinated database/WAL copy; do not copy the main SQLite file alone live.
 8. Test interrupted crawl recovery, HTP outage recovery, restore, and negative
