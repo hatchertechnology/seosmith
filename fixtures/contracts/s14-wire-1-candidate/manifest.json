@@ -135,6 +135,42 @@
       "expected_report_validation": "reject"
     },
     {
+      "path": "policy-raw-bytes-65536.json",
+      "bytes": 65536,
+      "sha256": "1c918ccbfeef0b7fc8ae5c8d82e3b35970c5df531162b6ce029e93736bd06eed",
+      "expected_report_validation": "reference"
+    },
+    {
+      "path": "policy-raw-bytes-65537.json",
+      "bytes": 65537,
+      "sha256": "e0e4e1c9e32810ac996316b1e911639646aa182ed1c96915c8b05b2d54b3aefc",
+      "expected_report_validation": "reference"
+    },
+    {
+      "path": "policy-raw-cases-candidate.json",
+      "bytes": 867,
+      "sha256": "84e3c27750781f175d0444ae4ea885061b904564e1d13f6637574bff12b5b4a2",
+      "expected_report_validation": "reference"
+    },
+    {
+      "path": "policy-raw-depth-64.json",
+      "bytes": 137,
+      "sha256": "c76e806d4324da271ad06043cfbf86f8fd0162695dbaff4f71cd17eb142eb396",
+      "expected_report_validation": "reference"
+    },
+    {
+      "path": "policy-raw-depth-65.json",
+      "bytes": 139,
+      "sha256": "b58d3b3ca8846d0b7bc93125f571c4847a60191cc0e243befea1267e66c2f7ff",
+      "expected_report_validation": "reference"
+    },
+    {
+      "path": "policy-raw-escaped-duplicate.json",
+      "bytes": 18,
+      "sha256": "9b76ab5d01163a68899e361838ef85cf791c1a4aee792d8c714db00237a32647",
+      "expected_report_validation": "reference"
+    },
+    {
       "path": "registry-candidate.json",
       "bytes": 7283,
       "sha256": "94968e19f1c6b3f7976fcd3e73ec81a79abf8a44c35e15bde4b71c0742714419",
