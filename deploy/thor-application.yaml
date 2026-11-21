@@ -7,15 +7,13 @@ spec:
   project: default
   source:
     repoURL: https://github.com/hatchertechnology/seosmith.git
+    # Bootstrap must replace this with the exact reviewed merge SHA.
     targetRevision: main
     path: deploy/thor
   destination:
     server: https://kubernetes.default.svc
     namespace: htp-prod
   syncPolicy:
-    automated:
-      prune: false
-      selfHeal: true
     syncOptions:
       - ServerSideApply=true
       - CreateNamespace=true

@@ -65,7 +65,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: seosmith
-          # Build and publish first, then replace this tag with a verified digest.
+          # The imported local image is pinned to its verified manifest digest.
           image: localhost/seosmith@sha256:cb2a47997d459a5e4c4b0dd9a11f64bbc4e60f0bc9d231cbe8e039534bd835fd
           imagePullPolicy: Never
           securityContext:
