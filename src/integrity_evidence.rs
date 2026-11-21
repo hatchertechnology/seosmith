@@ -195,6 +195,7 @@ mod tests {
 pub struct Declaration {
     pub source: String,
     pub ordinal: usize,
+    pub entry_index: Option<usize>,
     pub raw: Option<String>,
     pub language: Option<String>,
     pub state: DeclarationState,
@@ -258,6 +259,7 @@ pub fn declarations(
             Declaration {
                 source: o.source.clone(),
                 ordinal: o.ordinal,
+                entry_index: None,
                 raw: o.raw_value.clone(),
                 language: o.raw_language.clone(),
                 state,
@@ -462,5 +464,145 @@ mod fixture_tests {
                     .collect::<Vec<_>>()
             );
         }
+    }
+}
+
+fn balanced_link_header(raw: &str) -> bool {
+    let (mut quoted, mut angle, mut escaped) = (false, false, false);
+    for ch in raw.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if quoted && ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == '"' && !angle {
+            quoted = !quoted;
+        }
+        if !quoted && ch == '<' {
+            if angle {
+                return false;
+            }
+            angle = true;
+        }
+        if !quoted && ch == '>' {
+            if !angle {
+                return false;
+            }
+            angle = false;
+        }
+    }
+    !quoted && !angle && !escaped
+}
+
+/// Interpret Link header entries while retaining the enclosing field and entry ordinal.
+/// Malformed entries make the collection incomplete instead of proving absence.
+pub fn header_declarations(
+    collection: &crate::collection_evidence::Collection,
+    base: &Url,
+    scope: &Url,
+    canonical: bool,
+) -> (Vec<Declaration>, bool) {
+    let mut declarations = Vec::new();
+    let mut complete = collection.complete;
+    for field in collection.occurrences.iter().filter(|o| o.source == "link") {
+        let Some(raw) = &field.raw_value else {
+            complete = false;
+            continue;
+        };
+        if !balanced_link_header(raw) {
+            complete = false;
+        }
+        for (entry_index, entry) in crate::extract::split_header(raw, ',')
+            .into_iter()
+            .enumerate()
+        {
+            let Some((target, attributes)) = entry
+                .trim()
+                .strip_prefix('<')
+                .and_then(|v| v.split_once('>'))
+            else {
+                complete = false;
+                continue;
+            };
+            let mut rel = None;
+            let mut language = None;
+            for attr in crate::extract::split_header(attributes, ';') {
+                if let Some((key, value)) = attr.trim().split_once('=') {
+                    let value = value.trim().trim_matches('"');
+                    if key.trim().eq_ignore_ascii_case("rel") {
+                        if rel.replace(value).is_some() {
+                            complete = false;
+                        }
+                    }
+                    if key.trim().eq_ignore_ascii_case("hreflang") {
+                        if language.replace(value).is_some() {
+                            complete = false;
+                        }
+                    }
+                }
+            }
+            let wanted = if canonical {
+                rel.is_some_and(|r| {
+                    r.split_whitespace()
+                        .any(|v| v.eq_ignore_ascii_case("canonical"))
+                })
+            } else {
+                rel.is_some_and(|r| {
+                    r.split_whitespace()
+                        .any(|v| v.eq_ignore_ascii_case("alternate"))
+                }) && language.is_some()
+            };
+            if !wanted {
+                continue;
+            }
+            let resolved = (!target.trim().is_empty())
+                .then(|| crate::model::normalize(base, target))
+                .flatten();
+            let state = if target.trim().is_empty() {
+                DeclarationState::Empty
+            } else if resolved.is_none() {
+                DeclarationState::Invalid
+            } else if resolved
+                .as_ref()
+                .is_some_and(|u| u.host_str() != scope.host_str() || u.port().is_some())
+            {
+                DeclarationState::OutsideScope
+            } else {
+                DeclarationState::Valid
+            };
+            declarations.push(Declaration {
+                source: "http_link".into(),
+                ordinal: field.ordinal,
+                entry_index: Some(entry_index),
+                raw: Some(target.into()),
+                language: language.map(str::to_owned),
+                state,
+                target: resolved.map(Into::into),
+            });
+        }
+    }
+    (declarations, complete)
+}
+#[cfg(test)]
+mod header_tests {
+    use super::*;
+    #[test]
+    fn repeated_fields_and_malformed_entries_retain_boundaries() {
+        let c = crate::collection_evidence::http_occurrences(&[
+            ("link", "</a>; rel=canonical, </b>; rel=canonical"),
+            ("link", "broken"),
+        ]);
+        let base = Url::parse("https://example.com/").unwrap();
+        let (items, complete) = header_declarations(&c, &base, &base, true);
+        assert!(!complete);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].ordinal, 0);
+        assert_eq!(items[1].entry_index, Some(1));
+        let malformed =
+            crate::collection_evidence::http_occurrences(&[("link", "</a>; rel=\"canonical")]);
+        assert!(!header_declarations(&malformed, &base, &base, true).1);
     }
 }

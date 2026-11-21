@@ -164,10 +164,14 @@ async fn discover_sitemaps(
         if collect {
             let evidence = match &fetched {
                 Ok(resp) if resp.status == 200 => {
-                    serde_json::json!({"version":"s02-s03-local-1", "state":"available", "status":resp.status, "document":crate::sitemap_evidence::parse(u.as_str(), &resp.body, MAX_BODY, 2_000)})
-                }
-                Ok(resp) if resp.status == 200 => {
-                    serde_json::json!({"version":"s02-s03-local-1", "state":"unavailable", "status":resp.status, "reason":"compressed_capture_unavailable"})
+                    let document =
+                        crate::sitemap_evidence::parse(u.as_str(), &resp.body, MAX_BODY, 2_000);
+                    let state = if document.error.is_some() {
+                        "partial"
+                    } else {
+                        "available"
+                    };
+                    serde_json::json!({"version":"s02-s03-local-1", "state":state, "status":resp.status, "document":document})
                 }
                 Ok(resp) => {
                     serde_json::json!({"version":"s02-s03-local-1", "state":"http_error", "status":resp.status})
