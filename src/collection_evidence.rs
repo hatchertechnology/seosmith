@@ -325,6 +325,23 @@ pub fn local_sidecar(
     capture: &PageCapture,
     max_bytes: usize,
 ) -> Result<serde_json::Value, &'static str> {
+    if capture.version != "s02-s03-local-1" {
+        return Err("unsupported_capture_version");
+    }
+    if !matches!(
+        capture.state.as_str(),
+        "available" | "robots_blocked" | "fetch_failed" | "not_fetched"
+    ) {
+        return Err("invalid_capture_state");
+    }
+    if !url::Url::parse(&capture.url).is_ok_and(|u| {
+        matches!(u.scheme(), "http" | "https")
+            && u.host_str().is_some()
+            && u.username().is_empty()
+            && u.password().is_none()
+    }) {
+        return Err("invalid_capture_url");
+    }
     let mut payload = capture.clone();
     let mut payload_budget = max_bytes.saturating_sub(256);
     loop {
@@ -338,8 +355,14 @@ pub fn local_sidecar(
                     && r.provenance != "matcher_disagreement"
                     && r.provenance != "matched_line_unavailable"
             });
-        let collections_complete = payload.http.as_ref().is_some_and(|c| c.complete)
-            && payload.html.as_ref().is_some_and(|c| c.complete);
+        let collections_complete = payload
+            .http
+            .as_ref()
+            .is_some_and(|c| c.complete && c.omitted == 0)
+            && payload
+                .html
+                .as_ref()
+                .is_some_and(|c| c.complete && c.omitted == 0);
         let complete = payload.state == "available" && robots_known && collections_complete;
         let has_evidence =
             payload.http.is_some() || payload.html.is_some() || !payload.robots.is_empty();
@@ -351,7 +374,13 @@ pub fn local_sidecar(
             "unavailable"
         };
         let omitted = match (&payload.http, &payload.html) {
-            (Some(http), Some(html)) if robots_known && http.complete && html.complete => {
+            (Some(http), Some(html))
+                if robots_known
+                    && http.complete
+                    && html.complete
+                    && http.omitted == 0
+                    && html.omitted == 0 =>
+            {
                 Some(http.omitted.saturating_add(html.omitted))
             }
             _ => None,
@@ -403,5 +432,15 @@ mod sidecar_tests {
         let partial = local_sidecar(&observed, 1024).unwrap();
         assert_eq!(partial["state"], "partial");
         assert!(partial["omitted"].is_null());
+        observed.html.as_mut().unwrap().complete = true;
+        observed.html.as_mut().unwrap().omitted = 1;
+        let inconsistent = local_sidecar(&observed, 1024).unwrap();
+        assert_eq!(inconsistent["state"], "partial");
+        assert!(inconsistent["omitted"].is_null());
+        observed.version = "unsupported".into();
+        assert_eq!(
+            local_sidecar(&observed, 1024),
+            Err("unsupported_capture_version")
+        );
     }
 }
