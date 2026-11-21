@@ -14,6 +14,8 @@ fn block(data: serde_json::Value) -> StructuredData {
 fn page() -> Page {
     Page {
         url: "https://example.com/a".into(),
+        status: Some(200),
+        content_type: "text/html".into(),
         ..Page::default()
     }
 }
@@ -222,7 +224,7 @@ fn breadcrumb_position_and_local_address_are_checked_without_assuming_references
             .iter()
             .any(|o| o.code == "invalid_breadcrumb_position" && o.path.ends_with("/position"))
     );
-    assert!(result.iter().any(|o| o.code == "address_not_expanded"));
+    assert!(result.iter().any(|o| o.code == "local_address_resolved"));
     assert!(!result.iter().any(|o| o.code == "address_type_candidate"));
 }
 
@@ -264,4 +266,106 @@ fn custom_context_is_unknown_instead_of_schema_profile_failure() {
     );
     assert!(result.iter().any(|o| o.code == "unsupported_context"));
     assert!(!result.iter().any(|o| o.code == "missing_required"));
+}
+
+#[test]
+fn price_specification_reference_resolution_preserves_unknowns() {
+    let unique = block(
+        json!({"@graph":[{"@type":"Product","name":"Item","offers":{"@type":"Offer","priceSpecification":{"@id":"#price"}}},{"@id":"#price","@type":"UnitPriceSpecification","price":12}]}),
+    );
+    let result = validate(&page(), &[unique]);
+    assert!(
+        result
+            .iter()
+            .any(|o| o.code == "local_price_specification_resolved")
+    );
+    assert!(!result.iter().any(|o| o.code == "missing_offer_price"));
+    let missing = block(
+        json!({"@type":"Product","name":"Item","offers":{"@type":"Offer","priceSpecification":{"@id":"#unknown"}}}),
+    );
+    let result = validate(&page(), &[missing]);
+    assert!(
+        result
+            .iter()
+            .any(|o| o.code == "price_specification_not_expanded")
+    );
+    assert!(!result.iter().any(|o| o.code == "missing_offer_price"));
+}
+
+#[test]
+fn saved_report_cli_emits_sidecar_without_database_or_report_mutation() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("report.json");
+    let database = dir.path().join("should-not-exist.sqlite");
+    let mut report: serde_json::Value =
+        serde_json::from_str(include_str!("../fixtures/contracts/legacy.json")).unwrap();
+    report["pages"][0]["structured_data"] = json!([{"format":"json_ld","data":{"@context":"https://schema.org","@type":"Product","name":"Widget"},"error":null}]);
+    let input = serde_json::to_vec(&report).unwrap();
+    std::fs::write(&path, &input).unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_seosmith"))
+        .args([
+            "--database",
+            database.to_str().unwrap(),
+            "validate-structured",
+            path.to_str().unwrap(),
+        ])
+        .env_remove("SEOSMITH_ADVISORY_POLICY")
+        .env_remove("SEOSMITH_EVIDENCE_CONTRACT_V2")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let sidecar: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        sidecar["profile_version"],
+        seosmith::structured_validation::PROFILE_VERSION
+    );
+    assert!(
+        sidecar["structured_validation"][0]["observations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|o| o["code"] == "missing_product_evidence")
+    );
+    assert_eq!(std::fs::read(path).unwrap(), input);
+    assert!(!database.exists());
+}
+
+#[test]
+fn blocked_page_cannot_report_structured_data_absence_as_validated() {
+    let p = Page {
+        blocked_by_robots: true,
+        ..page()
+    };
+    let result = seosmith::structured_validation::validate_crawl(&p, &[]);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].code, "page_unavailable");
+}
+
+#[test]
+fn offer_value_checks_report_precise_array_paths() {
+    let result = validate(
+        &page(),
+        &[block(
+            json!({"@type":"Product","name":"X","offers":{"@type":"AggregateOffer","lowPrice":["4.00",-2],"priceCurrency":"usd"}}),
+        )],
+    );
+    assert!(
+        result
+            .iter()
+            .any(|o| o.code == "invalid_offer_value" && o.path == "/0/data/offers/lowPrice/1")
+    );
+    assert!(
+        result
+            .iter()
+            .any(|o| o.code == "invalid_offer_value" && o.path == "/0/data/offers/priceCurrency")
+    );
+    assert!(
+        !result
+            .iter()
+            .any(|o| o.path == "/0/data/offers/lowPrice/0" && o.code == "invalid_offer_value")
+    );
 }

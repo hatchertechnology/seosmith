@@ -7,7 +7,7 @@ use url::Url;
 const MAX_OBSERVATIONS: usize = 512;
 const MAX_VALUE_BYTES: usize = 4096;
 
-pub const PROFILE_VERSION: &str = "google-subset-2026-11-21.1";
+pub const PROFILE_VERSION: &str = "google-subset-2026-11-21.2";
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Observation {
@@ -276,6 +276,41 @@ fn check_item(v: &Value, path: &str, base: &Url, ids: &IdIndex<'_>, out: &mut Ve
                         } else {
                             offer_path.clone()
                         };
+                        for field in ["price", "lowPrice", "priceCurrency"] {
+                            if let Some(raw) = op.get(field) {
+                                for (j, value) in values(raw).iter().enumerate() {
+                                    let valid = if field == "priceCurrency" {
+                                        value.as_str().is_some_and(|s| {
+                                            s.len() == 3
+                                                && s.bytes().all(|b| b.is_ascii_uppercase())
+                                        })
+                                    } else {
+                                        value.as_f64().is_some_and(|n| n >= 0.0)
+                                            || value.as_str().is_some_and(|s| {
+                                                s.parse::<f64>()
+                                                    .is_ok_and(|n| n.is_finite() && n >= 0.0)
+                                            })
+                                    };
+                                    if !valid {
+                                        add(
+                                            out,
+                                            "vocabulary",
+                                            "invalid_offer_value",
+                                            format!(
+                                                "{opath}/{field}{}",
+                                                if raw.is_array() {
+                                                    format!("/{j}")
+                                                } else {
+                                                    String::new()
+                                                }
+                                            ),
+                                            Some(value),
+                                            "Expected a nonnegative numeric price or an uppercase three-letter currency code",
+                                        );
+                                    }
+                                }
+                            }
+                        }
                         let offer_types = types(offer);
                         if offer_types.contains(&"AggregateOffer") {
                             for field in ["lowPrice", "priceCurrency"] {
@@ -291,25 +326,58 @@ fn check_item(v: &Value, path: &str, base: &Url, ids: &IdIndex<'_>, out: &mut Ve
                                 }
                             }
                         } else if offer_types.contains(&"Offer") {
-                            let has_price = op.get("price").is_some_and(present)
-                                || op.get("priceSpecification").is_some_and(|v| {
-                                    values(v)
-                                        .iter()
-                                        .any(|x| props(x).get("price").is_some_and(present))
-                                });
-                            let unresolved_spec = op
-                                .get("priceSpecification")
-                                .is_some_and(|v| values(v).iter().any(|item| is_reference(item)));
-                            if !has_price && unresolved_spec {
-                                add(
-                                    out,
-                                    "coverage",
-                                    "price_specification_not_expanded",
-                                    format!("{opath}/priceSpecification"),
-                                    op.get("priceSpecification"),
-                                    "Referenced price specification was not expanded",
-                                );
-                            } else if !has_price {
+                            let mut has_price = op.get("price").is_some_and(present);
+                            let mut unknown = false;
+                            if let Some(specifications) = op.get("priceSpecification") {
+                                for (i, specification) in values(specifications).iter().enumerate()
+                                {
+                                    let path = format!(
+                                        "{opath}/priceSpecification{}",
+                                        if specifications.is_array() {
+                                            format!("/{i}")
+                                        } else {
+                                            String::new()
+                                        }
+                                    );
+                                    let resolved = if is_reference(specification) {
+                                        unique_reference(specification, base, ids)
+                                    } else {
+                                        None
+                                    };
+                                    let (specification, target_path) = if let Some((
+                                        target,
+                                        target_path,
+                                    )) = resolved
+                                    {
+                                        add(
+                                            out,
+                                            "coverage",
+                                            "local_price_specification_resolved",
+                                            path.clone(),
+                                            Some(specification),
+                                            "Unique local price specification resolved to a retained definition",
+                                        );
+                                        (target, target_path.to_string())
+                                    } else {
+                                        (*specification, path)
+                                    };
+                                    if is_reference(specification) {
+                                        unknown = true;
+                                        add(
+                                            out,
+                                            "coverage",
+                                            "price_specification_not_expanded",
+                                            target_path,
+                                            Some(specification),
+                                            "Referenced price specification could not be uniquely resolved",
+                                        );
+                                    } else if props(specification).get("price").is_some_and(present)
+                                    {
+                                        has_price = true;
+                                    }
+                                }
+                            }
+                            if !has_price && !unknown {
                                 add(
                                     out,
                                     "provider_eligibility",
@@ -353,6 +421,24 @@ fn check_item(v: &Value, path: &str, base: &Url, ids: &IdIndex<'_>, out: &mut Ve
                             String::new()
                         }
                     );
+                    let resolved = if is_reference(entry) {
+                        unique_reference(entry, base, ids)
+                    } else {
+                        None
+                    };
+                    let (entry, location) = if let Some((target, target_path)) = resolved {
+                        add(
+                            out,
+                            "coverage",
+                            "local_address_resolved",
+                            location.clone(),
+                            Some(entry),
+                            "Unique local address reference resolved to a retained definition",
+                        );
+                        (target, target_path.to_string())
+                    } else {
+                        (*entry, location)
+                    };
                     if is_reference(entry) {
                         add(
                             out,
@@ -360,7 +446,7 @@ fn check_item(v: &Value, path: &str, base: &Url, ids: &IdIndex<'_>, out: &mut Ve
                             "address_not_expanded",
                             location,
                             Some(entry),
-                            "Referenced address requires graph expansion",
+                            "Referenced address could not be uniquely resolved",
                         );
                     } else if !entry.is_object() {
                         add(
@@ -651,6 +737,18 @@ fn heading_candidates(v: &Value, path: &str, headings: &[String], out: &mut Vec<
 
 /// Validate a page against the existing crawl inventory; no new network requests are made.
 pub fn validate_crawl(page: &Page, pages: &[Page]) -> Vec<Observation> {
+    if !page.html() || page.is_resource || page.blocked_by_robots || page.error.is_some() {
+        let mut out = Vec::new();
+        add(
+            &mut out,
+            "coverage",
+            "page_unavailable",
+            "".into(),
+            None,
+            "Successful HTML source was not available for structured-data validation",
+        );
+        return out;
+    }
     let mut out = validate(page, &page.structured_data);
     for (i, block) in page.structured_data.iter().enumerate() {
         if let Some(v) = &block.data {

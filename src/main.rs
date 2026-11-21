@@ -104,7 +104,11 @@ async fn main() -> Result<()> {
             policy.is_none() && !cli.evidence_contract_v2,
             "validation cannot be combined with experimental report contracts"
         );
-        let input = std::fs::read(report)?;
+        use std::io::Read;
+        let mut input = Vec::new();
+        std::fs::File::open(report)?
+            .take(16 * 1024 * 1024 + 1)
+            .read_to_end(&mut input)?;
         ensure!(input.len() <= 16 * 1024 * 1024, "report exceeds 16 MiB");
         let report: seosmith::model::Report = serde_json::from_slice(&input)?;
         let observations: Vec<_> = report.pages.iter().enumerate().map(|(page_index, page)| serde_json::json!({"page_index": page_index, "url": page.url, "observations": seosmith::structured_validation::validate_crawl(page, &report.pages)})).collect();
