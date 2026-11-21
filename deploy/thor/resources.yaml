@@ -75,7 +75,7 @@ spec:
               for attempt in 1 2 3; do
                 public_status=$(curl --noproxy '*' -sS -o /dev/null --max-time 10 -w '%{http_code}' https://htp-api-kerry-hatcher.fly.dev/ || true)
                 [ "$public_status" = 200 ] || exit 1
-                private_status=$(curl --noproxy '*' -ksS -o /dev/null --max-time 3 -w '%{http_code}' https://kubernetes.default.svc/ 2>/dev/null || true)
+                private_status=$(curl --noproxy '*' -ksS -o /dev/null --max-time 3 -w '%{http_code}' https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}/ 2>/dev/null || true)
                 [ "$private_status" = 000 ] || exit 1
                 sleep 2
               done
@@ -88,9 +88,11 @@ spec:
             requests:
               cpu: 25m
               memory: 32Mi
+              ephemeral-storage: 16Mi
             limits:
               cpu: 250m
               memory: 128Mi
+              ephemeral-storage: 32Mi
       containers:
         - name: seosmith
           # The imported local image is pinned to its verified manifest digest.
