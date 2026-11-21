@@ -8,6 +8,13 @@ pub struct DirectiveSource {
     /// `None` means generic; a named source applies only to that bot.
     pub bot: Option<String>,
     pub value: String,
+    pub locator: Option<OccurrenceLocator>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OccurrenceLocator {
+    pub source: String,
+    pub ordinal: usize,
+    pub part: Option<usize>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Source {
@@ -115,16 +122,19 @@ mod tests {
                 source: Source::HtmlMeta,
                 bot: None,
                 value: "index, follow".into(),
+                locator: None,
             },
             DirectiveSource {
                 source: Source::HttpHeader,
                 bot: Some("Googlebot".into()),
                 value: "noindex, nofollow".into(),
+                locator: None,
             },
             DirectiveSource {
                 source: Source::HtmlMeta,
                 bot: Some("GPTBot".into()),
                 value: "noindex".into(),
+                locator: None,
             },
         ];
         let google = evaluate("googlebot", ContentState::Available, &sources);
@@ -221,7 +231,7 @@ pub fn evaluate_capture(
                 continue;
             };
             let mut agent: Option<String> = None;
-            for part in raw.split(',') {
+            for (part_index, part) in raw.split(',').enumerate() {
                 let mut value = part.trim();
                 if let Some((prefix, suffix)) = value.split_once(':') {
                     let key = prefix.trim().to_ascii_lowercase();
@@ -249,6 +259,11 @@ pub fn evaluate_capture(
                         source: Source::HttpHeader,
                         bot: agent.clone(),
                         value: value.into(),
+                        locator: Some(OccurrenceLocator {
+                            source: field.source.clone(),
+                            ordinal: field.ordinal,
+                            part: Some(part_index),
+                        }),
                     });
                 }
             }
@@ -273,6 +288,11 @@ pub fn evaluate_capture(
                         source: Source::HtmlMeta,
                         bot: (!name.eq_ignore_ascii_case("robots")).then(|| name.to_owned()),
                         value: value.clone(),
+                        locator: Some(OccurrenceLocator {
+                            source: meta.source.clone(),
+                            ordinal: meta.ordinal,
+                            part: None,
+                        }),
                     });
                 } else {
                     complete = false;
@@ -314,6 +334,17 @@ mod capture_tests {
             evaluate_capture("Googlebot", &capture).index,
             Decision::Restricted
         );
+        let google = evaluate_capture("Googlebot", &capture);
+        assert!(google.applicable.iter().any(|d| {
+            d.locator
+                .as_ref()
+                .is_some_and(|l| l.source == "x-robots-tag" && l.ordinal == 0 && l.part == Some(1))
+        }));
+        assert!(google.applicable.iter().any(|d| {
+            d.locator
+                .as_ref()
+                .is_some_and(|l| l.source == "html_head_meta" && l.ordinal == 0 && l.part.is_none())
+        }));
         assert_eq!(
             evaluate_capture("GPTBot", &capture).follow,
             Decision::Allowed
