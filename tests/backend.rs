@@ -36,6 +36,7 @@ fn response(html: &str) -> Response {
         headers: BTreeMap::from([("content-type".into(), "text/html".into())]),
         body: html.as_bytes().to_vec(),
         ttfb_ms: 10,
+        raw_headers: None,
     }
 }
 async fn db() -> (tempfile::TempDir, Store) {
@@ -203,8 +204,8 @@ impl Transport for Fixture {
     async fn get(&self, u: &Url) -> anyhow::Result<Response> {
         self.calls.lock().unwrap().push(u.to_string());
         Ok(match u.path() {
-            "/robots.txt"=>Response{status:200,headers:BTreeMap::new(),body:b"User-agent: *\nDisallow: /private".to_vec(),ttfb_ms:1},
-            "/sitemap.xml"=>Response{status:200,headers:BTreeMap::new(),body:b"<urlset><url><loc>https://example.com/private</loc></url><url><loc>https://example.com/orphan</loc></url></urlset>".to_vec(),ttfb_ms:1},
+            "/robots.txt"=>Response{status:200,headers:BTreeMap::new(),body:b"User-agent: *\nDisallow: /private".to_vec(),ttfb_ms:1,raw_headers:None},
+            "/sitemap.xml"=>Response{status:200,headers:BTreeMap::new(),body:b"<urlset><url><loc>https://example.com/private</loc></url><url><loc>https://example.com/orphan</loc></url></urlset>".to_vec(),ttfb_ms:1,raw_headers:None},
             "/"=>response("<html><head><title>Shared title for test</title></head><body><a href='/about'>About</a><a href='/private'>Private</a><a href='http://127.0.0.1/'>Never fetch</a></body></html>"),
             _=>response("<html><head><title>Shared title for test</title></head><body><h1>Page</h1></body></html>"),
         })
@@ -445,18 +446,21 @@ impl Transport for Resources {
                 headers: BTreeMap::new(),
                 body: Vec::new(),
                 ttfb_ms: 1,
+                raw_headers: None,
             },
             "/sitemap.xml" | "/bad" => Response {
                 status: 404,
                 headers: BTreeMap::new(),
                 body: Vec::new(),
                 ttfb_ms: 1,
+                raw_headers: None,
             },
             "/image.jpg" => Response {
                 status: 200,
                 headers: BTreeMap::from([("content-type".into(), "image/jpeg".into())]),
                 body: vec![0; 150_000],
                 ttfb_ms: 1,
+                raw_headers: None,
             },
             _ => response(
                 "<html><head><title>Resource test</title></head><body><img src='/image.jpg' alt='Test' width='10' height='10'><a href='https://other.example/bad'>External</a></body></html>",
@@ -607,4 +611,46 @@ async fn rejected_reports_do_not_exhaust_queue_or_expire() {
         .await
         .unwrap();
     assert!(store.submit(&request()).await.is_err());
+}
+
+#[tokio::test]
+async fn local_sidecar_checkpoint_is_atomic_and_legacy_missing_is_unknown() {
+    use seosmith::collection_evidence::PageCapture;
+    let (_dir, store) = db().await;
+    let r = request();
+    store.submit(&r).await.unwrap();
+    let id = r.request_id.to_string();
+    assert!(
+        store
+            .s02_s03_page(&id, r.url.as_str())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let page = Page {
+        url: r.url.to_string(),
+        status: Some(200),
+        ..Page::default()
+    };
+    let capture = PageCapture::unavailable(&page.url, "robots_blocked");
+    store
+        .save_page_with_s02_s03(&id, &page, &capture)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.s02_s03_page(&id, &page.url).await.unwrap().unwrap(),
+        capture
+    );
+    assert_eq!(store.pages(&id).await.unwrap().len(), 1);
+    let invalid = PageCapture::unavailable("https://example.com/wrong", "not_fetched");
+    assert!(
+        store
+            .save_page_with_s02_s03(&id, &page, &invalid)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store.s02_s03_page(&id, &page.url).await.unwrap().unwrap(),
+        capture
+    );
 }

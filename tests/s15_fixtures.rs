@@ -19,6 +19,7 @@ fn labeled_metadata_fixtures_match_parser_and_audit() {
             headers: BTreeMap::from([("content-type".into(), "text/html".into())]),
             body: fs::read(root.join(html)).unwrap(),
             ttfb_ms: 0,
+            raw_headers: None,
         };
         let page = parse::parse(&url, 0, false, &response);
         assert_eq!(

@@ -174,7 +174,7 @@ pub fn decode(body: &[u8], content_type: &str) -> (String, String, bool) {
     (value.into_owned(), used.name().into(), errors)
 }
 /// Split only outside quoted strings and angle-bracket URL targets.
-fn split_header(value: &str, delimiter: char) -> Vec<&str> {
+pub(crate) fn split_header(value: &str, delimiter: char) -> Vec<&str> {
     let (mut quoted, mut angle, mut escaped, mut start) = (false, false, false, 0);
     let mut parts = Vec::new();
     for (i, c) in value.char_indices() {

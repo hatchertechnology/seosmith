@@ -13,6 +13,8 @@ pub const MAX_BODY: usize = 4 * 1024 * 1024;
 pub struct Response {
     pub status: u16,
     pub headers: BTreeMap<String, String>,
+    /// Individual header fields in HTTP library iteration order, before legacy merging.
+    pub raw_headers: Option<Vec<(String, String)>>,
     pub body: Vec<u8>,
     pub ttfb_ms: u64,
 }
@@ -114,8 +116,13 @@ impl Transport for Fetcher {
         let ttfb_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let status = response.status().as_u16();
         let mut headers = BTreeMap::<String, String>::new();
+        let mut raw_headers = Vec::new();
+        let mut raw_headers_complete = true;
         for (key, value) in response.headers() {
             if let Ok(value) = value.to_str() {
+                if key.as_str() == "x-robots-tag" || key.as_str() == "link" {
+                    raw_headers.push((key.to_string(), value.to_owned()));
+                }
                 headers
                     .entry(key.to_string())
                     .and_modify(|old| {
@@ -123,6 +130,8 @@ impl Transport for Fetcher {
                         old.push_str(value);
                     })
                     .or_insert_with(|| value.to_owned());
+            } else if key.as_str() == "x-robots-tag" || key.as_str() == "link" {
+                raw_headers_complete = false;
             }
         }
         if response
@@ -142,6 +151,7 @@ impl Transport for Fetcher {
         Ok(Response {
             status,
             headers,
+            raw_headers: raw_headers_complete.then_some(raw_headers),
             body,
             ttfb_ms,
         })
