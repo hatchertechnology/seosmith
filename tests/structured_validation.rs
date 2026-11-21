@@ -112,3 +112,21 @@ fn nested_breadcrumb_and_resource_evidence() {
                 && o.explanation.contains("not_observed"))
     );
 }
+
+#[test]
+fn output_limit_is_explicit_and_resource_fragments_are_ignored() {
+    use seosmith::structured_validation::referenced_resource;
+    let items: Vec<_> = (0..600).map(|_| json!({"@type":"Product"})).collect();
+    let result = validate(&page(), &[block(json!(items))]);
+    assert_eq!(result.len(), 512);
+    assert_eq!(result.last().unwrap().code, "observation_limit");
+    let resource = Page {
+        url: "https://example.com/image.png".into(),
+        status: Some(200),
+        ..Page::default()
+    };
+    assert_eq!(
+        referenced_resource("https://example.com/a", "/image.png#preview", &[resource]),
+        ("observed", Some(200))
+    );
+}

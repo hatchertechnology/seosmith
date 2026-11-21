@@ -4,6 +4,9 @@ use serde_json::Value;
 use std::collections::HashMap;
 use url::Url;
 
+const MAX_OBSERVATIONS: usize = 512;
+const MAX_VALUE_BYTES: usize = 4096;
+
 pub const PROFILE_VERSION: &str = "google-subset-2026-11-21.1";
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -13,6 +16,7 @@ pub struct Observation {
     /// RFC 6901 pointer relative to the page's `structured_data` array.
     pub path: String,
     pub value: Option<Value>,
+    pub value_omitted: bool,
     pub explanation: String,
 }
 
@@ -24,11 +28,31 @@ fn add(
     value: Option<&Value>,
     explanation: &str,
 ) {
+    if out.len() >= MAX_OBSERVATIONS {
+        return;
+    }
+    if out.len() == MAX_OBSERVATIONS - 1 {
+        out.push(Observation {
+            category: "coverage",
+            code: "observation_limit",
+            path: String::new(),
+            value: None,
+            value_omitted: false,
+            explanation:
+                "Validation output reached the per-page limit; additional observations were omitted"
+                    .into(),
+        });
+        return;
+    }
+    let retained = value
+        .filter(|v| serde_json::to_vec(v).is_ok_and(|bytes| bytes.len() <= MAX_VALUE_BYTES))
+        .cloned();
     out.push(Observation {
         category,
         code,
         path,
-        value: value.cloned(),
+        value_omitted: value.is_some() && retained.is_none(),
+        value: retained,
         explanation: explanation.into(),
     });
 }
@@ -331,12 +355,13 @@ pub fn referenced_resource(
     reference: &str,
     pages: &[Page],
 ) -> (&'static str, Option<u16>) {
-    let Some(url) = Url::parse(page_url)
+    let Some(mut url) = Url::parse(page_url)
         .ok()
         .and_then(|base| base.join(reference).ok())
     else {
         return ("unknown", None);
     };
+    url.set_fragment(None);
     if !matches!(url.scheme(), "http" | "https") {
         return ("unknown", None);
     }
