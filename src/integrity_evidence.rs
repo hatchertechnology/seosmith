@@ -10,6 +10,7 @@ pub enum TargetState {
     HttpError,
     Noindex,
     FetchFailed,
+    ContentUnknown,
     NotFetched,
     OutsideScope,
 }
@@ -81,7 +82,9 @@ pub fn canonical_path(
             TargetState::HttpError => break GraphState::HttpError,
             TargetState::Noindex => break GraphState::Noindex,
             TargetState::OutsideScope => break GraphState::OutsideScope,
-            TargetState::FetchFailed | TargetState::NotFetched => break GraphState::Unavailable,
+            TargetState::FetchFailed | TargetState::ContentUnknown | TargetState::NotFetched => {
+                break GraphState::Unavailable;
+            }
             TargetState::Available => {}
         }
         match &node.canonical {
@@ -989,7 +992,7 @@ pub fn apply_target_observation(
         Some(code) if !(200..300).contains(&code) => TargetState::HttpError,
         Some(_) => match index {
             crate::index_evidence::Decision::Restricted => TargetState::Noindex,
-            crate::index_evidence::Decision::Unknown => TargetState::NotFetched,
+            crate::index_evidence::Decision::Unknown => TargetState::ContentUnknown,
             crate::index_evidence::Decision::Allowed => TargetState::Available,
         },
     };
@@ -1011,6 +1014,6 @@ mod target_observation_tests {
             Some(200),
             &crate::index_evidence::Decision::Unknown,
         );
-        assert_eq!(node.state, TargetState::NotFetched);
+        assert_eq!(node.state, TargetState::ContentUnknown);
     }
 }
