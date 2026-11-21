@@ -130,3 +130,98 @@ fn output_limit_is_explicit_and_resource_fragments_are_ignored() {
         ("observed", Some(200))
     );
 }
+
+#[test]
+fn offer_alternatives_and_unexpanded_references_are_distinct() {
+    let data = block(json!({"@graph":[
+        {"@type":"Product", "name":"One", "offers":{"@type":"Offer", "priceSpecification":{"price":5}}},
+        {"@type":"Product", "name":"Two", "offers":{"@type":"Offer"}},
+        {"@type":"Product", "name":"Three", "offers":{"@type":"Offer", "priceSpecification":{"@id":"#price"}}},
+        {"@type":"Product", "name":"Four", "offers":{"@type":"AggregateOffer", "lowPrice":5}}
+    ]}));
+    let result = validate(&page(), &[data]);
+    assert!(
+        !result
+            .iter()
+            .any(|o| o.code == "missing_offer_price" && o.path == "/0/data/@graph/0/offers/price")
+    );
+    assert!(
+        result
+            .iter()
+            .any(|o| o.code == "missing_offer_price" && o.path == "/0/data/@graph/1/offers/price")
+    );
+    assert!(
+        result
+            .iter()
+            .any(|o| o.code == "price_specification_not_expanded")
+    );
+    assert!(result.iter().any(
+        |o| o.code == "missing_aggregate_offer_property" && o.path.ends_with("/priceCurrency")
+    ));
+}
+
+#[test]
+fn microdata_heading_candidates_point_to_source_and_missing_visibility_is_unknown() {
+    let item = StructuredData {
+        format: "microdata".into(),
+        data: Some(
+            json!({"types":["https://schema.org/Article"],"properties":{"headline":["Different"]}}),
+        ),
+        error: None,
+    };
+    let p = Page {
+        headings: vec![(1, "Actual heading".into())],
+        ..page()
+    };
+    let result = validate(&p, std::slice::from_ref(&item));
+    assert!(
+        result
+            .iter()
+            .any(|o| o.code == "headline_heading_mismatch_candidate"
+                && o.path == "/0/data/properties/headline/0")
+    );
+    assert!(
+        validate(&page(), &[item])
+            .iter()
+            .any(|o| o.code == "visible_source_unavailable")
+    );
+}
+
+#[test]
+fn image_object_resource_only_uses_observed_inventory() {
+    use seosmith::structured_validation::validate_crawl;
+    let p = Page {
+        structured_data: vec![block(json!({"@type":"ImageObject","url":"/image.png"}))],
+        ..page()
+    };
+    let resource = Page {
+        url: "https://example.com/image.png".into(),
+        status: Some(404),
+        ..Page::default()
+    };
+    let result = validate_crawl(&p, &[resource]);
+    assert!(
+        result
+            .iter()
+            .any(|o| o.path == "/0/data/url" && o.explanation.contains("status=404"))
+    );
+}
+
+#[test]
+fn breadcrumb_position_and_local_address_are_checked_without_assuming_references() {
+    let result = validate(
+        &page(),
+        &[block(json!({"@graph":[
+            {"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","name":"A","position":0}]},
+            {"@type":"LocalBusiness","name":"Shop","address":{"@id":"#address"}},
+            {"@id":"#address","@type":"PostalAddress"}
+        ]}))],
+    );
+    assert!(
+        result
+            .iter()
+            .any(|o| o.code == "invalid_breadcrumb_position" && o.path.ends_with("/position"))
+    );
+    assert!(result.iter().any(|o| o.code == "address_not_expanded"));
+    assert!(!result.iter().any(|o| o.code == "address_type_candidate"));
+}

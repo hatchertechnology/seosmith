@@ -198,6 +198,132 @@ fn check_item(
                 }
             }
         }
+        if t == "Product" {
+            if let Some(offers) = p.get("offers") {
+                for (i, offer) in values(offers).iter().enumerate() {
+                    let offer_path = format!(
+                        "{prefix}/offers{}",
+                        if offers.is_array() {
+                            format!("/{i}")
+                        } else {
+                            String::new()
+                        }
+                    );
+                    if is_reference(offer) {
+                        add(
+                            out,
+                            "coverage",
+                            "referenced_offer_not_expanded",
+                            offer_path,
+                            Some(offer),
+                            "Offer reference requires graph expansion before its properties can be assessed",
+                        );
+                    } else if offer.is_object() {
+                        let op = props(offer);
+                        let opath = if offer.get("properties").is_some() {
+                            format!("{offer_path}/properties")
+                        } else {
+                            offer_path.clone()
+                        };
+                        let offer_types = types(offer);
+                        if offer_types.contains(&"AggregateOffer") {
+                            for field in ["lowPrice", "priceCurrency"] {
+                                if !op.get(field).is_some_and(present) {
+                                    add(
+                                        out,
+                                        "provider_eligibility",
+                                        "missing_aggregate_offer_property",
+                                        format!("{opath}/{field}"),
+                                        None,
+                                        "AggregateOffer property is absent from the observed item",
+                                    );
+                                }
+                            }
+                        } else if offer_types.contains(&"Offer") {
+                            let has_price = op.get("price").is_some_and(present)
+                                || op.get("priceSpecification").is_some_and(|v| {
+                                    values(v)
+                                        .iter()
+                                        .any(|x| props(x).get("price").is_some_and(present))
+                                });
+                            let unresolved_spec = op
+                                .get("priceSpecification")
+                                .is_some_and(|v| values(v).iter().any(|item| is_reference(item)));
+                            if !has_price && unresolved_spec {
+                                add(
+                                    out,
+                                    "coverage",
+                                    "price_specification_not_expanded",
+                                    format!("{opath}/priceSpecification"),
+                                    op.get("priceSpecification"),
+                                    "Referenced price specification was not expanded",
+                                );
+                            } else if !has_price {
+                                add(
+                                    out,
+                                    "provider_eligibility",
+                                    "missing_offer_price",
+                                    format!("{opath}/price"),
+                                    None,
+                                    "Offer price or priceSpecification.price was not observed",
+                                );
+                            }
+                        } else {
+                            add(
+                                out,
+                                "coverage",
+                                "offer_type_unknown",
+                                offer_path,
+                                Some(offer),
+                                "Offer type is not recognized; required properties were not assessed",
+                            );
+                        }
+                    } else {
+                        add(
+                            out,
+                            "vocabulary",
+                            "unexpected_value_type",
+                            offer_path,
+                            Some(offer),
+                            "Expected an Offer, AggregateOffer or reference",
+                        );
+                    }
+                }
+            }
+        }
+        if t == "LocalBusiness" {
+            if let Some(address) = p.get("address") {
+                for (i, entry) in values(address).iter().enumerate() {
+                    let location = format!(
+                        "{prefix}/address{}",
+                        if address.is_array() {
+                            format!("/{i}")
+                        } else {
+                            String::new()
+                        }
+                    );
+                    if is_reference(entry) {
+                        add(
+                            out,
+                            "coverage",
+                            "address_not_expanded",
+                            location,
+                            Some(entry),
+                            "Referenced address requires graph expansion",
+                        );
+                    } else if !entry.is_object() {
+                        add(
+                            out,
+                            "vocabulary",
+                            "address_type_candidate",
+                            location,
+                            Some(entry),
+                            "LocalBusiness provider profile expects PostalAddress; context expansion is unavailable",
+                        );
+                    }
+                }
+            }
+        }
         if t == "BreadcrumbList" {
             if let Some(elements) = p.get("itemListElement") {
                 for (i, item) in values(elements).iter().enumerate() {
@@ -209,6 +335,37 @@ fn check_item(
                             String::new()
                         }
                     );
+                    if let Some(position) = props(item).get("position") {
+                        for (j, value) in values(position).iter().enumerate() {
+                            let valid = value.as_u64().is_some_and(|n| n > 0)
+                                || value
+                                    .as_str()
+                                    .is_some_and(|s| s.parse::<u64>().is_ok_and(|n| n > 0));
+                            if !valid {
+                                let position_path = format!(
+                                    "{item_path}{}/position{}",
+                                    if item.get("properties").is_some() {
+                                        "/properties"
+                                    } else {
+                                        ""
+                                    },
+                                    if position.is_array() {
+                                        format!("/{j}")
+                                    } else {
+                                        String::new()
+                                    }
+                                );
+                                add(
+                                    out,
+                                    "vocabulary",
+                                    "invalid_breadcrumb_position",
+                                    position_path,
+                                    Some(value),
+                                    "Expected a positive integer position",
+                                );
+                            }
+                        }
+                    }
                     if item.is_object() && !is_reference(item) {
                         for field in ["position", "name"] {
                             if !props(item).get(field).is_some_and(present)
@@ -222,7 +379,14 @@ fn check_item(
                                     out,
                                     "provider_eligibility",
                                     "missing_breadcrumb_property",
-                                    format!("{item_path}/{field}"),
+                                    format!(
+                                        "{item_path}{}/{field}",
+                                        if item.get("properties").is_some() {
+                                            "/properties"
+                                        } else {
+                                            ""
+                                        }
+                                    ),
                                     None,
                                     "Breadcrumb ListItem property is absent; reference and context resolution are limited",
                                 );
@@ -328,12 +492,22 @@ pub fn validate(page: &Page, observations: &[StructuredData]) -> Vec<Observation
         .iter()
         .map(|(_, s)| s.to_lowercase())
         .collect::<Vec<_>>();
-    if !headings.is_empty() {
+    if headings.iter().any(|h| !h.trim().is_empty()) {
         for (i, block) in observations.iter().enumerate() {
             if let Some(data) = &block.data {
                 heading_candidates(data, &format!("/{i}/data"), &headings, &mut out);
             }
         }
+    }
+    if !headings.iter().any(|h| !h.trim().is_empty()) {
+        add(
+            &mut out,
+            "coverage",
+            "visible_source_unavailable",
+            "".into(),
+            None,
+            "No nonempty source headings were retained; visible-content comparison is unavailable",
+        );
     }
     if page.extraction_truncated {
         add(
@@ -378,21 +552,35 @@ pub fn referenced_resource(
 }
 
 fn heading_candidates(v: &Value, path: &str, headings: &[String], out: &mut Vec<Observation>) {
-    if let Some(headline) = props(v).get("headline").and_then(Value::as_str) {
-        let h = headline.trim().to_lowercase();
-        if !h.is_empty()
-            && !headings
-                .iter()
-                .any(|visible| visible.contains(&h) || h.contains(visible))
-        {
-            add(
-                out,
-                "human_review",
-                "headline_heading_mismatch_candidate",
-                format!("{path}/headline"),
-                Some(&Value::String(headline.into())),
-                "Headline differs from retained source headings; this is not proof of hidden or mismatched content",
-            );
+    if let Some(headline) = props(v).get("headline") {
+        for (i, item) in values(headline).iter().enumerate() {
+            if let Some(text) = item.as_str() {
+                let h = text.trim().to_lowercase();
+                if !h.is_empty()
+                    && !headings.iter().any(|visible| {
+                        !visible.trim().is_empty() && (visible.contains(&h) || h.contains(visible))
+                    })
+                {
+                    let property = if v.get("properties").is_some() {
+                        "properties/headline"
+                    } else {
+                        "headline"
+                    };
+                    let suffix = if headline.is_array() {
+                        format!("/{i}")
+                    } else {
+                        String::new()
+                    };
+                    add(
+                        out,
+                        "human_review",
+                        "headline_heading_mismatch_candidate",
+                        format!("{path}/{property}{suffix}"),
+                        Some(item),
+                        "Headline differs from retained source headings; this is not proof of hidden or mismatched content",
+                    );
+                }
+            }
         }
     }
     match v {
@@ -431,7 +619,9 @@ fn resource_observations(
         Value::Object(map) => {
             for (key, child) in map {
                 let child_path = format!("{path}/{}", escape(key));
-                if matches!(key.as_str(), "image" | "contentUrl" | "thumbnailUrl") {
+                if matches!(key.as_str(), "image" | "contentUrl" | "thumbnailUrl")
+                    || (key == "url" && types(v).contains(&"ImageObject"))
+                {
                     for (i, item) in values(child).iter().enumerate() {
                         if let Some(reference) = item.as_str() {
                             let (state, status) = referenced_resource(&page.url, reference, pages);
