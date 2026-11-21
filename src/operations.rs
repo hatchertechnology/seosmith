@@ -152,6 +152,9 @@ async fn existing(database: &Path, write: bool) -> Result<Store> {
         .await
         .context("not_an_operations_database")?;
     ensure!(version == 1, "unsupported_operations_database");
+    if write {
+        store.ensure_execution_mode().await?;
+    }
     Ok(store)
 }
 
@@ -298,13 +301,15 @@ async fn run_bounded(
                 store.fail(&r.request_id.to_string()).await?;
                 anyhow::bail!("report_too_large");
             }
-            sqlx::query("UPDATE jobs SET report=?,report_hash=?,state=? WHERE id=?")
+            let updated = sqlx::query("UPDATE jobs SET report=?,report_hash=?,state=? WHERE id=? AND execution_mode='standard' AND state IN ('running','cancelled') AND report IS NULL")
                 .bind(&body)
                 .bind(model::digest(body.as_bytes()))
                 .bind(&report.outcome)
                 .bind(r.request_id.to_string())
                 .execute(&mut *tx)
-                .await?;
+                .await?
+                .rows_affected();
+            ensure!(updated == 1, "job_not_finalizable");
             tx.commit().await?;
         }
         failure => {
