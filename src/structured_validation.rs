@@ -77,7 +77,7 @@ fn bound_bytes(out: &mut Vec<Observation>) {
     if keep < out.len() {
         let omitted = out.len() - keep;
         out.truncate(keep);
-        out.push(Observation { category: "coverage", code: "observation_byte_limit", path: String::new(), value: None, value_omitted: false, explanation: "Validation observations exceeded the per-page byte budget; later observations were omitted".into() });
+        out.push(Observation { category: "coverage", code: "observation_byte_limit", path: String::new(), value: None, value_omitted: false, explanation: format!("Validation observations exceeded the per-page byte budget; {omitted} retained observations were omitted; prior count-limit omissions, if any, are unknown") });
     }
 }
 fn escape(s: &str) -> String {
@@ -914,5 +914,61 @@ fn resource_observations(
             }
         }
         _ => {}
+    }
+}
+
+/// Inactive adapter for the proposed local checkpoint envelope. This type is
+/// deliberately independent of the unmerged shared store interface.
+#[derive(Debug, serde::Serialize)]
+pub struct StructuredSidecar {
+    pub collector: StructuredCollector,
+    pub state: &'static str,
+    pub omitted: Option<u64>,
+    pub reason: Option<&'static str>,
+    pub payload: serde_json::Value,
+}
+#[derive(Debug, serde::Serialize)]
+pub struct StructuredCollector {
+    pub id: &'static str,
+    pub version: &'static str,
+}
+/// Build evidence without fetching or writing. The caller must bind it to the
+/// exact source page URL and atomically checkpoint the page and all sidecars.
+pub fn local_sidecar(page: &Page, pages: &[Page]) -> StructuredSidecar {
+    let observations = validate_crawl(page, pages);
+    let unavailable = observations.iter().any(|o| o.code == "page_unavailable");
+    let partial = observations.iter().any(|o| {
+        o.value_omitted
+            || (o.category == "coverage" && !o.code.starts_with("local_"))
+            || o.code == "unresolved_local_id"
+            || (o.category == "resource"
+                && (o.explanation.contains("state=unknown")
+                    || o.explanation.contains("state=not_observed")))
+    });
+    StructuredSidecar {
+        collector: StructuredCollector {
+            id: "s04-structured-data",
+            version: "s04-local-1",
+        },
+        state: if unavailable {
+            "unavailable"
+        } else if partial {
+            "partial"
+        } else {
+            "observed"
+        },
+        omitted: if unavailable || partial {
+            None
+        } else {
+            Some(0)
+        },
+        reason: if unavailable {
+            Some("source_unavailable")
+        } else if partial {
+            Some("incomplete_evidence")
+        } else {
+            None
+        },
+        payload: serde_json::json!({"profile_version": PROFILE_VERSION, "observations": observations}),
     }
 }

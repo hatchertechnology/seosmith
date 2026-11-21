@@ -418,3 +418,36 @@ fn supported_local_business_subtype_uses_business_profile() {
             .any(|o| o.code == "missing_required" && o.path == "/0/data/address")
     );
 }
+
+#[test]
+fn local_sidecar_distinguishes_observed_partial_and_unavailable() {
+    use seosmith::structured_validation::local_sidecar;
+    let observed = Page {
+        headings: vec![(1, "Title".into())],
+        ..page()
+    };
+    let sidecar = local_sidecar(&observed, &[]);
+    assert_eq!(sidecar.state, "observed");
+    assert_eq!(sidecar.omitted, Some(0));
+    assert_eq!(sidecar.reason, None);
+    assert_eq!(sidecar.collector.id, "s04-structured-data");
+    let partial = Page {
+        structured_data: vec![block(json!({"@type":"ImageObject", "url":"/not-fetched"}))],
+        ..observed
+    };
+    assert_eq!(local_sidecar(&partial, &[]).state, "partial");
+    assert_eq!(
+        local_sidecar(&partial, &[]).reason,
+        Some("incomplete_evidence")
+    );
+    let blocked = Page {
+        blocked_by_robots: true,
+        ..page()
+    };
+    assert_eq!(local_sidecar(&blocked, &[]).state, "unavailable");
+    assert_eq!(local_sidecar(&blocked, &[]).omitted, None);
+    assert_eq!(
+        local_sidecar(&blocked, &[]).reason,
+        Some("source_unavailable")
+    );
+}
