@@ -44,7 +44,8 @@ impl Store {
             delivery_state TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
             next_attempt INTEGER NOT NULL DEFAULT 0, discovery_truncated INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL DEFAULT (unixepoch()));
             CREATE TABLE IF NOT EXISTS frontier (job_id TEXT NOT NULL REFERENCES jobs(id), url TEXT NOT NULL,
-            depth INTEGER NOT NULL, in_sitemap INTEGER NOT NULL, page TEXT, PRIMARY KEY(job_id,url));")
+            depth INTEGER NOT NULL, in_sitemap INTEGER NOT NULL, page TEXT, PRIMARY KEY(job_id,url));
+            CREATE TABLE IF NOT EXISTS local_graph_evidence (job_id TEXT NOT NULL, url TEXT NOT NULL, evidence TEXT NOT NULL, PRIMARY KEY(job_id,url));")
             .execute(&pool).await?;
         let columns = sqlx::query("PRAGMA table_info(frontier)")
             .fetch_all(&pool)
@@ -194,6 +195,48 @@ impl Store {
             .execute(&self.0)
             .await?;
         Ok(())
+    }
+    /// Save experimental local evidence atomically with its crawl checkpoint.
+    pub(crate) async fn save_page_local(
+        &self,
+        id: &str,
+        p: &crate::model::Page,
+        evidence: &serde_json::Value,
+    ) -> Result<()> {
+        let mut tx = self.0.begin().await?;
+        let encoded = serde_json::to_string(evidence)?;
+        ensure!(
+            encoded.len() <= 1_048_576,
+            "local evidence exceeds per-page limit"
+        );
+        sqlx::query(
+            "INSERT OR REPLACE INTO local_graph_evidence(job_id,url,evidence) VALUES(?,?,?)",
+        )
+        .bind(id)
+        .bind(&p.url)
+        .bind(encoded)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("UPDATE frontier SET page=? WHERE job_id=? AND url=?")
+            .bind(serde_json::to_string(p)?)
+            .bind(id)
+            .bind(&p.url)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+    /// Local evidence is separate from the report and must never be delivered as v1/v2.
+    pub async fn local_graph_evidence(&self, id: &str) -> Result<Vec<serde_json::Value>> {
+        let rows = sqlx::query("SELECT f.url, e.evidence FROM frontier f LEFT JOIN local_graph_evidence e ON e.job_id=f.job_id AND e.url=f.url WHERE f.job_id=? AND f.page IS NOT NULL ORDER BY f.url")
+            .bind(id).fetch_all(&self.0).await?;
+        rows.into_iter().map(|row| {
+            let value: Option<String> = row.try_get("evidence")?;
+            match value {
+                Some(s) => Ok(serde_json::from_str(&s)?),
+                None => Ok(serde_json::json!({"version":"graph-local-1", "url":row.try_get::<String, _>("url")?, "state":"unavailable", "reason":"not_collected"})),
+            }
+        }).collect()
     }
     pub async fn pages(&self, id: &str) -> Result<Vec<crate::model::Page>> {
         let rows=sqlx::query("SELECT page,in_sitemap FROM frontier WHERE job_id=? AND page IS NOT NULL ORDER BY depth,url").bind(id).fetch_all(&self.0).await?;

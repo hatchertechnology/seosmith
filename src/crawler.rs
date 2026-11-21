@@ -155,6 +155,19 @@ pub async fn crawl(store: &Store, r: &CrawlRequest) -> Result<Report> {
     crawl_with(store, r, &Fetcher::default()).await
 }
 pub async fn crawl_with(store: &Store, r: &CrawlRequest, fetch: &impl Transport) -> Result<Report> {
+    crawl_with_local_evidence(store, r, fetch, false).await
+}
+/// Explicit local-only collection. The resulting report remains the unchanged legacy report.
+pub async fn crawl_with_local_evidence(
+    store: &Store,
+    r: &CrawlRequest,
+    fetch: &impl Transport,
+    collect: bool,
+) -> Result<Report> {
+    ensure!(
+        !collect,
+        "local graph collection requires a durable local job mode"
+    );
     let id = r.request_id.to_string();
     let started_at = store.started(&id).await?;
     let started = Instant::now();
@@ -207,10 +220,34 @@ pub async fn crawl_with(store: &Store, r: &CrawlRequest, fetch: &impl Transport)
             in_sitemap,
             ..Page::default()
         };
+        let mut local_evidence = serde_json::json!({"version":"graph-local-1", "url":url, "state":"unavailable", "reason":"not_html_or_not_fetched"});
         if policies[&origin(&u)].allowed(&u) {
             tokio::time::sleep(Duration::from_millis(r.delay_ms)).await;
             match fetch.get(&u).await {
                 Ok(response) => {
+                    if collect {
+                        let content_type = response
+                            .headers
+                            .get("content-type")
+                            .map_or("", String::as_str);
+                        if !is_resource
+                            && (200..300).contains(&response.status)
+                            && content_type.split(';').next().is_some_and(|t| {
+                                matches!(
+                                    t.trim().to_ascii_lowercase().as_str(),
+                                    "text/html"
+                                        | "application/xhtml+xml"
+                                        | "application/vnd.wap.xhtml+xml"
+                                )
+                            })
+                        {
+                            let (html, encoding, errors) =
+                                crate::extract::decode(&response.body, content_type);
+                            local_evidence = serde_json::json!({"version":"graph-local-1", "url":url, "state":"observed", "encoding":encoding, "decoding_errors":errors, "html":crate::graph_evidence::extract(&u, &html, response.status)});
+                        } else if is_resource {
+                            local_evidence = serde_json::json!({"version":"graph-local-1", "url":url, "state":"observed", "status":response.status, "resource":crate::graph_evidence::resource(&url, &response.headers, &response.body)});
+                        }
+                    }
                     if r.in_scope(&u) || is_resource {
                         page = parse::parse(&u, depth, in_sitemap, &response);
                     } else {
@@ -229,10 +266,14 @@ pub async fn crawl_with(store: &Store, r: &CrawlRequest, fetch: &impl Transport)
                             .map(Into::into);
                     }
                 }
-                Err(_) => page.error = Some("fetch_failed_or_destination_denied".into()),
+                Err(_) => {
+                    page.error = Some("fetch_failed_or_destination_denied".into());
+                    local_evidence["reason"] = "fetch_failed_or_destination_denied".into();
+                }
             }
         } else {
             page.blocked_by_robots = true;
+            local_evidence["reason"] = "blocked_by_robots".into();
         }
         page.is_resource = is_resource;
         let follow = !page
@@ -302,7 +343,14 @@ pub async fn crawl_with(store: &Store, r: &CrawlRequest, fetch: &impl Transport)
             }
         }
         // Checkpoint after discoveries: a crash can replay discovery without losing targets.
-        store.save_page(&id, &page).await?;
+        if collect {
+            if serde_json::to_vec(&local_evidence)?.len() > 1_048_576 {
+                local_evidence = serde_json::json!({"version":"graph-local-1", "url":url, "state":"unavailable", "reason":"evidence_size_limit"});
+            }
+            store.save_page_local(&id, &page, &local_evidence).await?;
+        } else {
+            store.save_page(&id, &page).await?;
+        }
         if is_resource {
             resources += 1;
         } else {
