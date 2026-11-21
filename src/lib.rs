@@ -15,3 +15,5 @@ pub mod policy;
 
 pub mod operations;
 pub mod policy_candidate;
+
+pub mod structured_validation;

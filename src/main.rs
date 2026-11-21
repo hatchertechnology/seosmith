@@ -39,6 +39,10 @@ enum Command {
         request: std::path::PathBuf,
     },
     Rules,
+    /// Validate a saved report locally without submitting or delivering a job.
+    ValidateStructured {
+        report: std::path::PathBuf,
+    },
 }
 fn secret(name: &str) -> Result<String> {
     let value = if let Ok(path) = std::env::var(format!("{name}_FILE")) {
@@ -95,6 +99,27 @@ async fn main() -> Result<()> {
         !(policy.is_some() && matches!(cli.command, Command::Serve { .. })),
         "S14 policy reports cannot be delivered until H04 and receiver support are ready"
     );
+    if let Command::ValidateStructured { ref report } = cli.command {
+        ensure!(
+            policy.is_none() && !cli.evidence_contract_v2,
+            "validation cannot be combined with experimental report contracts"
+        );
+        use std::io::Read;
+        let mut input = Vec::new();
+        std::fs::File::open(report)?
+            .take(16 * 1024 * 1024 + 1)
+            .read_to_end(&mut input)?;
+        ensure!(input.len() <= 16 * 1024 * 1024, "report exceeds 16 MiB");
+        let report: seosmith::model::Report = serde_json::from_slice(&input)?;
+        let observations: Vec<_> = report.pages.iter().enumerate().map(|(page_index, page)| serde_json::json!({"page_index": page_index, "url": page.url, "observations": seosmith::structured_validation::validate_crawl(page, &report.pages)})).collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &serde_json::json!({"profile_version": seosmith::structured_validation::PROFILE_VERSION, "structured_validation": observations})
+            )?
+        );
+        return Ok(());
+    }
     if let Command::Operations { operation } = cli.command {
         if policy.is_some() {
             eprintln!(
@@ -149,7 +174,7 @@ async fn main() -> Result<()> {
     store.recover().await?;
     match cli.command {
         Command::Operations { .. } => unreachable!(),
-        Command::Rules => {}
+        Command::Rules | Command::ValidateStructured { .. } => {}
         Command::Crawl { request } => {
             let r: CrawlRequest = serde_json::from_slice(&tokio::fs::read(request).await?)?;
 
