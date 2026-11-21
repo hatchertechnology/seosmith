@@ -20,11 +20,16 @@ pub struct Collection {
 }
 const MAX_OCCURRENCES: usize = 2000;
 const MAX_VALUE_BYTES: usize = 16_384;
+// Each source gets a deterministic share of the provisional page budget.
+const MAX_COLLECTION_BYTES: usize = 28 * 1024;
 fn bounded(s: Option<&str>) -> bool {
     s.is_none_or(|s| s.len() <= MAX_VALUE_BYTES)
 }
-fn record(collection: &mut Collection, occurrence: Occurrence) {
-    if collection.occurrences.len() >= MAX_OCCURRENCES
+fn record(collection: &mut Collection, occurrence: Occurrence, bytes: &mut usize) {
+    let size = serde_json::to_vec(&occurrence).map_or(usize::MAX, |v| v.len().saturating_add(1));
+    if collection.omitted > 0
+        || bytes.saturating_add(size) > MAX_COLLECTION_BYTES
+        || collection.occurrences.len() >= MAX_OCCURRENCES
         || !bounded(occurrence.raw_name.as_deref())
         || !bounded(occurrence.raw_value.as_deref())
         || !bounded(occurrence.raw_rel.as_deref())
@@ -33,6 +38,7 @@ fn record(collection: &mut Collection, occurrence: Occurrence) {
         collection.complete = false;
         collection.omitted += 1;
     } else {
+        *bytes = bytes.saturating_add(size);
         collection.occurrences.push(occurrence);
     }
 }
@@ -47,6 +53,7 @@ pub fn html_occurrences(html: &str, complete: bool) -> Collection {
         omitted: 0,
     };
     let mut ordinals = std::collections::BTreeMap::<String, usize>::new();
+    let mut bytes = 0usize;
     for (document_order, el) in doc.select(&selector).enumerate() {
         let name = el.value().name();
         let is_meta = name == "meta" && el.value().attr("name").is_some();
@@ -79,7 +86,7 @@ pub fn html_occurrences(html: &str, complete: bool) -> Collection {
             raw_language: el.value().attr("hreflang").map(str::to_owned),
         };
         *ordinal += 1;
-        record(&mut result, occurrence);
+        record(&mut result, occurrence, &mut bytes);
     }
     result
 }
@@ -91,6 +98,7 @@ pub fn http_occurrences(headers: &[(&str, &str)]) -> Collection {
         omitted: 0,
     };
     let mut ordinals = std::collections::BTreeMap::<String, usize>::new();
+    let mut bytes = 0usize;
     for &(name, value) in headers {
         if !name.eq_ignore_ascii_case("x-robots-tag") && !name.eq_ignore_ascii_case("link") {
             continue;
@@ -108,6 +116,7 @@ pub fn http_occurrences(headers: &[(&str, &str)]) -> Collection {
                 raw_rel: None,
                 raw_language: None,
             },
+            &mut bytes,
         );
         *ordinal += 1;
     }
@@ -218,5 +227,91 @@ mod transport_compat_tests {
             .unwrap();
         assert!(captured.complete);
         assert!(captured.occurrences.is_empty());
+    }
+}
+
+/// Bound the serialized local sidecar before persistence. This deterministic
+/// prefix reduction never turns omitted evidence into a complete collection.
+/// The caller must reserve run-level coverage space separately and fail the
+/// local job if even the minimum marker cannot fit.
+pub fn enforce_page_budget(
+    capture: &mut PageCapture,
+    max_bytes: usize,
+) -> Result<(), &'static str> {
+    loop {
+        let size = serde_json::to_vec(capture)
+            .map_err(|_| "serialization_failed")?
+            .len();
+        if size <= max_bytes {
+            return Ok(());
+        }
+        let mut removed = false;
+        for collection in [&mut capture.html, &mut capture.http].into_iter().flatten() {
+            if collection.occurrences.pop().is_some() {
+                collection.complete = false;
+                collection.omitted = collection.omitted.saturating_add(1);
+                removed = true;
+                break;
+            }
+        }
+        if removed {
+            continue;
+        }
+        if let Some(decision) = capture
+            .robots
+            .iter_mut()
+            .rev()
+            .find(|d| d.raw_line.is_some() || d.rule.is_some())
+        {
+            decision.raw_line = None;
+            decision.rule = None;
+            decision.matched_line = None;
+            decision.provenance = "budget_omitted".into();
+            continue;
+        }
+        return Err("minimum_marker_exceeds_budget");
+    }
+}
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    #[test]
+    fn source_capture_has_bounded_prefix_and_exact_omissions() {
+        let value = "x".repeat(8000);
+        let fields = vec![("Link", value.as_str()); 10];
+        let collection = http_occurrences(&fields);
+        assert!(!collection.complete);
+        assert_eq!(collection.occurrences.len() + collection.omitted, 10);
+        assert!(
+            collection
+                .occurrences
+                .iter()
+                .enumerate()
+                .all(|(i, item)| item.ordinal == i)
+        );
+        assert!(serde_json::to_vec(&collection).unwrap().len() < 29 * 1024);
+    }
+    #[test]
+    fn budget_preserves_prefix_and_marks_omissions() {
+        let mut capture = PageCapture::unavailable("https://example.com/", "available");
+        let values = vec![
+            ("X-Robots-Tag", "a".repeat(500)),
+            ("X-Robots-Tag", "b".repeat(500)),
+        ];
+        let pairs = values
+            .iter()
+            .map(|(k, v)| (*k, v.as_str()))
+            .collect::<Vec<_>>();
+        capture.http = Some(http_occurrences(&pairs));
+        enforce_page_budget(&mut capture, 900).unwrap();
+        let http = capture.http.as_ref().unwrap();
+        assert!(!http.complete);
+        assert_eq!(http.omitted, 1);
+        assert_eq!(http.occurrences.len(), 1);
+        assert!(serde_json::to_vec(&capture).unwrap().len() <= 900);
+        assert_eq!(
+            enforce_page_budget(&mut capture, 1),
+            Err("minimum_marker_exceeds_budget")
+        );
     }
 }
