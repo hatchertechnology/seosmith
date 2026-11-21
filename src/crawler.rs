@@ -274,37 +274,34 @@ pub(crate) async fn crawl_with_local_s02_s03(
         let mut sidecar = crate::collection_evidence::PageCapture::unavailable(&url, "not_fetched");
         if policies[&origin(&u)].allowed(&u) {
             tokio::time::sleep(Duration::from_millis(r.delay_ms)).await;
-            match fetch.get(&u).await {
-                Ok(response) => {
-                    if r.in_scope(&u) || is_resource {
-                        page = parse::parse(&u, depth, in_sitemap, &response);
-                        if collect {
-                            sidecar = crate::collection_evidence::PageCapture::from_response(
-                                &url,
-                                &response,
-                                page.html(),
-                            );
-                        }
-                    } else {
-                        page.status = Some(response.status);
-                        page.bytes = response.body.len();
-                        page.ttfb_ms = response.ttfb_ms;
-                        page.content_type = response
-                            .headers
-                            .get("content-type")
-                            .cloned()
-                            .unwrap_or_default();
-                        page.redirect = response
-                            .headers
-                            .get("location")
-                            .and_then(|v| normalize(&u, v))
-                            .map(Into::into);
+            if let Ok(response) = fetch.get(&u).await {
+                if r.in_scope(&u) || is_resource {
+                    page = parse::parse(&u, depth, in_sitemap, &response);
+                    if collect {
+                        sidecar = crate::collection_evidence::PageCapture::from_response(
+                            &url,
+                            &response,
+                            page.html(),
+                        );
                     }
+                } else {
+                    page.status = Some(response.status);
+                    page.bytes = response.body.len();
+                    page.ttfb_ms = response.ttfb_ms;
+                    page.content_type = response
+                        .headers
+                        .get("content-type")
+                        .cloned()
+                        .unwrap_or_default();
+                    page.redirect = response
+                        .headers
+                        .get("location")
+                        .and_then(|v| normalize(&u, v))
+                        .map(Into::into);
                 }
-                Err(_) => {
-                    page.error = Some("fetch_failed_or_destination_denied".into());
-                    sidecar.state = "fetch_failed".into();
-                }
+            } else {
+                page.error = Some("fetch_failed_or_destination_denied".into());
+                sidecar.state = "fetch_failed".into();
             }
         } else {
             page.blocked_by_robots = true;
@@ -523,7 +520,7 @@ mod local_capture_tests {
     use std::collections::BTreeMap;
     struct Fixture;
     impl Transport for Fixture {
-        async fn get(&self, url: &Url) -> Result<Response> {
+        fn get(&self, url: &Url) -> impl std::future::Future<Output = Result<Response>> + Send {
             let (status, body) = match url.path() {
                 "/robots.txt" => (200, "User-agent: *\nDisallow: /blocked"),
                 "/sitemap.xml" => (
@@ -535,7 +532,7 @@ mod local_capture_tests {
                     "<html><head><meta name='Googlebot' content='noindex'><link rel='canonical' href=''></head></html>",
                 ),
             };
-            Ok(Response {
+            std::future::ready(Ok(Response {
                 status,
                 headers: BTreeMap::from([("content-type".into(), "text/html".into())]),
                 raw_headers: Some(vec![
@@ -544,7 +541,7 @@ mod local_capture_tests {
                 ]),
                 body: body.as_bytes().to_vec(),
                 ttfb_ms: 1,
-            })
+            }))
         }
     }
     #[tokio::test]
@@ -576,8 +573,11 @@ mod local_capture_tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(seed.http.unwrap().occurrences.len(), 2);
-        assert_eq!(seed.html.unwrap().occurrences.len(), 2);
+        assert_eq!(seed.http.as_ref().unwrap().occurrences.len(), 2);
+        assert_eq!(seed.html.as_ref().unwrap().occurrences.len(), 2);
+        let index = crate::index_evidence::evaluate_capture("Googlebot", &seed);
+        assert_eq!(index.index, crate::index_evidence::Decision::Restricted);
+        assert!(index.conflicts.contains(&"index/noindex".to_owned()));
         let blocked = store
             .s02_s03_page(&id, "https://example.com/blocked")
             .await
@@ -585,6 +585,10 @@ mod local_capture_tests {
             .unwrap();
         assert_eq!(blocked.state, "robots_blocked");
         assert!(blocked.html.is_none());
+        assert_eq!(
+            crate::index_evidence::evaluate_capture("Googlebot", &blocked).index,
+            crate::index_evidence::Decision::Unknown
+        );
         let sitemap: String = sqlx::query_scalar(
             "SELECT evidence FROM local_s02_s03_sitemaps WHERE job_id=? AND url=?",
         )

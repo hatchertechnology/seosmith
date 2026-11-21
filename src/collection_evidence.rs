@@ -44,6 +44,9 @@ fn record(collection: &mut Collection, occurrence: Occurrence, bytes: &mut usize
 }
 /// Collect HTML declarations in DOM order. Call only when decoded HTML is available;
 /// decoding errors or an incomplete input must set `complete` false in the caller.
+///
+/// # Panics
+/// Panics only if the static selector is invalid.
 pub fn html_occurrences(html: &str, complete: bool) -> Collection {
     let doc = Html::parse_document(html);
     let selector = Selector::parse("meta, link").expect("static selector");
@@ -226,7 +229,7 @@ mod transport_compat_tests {
             .http
             .unwrap();
         assert!(captured.complete);
-        assert!(captured.occurrences.is_empty());
+        assert_eq!(captured.occurrences.len(), 0);
     }
 }
 
@@ -294,7 +297,7 @@ mod budget_tests {
     #[test]
     fn budget_preserves_prefix_and_marks_omissions() {
         let mut capture = PageCapture::unavailable("https://example.com/", "available");
-        let values = vec![
+        let values = [
             ("X-Robots-Tag", "a".repeat(500)),
             ("X-Robots-Tag", "b".repeat(500)),
         ];

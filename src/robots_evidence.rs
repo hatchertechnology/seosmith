@@ -16,6 +16,7 @@ pub struct RobotsDecision {
     pub provenance: String,
 }
 #[derive(Default)]
+#[allow(clippy::struct_excessive_bools)] // Mirrors independent parser group flags.
 struct Trace {
     bot: String,
     path: String,
@@ -202,7 +203,7 @@ mod fixture_tests {
             );
             assert_eq!(
                 decision.matched_line,
-                case["line"].as_u64().map(|v| v as u32),
+                case["line"].as_u64().map(|v| u32::try_from(v).unwrap()),
                 "{}",
                 case["name"]
             );

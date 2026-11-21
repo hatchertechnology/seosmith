@@ -98,45 +98,39 @@ pub fn parse(source: &str, bytes: &[u8], max_bytes: usize, max_entries: usize) -
             }
             Ok(Event::Text(e)) => {
                 if let Some(f) = field {
-                    match quick_xml::escape::unescape(e.as_ref()) {
-                        Ok(s) => {
-                            if f == "loc" {
-                                loc.push_str(&s)
-                            } else {
-                                lastmod.push_str(&s)
-                            }
+                    if let Ok(s) = quick_xml::escape::unescape(e.as_ref()) {
+                        if f == "loc" {
+                            loc.push_str(&s);
+                        } else {
+                            lastmod.push_str(&s);
                         }
-                        Err(_) => {
-                            result.error = Some("invalid_entity".into());
-                            break;
-                        }
+                    } else {
+                        result.error = Some("invalid_entity".into());
+                        break;
                     }
                 }
             }
             Ok(Event::CData(e)) => {
                 if let Some(f) = field {
                     if f == "loc" {
-                        loc.push_str(e.as_ref())
+                        loc.push_str(e.as_ref());
                     } else {
-                        lastmod.push_str(e.as_ref())
+                        lastmod.push_str(e.as_ref());
                     }
                 }
             }
             Ok(Event::GeneralRef(e)) => {
                 if let Some(f) = field {
                     let entity = format!("&{};", e.as_ref());
-                    match quick_xml::escape::unescape(&entity) {
-                        Ok(s) => {
-                            if f == "loc" {
-                                loc.push_str(&s)
-                            } else {
-                                lastmod.push_str(&s)
-                            }
+                    if let Ok(s) = quick_xml::escape::unescape(&entity) {
+                        if f == "loc" {
+                            loc.push_str(&s);
+                        } else {
+                            lastmod.push_str(&s);
                         }
-                        Err(_) => {
-                            result.error = Some("invalid_entity".into());
-                            break;
-                        }
+                    } else {
+                        result.error = Some("invalid_entity".into());
+                        break;
                     }
                 }
             }
@@ -212,7 +206,7 @@ mod tests {
     use super::*;
     #[test]
     fn preserves_entries_and_errors() {
-        let s = parse("https://example.com/sitemap.xml", br#"<urlset><url><loc>https://example.com/a</loc><lastmod>2026-01-01</lastmod></url><url><loc>bad</loc></url><url></url></urlset>"#, 1000, 10);
+        let s = parse("https://example.com/sitemap.xml", br"<urlset><url><loc>https://example.com/a</loc><lastmod>2026-01-01</lastmod></url><url><loc>bad</loc></url><url></url></urlset>", 1000, 10);
         assert_eq!(s.entries.len(), 3);
         assert_eq!(s.entries[0].lastmod.as_deref(), Some("2026-01-01"));
         assert_eq!(s.entries[1].error.as_deref(), Some("invalid_location"));

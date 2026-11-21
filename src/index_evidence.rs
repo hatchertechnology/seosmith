@@ -14,7 +14,7 @@ pub enum Source {
     HtmlMeta,
     HttpHeader,
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContentState {
     Available,
     Blocked,
@@ -53,7 +53,7 @@ pub fn evaluate(bot: &str, state: ContentState, sources: &[DirectiveSource]) -> 
             s.value
                 .split([',', ';'])
                 .flat_map(str::split_whitespace)
-                .map(|v| v.to_ascii_lowercase()),
+                .map(str::to_ascii_lowercase),
         );
     }
     let mut restrictions = BTreeSet::new();
@@ -95,7 +95,7 @@ pub fn evaluate(bot: &str, state: ContentState, sources: &[DirectiveSource]) -> 
     };
     IndexEvaluation {
         bot: bot.into(),
-        content_state: state.clone(),
+        content_state: state,
         sources: sources.to_vec(),
         applicable,
         restrictions,
@@ -345,6 +345,6 @@ mod unavailable_tests {
         );
         let result = evaluate_capture("Googlebot", &capture);
         assert_eq!(result.index, Decision::Unknown);
-        assert!(result.sources.is_empty());
+        assert_eq!(result.sources.len(), 0);
     }
 }

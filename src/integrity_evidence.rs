@@ -604,15 +604,13 @@ pub fn header_declarations(
             for attr in crate::extract::split_header(attributes, ';') {
                 if let Some((key, value)) = attr.trim().split_once('=') {
                     let value = value.trim().trim_matches('"');
-                    if key.trim().eq_ignore_ascii_case("rel") {
-                        if rel.replace(value).is_some() {
-                            complete = false;
-                        }
+                    if key.trim().eq_ignore_ascii_case("rel") && rel.replace(value).is_some() {
+                        complete = false;
                     }
-                    if key.trim().eq_ignore_ascii_case("hreflang") {
-                        if language.replace(value).is_some() {
-                            complete = false;
-                        }
+                    if key.trim().eq_ignore_ascii_case("hreflang")
+                        && language.replace(value).is_some()
+                    {
+                        complete = false;
                     }
                 }
             }
