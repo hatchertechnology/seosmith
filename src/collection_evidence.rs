@@ -319,6 +319,36 @@ mod budget_tests {
     }
 }
 
+pub(crate) fn robot_decision_usable(
+    source: &str,
+    decision: &crate::robots_evidence::RobotsDecision,
+) -> bool {
+    match source {
+        "robots_txt" => match decision.provenance.as_str() {
+            "matched_rule" => {
+                decision.matched_line.is_some()
+                    && decision.rule.is_some()
+                    && decision.raw_line.is_some()
+            }
+            "no_matching_rule" => {
+                decision.allowed
+                    && decision.matched_line.is_none()
+                    && decision.rule.is_none()
+                    && decision.raw_line.is_none()
+            }
+            _ => false,
+        },
+        "not_found" | "http_denied_synthetic" => {
+            decision.provenance == source
+                && decision.allowed == (source == "not_found")
+                && decision.matched_line.is_none()
+                && decision.rule.is_none()
+                && decision.raw_line.is_none()
+        }
+        _ => false,
+    }
+}
+
 /// Build a provisional local collector envelope; this is not a report or wire contract.
 /// The byte budget includes the entire compact UTF-8 envelope, not only the payload.
 pub fn local_sidecar(
@@ -369,28 +399,7 @@ pub fn local_sidecar(
             && payload
                 .robots
                 .iter()
-                .all(|r| match payload.robots_source.as_str() {
-                    "robots_txt" => match r.provenance.as_str() {
-                        "matched_rule" => {
-                            r.matched_line.is_some() && r.rule.is_some() && r.raw_line.is_some()
-                        }
-                        "no_matching_rule" => {
-                            r.allowed
-                                && r.matched_line.is_none()
-                                && r.rule.is_none()
-                                && r.raw_line.is_none()
-                        }
-                        _ => false,
-                    },
-                    "not_found" | "http_denied_synthetic" => {
-                        r.provenance == payload.robots_source
-                            && r.allowed == (payload.robots_source == "not_found")
-                            && r.matched_line.is_none()
-                            && r.rule.is_none()
-                            && r.raw_line.is_none()
-                    }
-                    _ => false,
-                });
+                .all(|r| robot_decision_usable(&payload.robots_source, r));
         let collections_complete = payload
             .http
             .as_ref()

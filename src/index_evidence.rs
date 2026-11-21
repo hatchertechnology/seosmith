@@ -406,20 +406,16 @@ pub fn effective_indexing(
         .iter()
         .find(|d| d.bot.eq_ignore_ascii_case(bot))
         .cloned();
-    let crawl = if matches!(
-        capture.robots_source.as_str(),
-        "robots_txt" | "not_found" | "http_denied_synthetic"
-    ) {
-        robots.as_ref().map_or(CrawlPermission::Unknown, |r| {
+    let crawl = robots
+        .as_ref()
+        .filter(|r| crate::collection_evidence::robot_decision_usable(&capture.robots_source, r))
+        .map_or(CrawlPermission::Unknown, |r| {
             if r.allowed {
                 CrawlPermission::Allowed
             } else {
                 CrawlPermission::Denied
             }
-        })
-    } else {
-        CrawlPermission::Unknown
-    };
+        });
     let directives = evaluate_capture(bot, capture);
     let intent = compare_intent(&directives.index, intent);
     EffectiveIndexing {
@@ -450,6 +446,11 @@ mod effective_tests {
         assert_eq!(result.directives.index, Decision::Unknown);
         assert_eq!(result.intent, IntentResult::Unknown);
         c.robots_source = "policy_limit".into();
+        assert_eq!(
+            effective_indexing("Googlebot", &c, &Intent::Exclude).crawl,
+            CrawlPermission::Unknown
+        );
+        c.robots_source = "not_found".into();
         assert_eq!(
             effective_indexing("Googlebot", &c, &Intent::Exclude).crawl,
             CrawlPermission::Unknown
