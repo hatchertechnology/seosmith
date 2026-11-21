@@ -608,3 +608,33 @@ async fn rejected_reports_do_not_exhaust_queue_or_expire() {
         .unwrap();
     assert!(store.submit(&request()).await.is_err());
 }
+
+#[tokio::test]
+async fn local_graph_collection_fails_closed_without_durable_mode() {
+    let (_dir, store) = db().await;
+    let r = request();
+    store.submit(&r).await.unwrap();
+    store.claim().await.unwrap();
+    let fixture = Fixture {
+        calls: Arc::default(),
+    };
+    let err = crawler::crawl_with_local_evidence(&store, &r, &fixture, true)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("durable local job mode"));
+    assert!(fixture.calls.lock().unwrap().is_empty());
+    assert!(
+        store
+            .local_graph_evidence(&r.request_id.to_string())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .report(&r.request_id.to_string())
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
