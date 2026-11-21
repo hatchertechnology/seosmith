@@ -6,6 +6,9 @@ use url::Url;
 pub enum TargetState {
     Available,
     Blocked,
+    Redirect,
+    HttpError,
+    Noindex,
     FetchFailed,
     NotFetched,
     OutsideScope,
@@ -29,6 +32,9 @@ pub enum GraphState {
     Terminal,
     Cycle,
     Blocked,
+    Redirect,
+    HttpError,
+    Noindex,
     Unavailable,
     OutsideScope,
     Invalid,
@@ -71,6 +77,9 @@ pub fn canonical_path(
         };
         match node.state {
             TargetState::Blocked => break GraphState::Blocked,
+            TargetState::Redirect => break GraphState::Redirect,
+            TargetState::HttpError => break GraphState::HttpError,
+            TargetState::Noindex => break GraphState::Noindex,
             TargetState::OutsideScope => break GraphState::OutsideScope,
             TargetState::FetchFailed | TargetState::NotFetched => break GraphState::Unavailable,
             TargetState::Available => {}
@@ -153,6 +162,21 @@ mod tests {
         assert_eq!(
             canonical_path(a, &nodes, &scope, 10).state,
             GraphState::Blocked
+        );
+        nodes.get_mut(b).unwrap().state = TargetState::Redirect;
+        assert_eq!(
+            canonical_path(a, &nodes, &scope, 10).state,
+            GraphState::Redirect
+        );
+        nodes.get_mut(b).unwrap().state = TargetState::HttpError;
+        assert_eq!(
+            canonical_path(a, &nodes, &scope, 10).state,
+            GraphState::HttpError
+        );
+        nodes.get_mut(b).unwrap().state = TargetState::Noindex;
+        assert_eq!(
+            canonical_path(a, &nodes, &scope, 10).state,
+            GraphState::Noindex
         );
         nodes.get_mut(b).unwrap().state = TargetState::FetchFailed;
         assert_eq!(
@@ -946,5 +970,47 @@ mod alternate_assessment_tests {
         );
         n.alternates = vec![("en".into(), n.url.clone())];
         assert_eq!(assess_alternates(&n).issues.len(), 0);
+    }
+}
+
+/// Attach observed status and a bot-specific indexing decision to an available
+/// graph node. Unknown indexing cannot become an ordinary terminal pass.
+pub fn apply_target_observation(
+    node: &mut Node,
+    status: Option<u16>,
+    index: &crate::index_evidence::Decision,
+) {
+    if node.state != TargetState::Available {
+        return;
+    }
+    node.state = match status {
+        None => TargetState::NotFetched,
+        Some(code) if (300..400).contains(&code) => TargetState::Redirect,
+        Some(code) if !(200..300).contains(&code) => TargetState::HttpError,
+        Some(_) => match index {
+            crate::index_evidence::Decision::Restricted => TargetState::Noindex,
+            crate::index_evidence::Decision::Unknown => TargetState::NotFetched,
+            crate::index_evidence::Decision::Allowed => TargetState::Available,
+        },
+    };
+}
+#[cfg(test)]
+mod target_observation_tests {
+    use super::*;
+    #[test]
+    fn unknown_indexing_cannot_become_terminal() {
+        let mut node = Node {
+            url: "https://example.com/a".into(),
+            state: TargetState::Available,
+            canonical: None,
+            alternates: vec![],
+            alternates_complete: true,
+        };
+        apply_target_observation(
+            &mut node,
+            Some(200),
+            &crate::index_evidence::Decision::Unknown,
+        );
+        assert_eq!(node.state, TargetState::NotFetched);
     }
 }
