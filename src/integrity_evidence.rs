@@ -415,3 +415,52 @@ mod cluster_tests {
         assert!(!alternate_cluster(a, &nodes, &scope, 1).complete);
     }
 }
+
+#[cfg(test)]
+mod fixture_tests {
+    use super::*;
+    #[test]
+    fn paired_graph_fixture() {
+        let cases: serde_json::Value =
+            serde_json::from_str(include_str!("../fixtures/s02-s03/integrity-cases.json")).unwrap();
+        let scope = Url::parse("https://example.com/").unwrap();
+        for case in cases.as_array().unwrap() {
+            let nodes = case["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| {
+                    let url = row[0].as_str().unwrap();
+                    let canonical = row[1].as_str().unwrap();
+                    (
+                        url.to_owned(),
+                        Node {
+                            url: url.into(),
+                            state: TargetState::Available,
+                            canonical: Some(canonical.into()),
+                            alternates: vec![],
+                            alternates_complete: true,
+                        },
+                    )
+                })
+                .collect();
+            let graph = canonical_path(case["start"].as_str().unwrap(), &nodes, &scope, 10);
+            let expected = match case["state"].as_str().unwrap() {
+                "cycle" => GraphState::Cycle,
+                "outside_scope" => GraphState::OutsideScope,
+                "unavailable" => GraphState::Unavailable,
+                _ => panic!("bad fixture"),
+            };
+            assert_eq!(graph.state, expected, "{}", case["name"]);
+            assert_eq!(
+                graph.path,
+                case["path"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap().to_owned())
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+}

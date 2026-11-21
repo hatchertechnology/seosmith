@@ -167,3 +167,32 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod fixture_tests {
+    use super::*;
+    #[test]
+    fn paired_named_bot_fixture() {
+        let cases: serde_json::Value =
+            serde_json::from_str(include_str!("../fixtures/s02-s03/robots-cases.json")).unwrap();
+        for case in cases.as_array().unwrap() {
+            let bot = case["bot"].as_str().unwrap();
+            let body = case["body"].as_str().unwrap();
+            let url = Url::parse(case["url"].as_str().unwrap()).unwrap();
+            let decision = evaluate(body, bot, &url);
+            assert_eq!(
+                decision.allowed,
+                case["allowed"].as_bool().unwrap(),
+                "{}",
+                case["name"]
+            );
+            assert_eq!(
+                decision.matched_line,
+                case["line"].as_u64().map(|v| v as u32),
+                "{}",
+                case["name"]
+            );
+            assert_ne!(decision.provenance, "matcher_disagreement");
+        }
+    }
+}
