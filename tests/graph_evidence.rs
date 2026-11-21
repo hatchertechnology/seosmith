@@ -130,3 +130,68 @@ fn similarity_candidates_are_bounded_and_review_only() {
     assert!(result.candidates[0].review_only);
     assert!(!similarity_candidates(&pages, 3, 0.4, 0).complete);
 }
+#[test]
+fn responsive_resources_preserve_source_attributes_without_selecting_a_candidate() {
+    let p = page(
+        "/",
+        "<picture><source srcset='small.webp 1x, large.webp 2x' sizes='50vw'><img src='/fallback.png' loading='lazy' fetchpriority='low' width='320' height='200'></picture>",
+    );
+    assert_eq!(p.resource_references.len(), 2);
+    assert_eq!(
+        p.resource_references[0].raw_srcset.as_deref(),
+        Some("small.webp 1x, large.webp 2x")
+    );
+    assert_eq!(p.resource_references[1].loading.as_deref(), Some("lazy"));
+    assert_eq!(p.resource_references[1].width.as_deref(), Some("320"));
+}
+#[test]
+fn canonical_variant_links_preserve_occurrence_and_do_not_validate_declaration() {
+    use seosmith::{graph_evidence::canonical_variant_links, model::Page};
+    let local = vec![page(
+        "/",
+        "<a href='/variant'>A</a><a href='/variant#two'>B</a>",
+    )];
+    let variant = Page {
+        url: "https://example.test/variant".into(),
+        status: Some(200),
+        content_type: "text/html".into(),
+        canonical: Some("https://outside.test/canonical".into()),
+        ..Default::default()
+    };
+    let result = canonical_variant_links(&local, &[variant]);
+    assert_eq!(result.len(), 2);
+    assert_eq!(result[1].link_ordinal, 1);
+    assert_eq!(
+        result[0].declared_canonical,
+        "https://outside.test/canonical"
+    );
+}
+#[test]
+fn duplicate_resource_groups_compare_decoded_bodies_not_urls() {
+    use seosmith::graph_evidence::duplicate_resources;
+    let headers = BTreeMap::new();
+    let resources = vec![
+        resource("https://example.test/a", &headers, b"same"),
+        resource("https://example.test/b", &headers, b"same"),
+        resource("https://example.test/c", &headers, b"other"),
+    ];
+    let groups = duplicate_resources(&resources);
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].urls.len(), 2);
+}
+#[test]
+fn byte_groups_label_decoded_measure_and_partial_collection() {
+    use seosmith::graph_evidence::resource_byte_groups;
+    let mut headers = BTreeMap::new();
+    headers.insert("content-type".into(), "image/png; charset=binary".into());
+    let resources = vec![
+        resource("https://example.test/a", &headers, b"abc"),
+        resource("https://example.test/b", &headers, b"12345"),
+    ];
+    let groups = resource_byte_groups(&resources, false);
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].decoded_body_bytes, 8);
+    assert_eq!(groups[0].origin.as_deref(), Some("https://example.test"));
+    assert_eq!(groups[0].content_type.as_deref(), Some("image/png"));
+    assert!(!groups[0].complete);
+}

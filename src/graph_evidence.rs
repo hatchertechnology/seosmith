@@ -44,9 +44,22 @@ pub struct ContentEvidence {
     pub review_only: bool,
 }
 #[derive(Clone, Debug, Serialize)]
+pub struct ResourceReference {
+    pub element: String,
+    pub raw_src: Option<String>,
+    /// The original srcset is preserved; no browser candidate selection is inferred.
+    pub raw_srcset: Option<String>,
+    pub sizes: Option<String>,
+    pub loading: Option<String>,
+    pub fetchpriority: Option<String>,
+    pub width: Option<String>,
+    pub height: Option<String>,
+}
+#[derive(Clone, Debug, Serialize)]
 pub struct LocalPageEvidence {
     pub url: String,
     pub links: Vec<LinkEvidence>,
+    pub resource_references: Vec<ResourceReference>,
     pub ids: BTreeSet<String>,
     pub content: ContentEvidence,
     pub extraction_complete: bool,
@@ -116,6 +129,44 @@ pub fn extract(url: &Url, html: &str, status: u16) -> LocalPageEvidence {
                 .any(|x| matches!(x, "nofollow" | "sponsored" | "ugc")),
         });
     }
+    let mut resource_references = Vec::new();
+    for el in doc.select(&selector("img,source,script[src],link[href]")) {
+        if resource_references.len() == 2000 {
+            complete = false;
+            break;
+        }
+        if [
+            "src",
+            "href",
+            "srcset",
+            "sizes",
+            "loading",
+            "fetchpriority",
+            "width",
+            "height",
+        ]
+        .iter()
+        .filter_map(|name| el.value().attr(name))
+        .any(|v| v.chars().count() > 2048)
+        {
+            complete = false;
+        }
+        let attr = |name| {
+            el.value()
+                .attr(name)
+                .map(|v| v.chars().take(2048).collect())
+        };
+        resource_references.push(ResourceReference {
+            element: el.value().name().into(),
+            raw_src: attr("src").or_else(|| attr("href")),
+            raw_srcset: attr("srcset"),
+            sizes: attr("sizes"),
+            loading: attr("loading"),
+            fetchpriority: attr("fetchpriority"),
+            width: attr("width"),
+            height: attr("height"),
+        });
+    }
     let id_count = doc.select(&selector("[id],a[name]")).count();
     if id_count > 10000 {
         complete = false;
@@ -165,6 +216,7 @@ pub fn extract(url: &Url, html: &str, status: u16) -> LocalPageEvidence {
     LocalPageEvidence {
         url: fetch_url(url.clone()),
         links,
+        resource_references,
         ids,
         extraction_complete: complete,
         content: ContentEvidence {
@@ -274,6 +326,7 @@ pub struct ResourceEvidence {
     /// A header is an estimate of the encoded representation, not a measured transfer.
     pub declared_content_length: Option<u64>,
     pub transfer_bytes: Option<u64>,
+    pub content_type: Option<String>,
     pub content_encoding: Option<String>,
     pub cache_control: Option<String>,
     pub etag: Option<String>,
@@ -290,6 +343,7 @@ pub fn resource(url: &str, headers: &BTreeMap<String, String>, body: &[u8]) -> R
         decoded_body_bytes: body.len(),
         declared_content_length: headers.get("content-length").and_then(|v| v.parse().ok()),
         transfer_bytes: None,
+        content_type: headers.get("content-type").cloned(),
         content_encoding: headers.get("content-encoding").cloned(),
         cache_control: headers.get("cache-control").cloned(),
         etag: headers.get("etag").cloned(),
@@ -451,4 +505,127 @@ pub fn similarity_candidates(
         }
     }
     result
+}
+
+#[derive(Debug, Serialize)]
+pub struct CanonicalVariantLink {
+    pub source: String,
+    pub link_ordinal: usize,
+    pub target: String,
+    pub declared_canonical: String,
+}
+/// Reports observed links to fetched pages declaring a different canonical; not a validation of that canonical.
+pub fn canonical_variant_links(
+    local: &[LocalPageEvidence],
+    pages: &[crate::model::Page],
+) -> Vec<CanonicalVariantLink> {
+    let canonical: BTreeMap<_, _> = pages
+        .iter()
+        .filter(|p| p.html())
+        .filter_map(|p| {
+            p.canonical
+                .as_ref()
+                .filter(|c| *c != &p.url)
+                .map(|c| (p.url.as_str(), c.as_str()))
+        })
+        .collect();
+    local
+        .iter()
+        .flat_map(|source| {
+            source
+                .links
+                .iter()
+                .enumerate()
+                .filter_map(|(ordinal, link)| {
+                    canonical
+                        .get(link.fetch_url.as_str())
+                        .map(|target| CanonicalVariantLink {
+                            source: source.url.clone(),
+                            link_ordinal: ordinal,
+                            target: link.fetch_url.clone(),
+                            declared_canonical: (*target).into(),
+                        })
+                })
+        })
+        .collect()
+}
+
+#[derive(Debug, Serialize)]
+pub struct DuplicateResourceGroup {
+    pub decoded_body_hash: String,
+    pub urls: Vec<String>,
+}
+/// Equality of decoded bodies is an observation, not proof that assets are interchangeable.
+pub fn duplicate_resources(resources: &[ResourceEvidence]) -> Vec<DuplicateResourceGroup> {
+    let mut groups: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for r in resources {
+        groups.entry(&r.body_hash).or_default().insert(&r.url);
+    }
+    groups
+        .into_iter()
+        .filter(|(_, urls)| urls.len() > 1)
+        .map(|(hash, urls)| DuplicateResourceGroup {
+            decoded_body_hash: hash.into(),
+            urls: urls.into_iter().map(str::to_owned).collect(),
+        })
+        .collect()
+}
+
+#[derive(Debug, Serialize)]
+pub struct ResourceByteGroup {
+    pub origin: Option<String>,
+    pub content_type: Option<String>,
+    pub resource_count: usize,
+    pub decoded_body_bytes: u64,
+    pub complete: bool,
+}
+/// Totals only observed decoded bodies, grouped by origin and declared MIME type.
+pub fn resource_byte_groups(
+    resources: &[ResourceEvidence],
+    collection_complete: bool,
+) -> Vec<ResourceByteGroup> {
+    let mut groups: BTreeMap<(Option<String>, Option<String>), (usize, u64, bool)> =
+        BTreeMap::new();
+    for r in resources {
+        let origin = Url::parse(&r.url)
+            .ok()
+            .filter(|u| matches!(u.scheme(), "http" | "https"))
+            .map(|u| u.origin().ascii_serialization());
+        let content_type = r
+            .content_type
+            .as_ref()
+            .map(|s| {
+                s.split(';')
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_ascii_lowercase()
+            })
+            .filter(|s| !s.is_empty());
+        let group = groups
+            .entry((origin, content_type))
+            .or_insert((0, 0, collection_complete));
+        group.0 += 1;
+        match u64::try_from(r.decoded_body_bytes)
+            .ok()
+            .and_then(|n| group.1.checked_add(n))
+        {
+            Some(sum) => group.1 = sum,
+            None => group.2 = false,
+        }
+    }
+    groups
+        .into_iter()
+        .map(
+            |((origin, content_type), (resource_count, decoded_body_bytes, complete))| {
+                ResourceByteGroup {
+                    origin,
+                    content_type,
+                    resource_count,
+                    decoded_body_bytes,
+                    complete,
+                }
+            },
+        )
+        .collect()
 }
