@@ -318,3 +318,90 @@ mod budget_tests {
         );
     }
 }
+
+/// Build a provisional local collector envelope; this is not a report or wire contract.
+/// The byte budget includes the entire compact UTF-8 envelope, not only the payload.
+pub fn local_sidecar(
+    capture: &PageCapture,
+    max_bytes: usize,
+) -> Result<serde_json::Value, &'static str> {
+    let mut payload = capture.clone();
+    let mut payload_budget = max_bytes.saturating_sub(256);
+    loop {
+        enforce_page_budget(&mut payload, payload_budget)?;
+        let robots_known = matches!(
+            payload.robots_source.as_str(),
+            "robots_txt" | "not_found" | "http_denied_synthetic"
+        ) && !payload.robots.is_empty()
+            && payload.robots.iter().all(|r| {
+                r.provenance != "budget_omitted"
+                    && r.provenance != "matcher_disagreement"
+                    && r.provenance != "matched_line_unavailable"
+            });
+        let collections_complete = payload.http.as_ref().is_some_and(|c| c.complete)
+            && payload.html.as_ref().is_some_and(|c| c.complete);
+        let complete = payload.state == "available" && robots_known && collections_complete;
+        let has_evidence =
+            payload.http.is_some() || payload.html.is_some() || !payload.robots.is_empty();
+        let state = if complete {
+            "observed"
+        } else if has_evidence {
+            "partial"
+        } else {
+            "unavailable"
+        };
+        let omitted = match (&payload.http, &payload.html) {
+            (Some(http), Some(html)) if robots_known && http.complete && html.complete => {
+                Some(http.omitted.saturating_add(html.omitted))
+            }
+            _ => None,
+        };
+        let reason = if complete {
+            None
+        } else if payload.state != "available" {
+            Some(payload.state.as_str())
+        } else {
+            Some("incomplete_evidence")
+        };
+        let envelope = serde_json::json!({"collector":{"id":"s02-s03","version":"s02-s03-local-1"},"state":state,"omitted":omitted,"reason":reason,"payload":payload});
+        let size = serde_json::to_vec(&envelope)
+            .map_err(|_| "serialization_failed")?
+            .len();
+        if size <= max_bytes {
+            return Ok(envelope);
+        }
+        let deficit = size - max_bytes;
+        payload_budget = payload_budget
+            .checked_sub(deficit)
+            .ok_or("minimum_marker_exceeds_budget")?;
+    }
+}
+#[cfg(test)]
+mod sidecar_tests {
+    use super::*;
+    #[test]
+    fn wrapper_binds_url_and_never_claims_blocked_content_complete() {
+        let c = PageCapture::unavailable("https://example.com/blocked", "robots_blocked");
+        let sidecar = local_sidecar(&c, 1024).unwrap();
+        assert_eq!(sidecar["payload"]["url"], c.url);
+        assert_eq!(sidecar["state"], "unavailable");
+        assert!(sidecar["omitted"].is_null());
+        assert_eq!(local_sidecar(&c, 1), Err("minimum_marker_exceeds_budget"));
+        let mut observed = PageCapture::unavailable("https://example.com/", "available");
+        observed.http = Some(http_occurrences(&[]));
+        observed.html = Some(html_occurrences("<head></head>", true));
+        observed.robots_source = "not_found".into();
+        observed.robots.push(crate::robots_evidence::evaluate(
+            "",
+            "Googlebot",
+            &url::Url::parse(&observed.url).unwrap(),
+        ));
+        let wrapped = local_sidecar(&observed, 1024).unwrap();
+        assert_eq!(wrapped["state"], "observed");
+        assert_eq!(wrapped["omitted"], 0);
+        observed.html.as_mut().unwrap().complete = false;
+        let partial = local_sidecar(&observed, 1024).unwrap();
+        assert_eq!(partial["state"], "partial");
+        assert!(partial["omitted"].is_null());
+    }
+}
