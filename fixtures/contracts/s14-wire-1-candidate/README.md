@@ -1,0 +1,9 @@
+# S14 wire fixture review candidate
+
+This is a proposal for paired producer/receiver review, not an approved schema, delivery implementation, or production capability. `manifest.json` pins the report, schema, registry, state matrix and ingestion-case bytes. Reproduce them from the repository root with `python3 scripts/make-s14-review-fixtures.py`; this uses the local Rust producer for the mixed omitted case and requires Cargo. The ingestion-case matrix is an input to that generator, not generated from a receiver implementation.
+
+The structural schema is closed for the typed report and extension objects, except for deliberately arbitrary source evidence values (`details` and structured-data `data`). It is not a complete validator. Duplicate decoded keys, numeric-token spelling, depth, UTF-8 byte limits, canonical policy, source bindings, predicates, omitted populations, catalog equality, scope and authorization need independent raw and semantic checks. `provenance` in the state matrix denotes the documented semantic group; it is not a serialized record field.
+
+Fixtures named `v4-candidate-*` are candidate report-validation positives; authorization is separately specified in `ingestion-cases-candidate.json`. Each standalone ingestion case uses a fresh store. The sequence cases intentionally reuse a request ID. The provisional cross-path rule returns the existing receipt for matching bytes, retains the first ingestion provenance, and authenticates each worker retry; changed bytes conflict. Imports must remain unverified for lifecycle regardless of any report claim. Worker identity must come from its authenticated current positive binding.
+
+Depth boundary reports add a nested probe inside arbitrary finding details. Acceptance at depth 64 and the exact byte cap is conditional on all remaining receiver constraints; these are unverified review hypotheses, not proof of acceptance. Local schema 3 fixtures remain unchanged.
