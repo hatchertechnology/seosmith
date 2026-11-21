@@ -373,6 +373,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pre_mode_delivered_tombstone_remains_idempotent() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(dir.path().join("jobs.sqlite").to_str().unwrap()).await?;
+        let report: seosmith::model::Report =
+            serde_json::from_str(include_str!("../fixtures/contracts/legacy.json"))?;
+        store.submit(&report.request).await?;
+        store.claim().await?.unwrap();
+        store.finish(&report).await?;
+        let (id, _, hash, _) = store.pending().await?.unwrap();
+        store.delivered(&id, &hash).await?;
+        sqlx::query("UPDATE jobs SET execution_mode=NULL,created=unixepoch()-2592001 WHERE id=?")
+            .bind(&id)
+            .execute(&store.0)
+            .await?;
+        store.prune().await?;
+        assert!(store.report(&id).await?.is_none());
+        store.recover().await?;
+        assert!(!store.submit(&report.request).await?);
+        assert!(store.claim().await?.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn cancelled_or_finalized_jobs_cannot_be_written() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let store = Store::open(dir.path().join("jobs.sqlite").to_str().unwrap()).await?;

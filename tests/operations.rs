@@ -406,3 +406,31 @@ fn legacy_serve_still_reaches_its_normal_configuration_check() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("SEOSMITH_API_TOKEN"));
     assert!(db.exists());
 }
+
+#[tokio::test]
+async fn empty_pre_mode_operations_database_can_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("run.sqlite");
+    let store = Store::open(db.to_str().unwrap()).await.unwrap();
+    sqlx::query("CREATE TABLE operations_scope(version INTEGER NOT NULL)")
+        .execute(&store.0)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO operations_scope VALUES(1)")
+        .execute(&store.0)
+        .await
+        .unwrap();
+    sqlx::query("ALTER TABLE jobs DROP COLUMN execution_mode")
+        .execute(&store.0)
+        .await
+        .unwrap();
+    drop(store);
+    let path = dir.path().join("request.json");
+    std::fs::write(&path, serde_json::to_vec(&request()).unwrap()).unwrap();
+    let result = cli(&db, &["start", "--request", path.to_str().unwrap()]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}

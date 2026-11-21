@@ -152,6 +152,9 @@ async fn existing(database: &Path, write: bool) -> Result<Store> {
         .await
         .context("not_an_operations_database")?;
     ensure!(version == 1, "unsupported_operations_database");
+    if write {
+        store.ensure_execution_mode().await?;
+    }
     Ok(store)
 }
 

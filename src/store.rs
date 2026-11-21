@@ -57,18 +57,23 @@ impl Store {
                 .execute(&pool)
                 .await?;
         }
+        let store = Self(pool);
+        store.ensure_execution_mode().await?;
+        Ok(store)
+    }
+    pub async fn ensure_execution_mode(&self) -> Result<()> {
         let job_columns = sqlx::query("PRAGMA table_info(jobs)")
-            .fetch_all(&pool)
+            .fetch_all(&self.0)
             .await?;
         if !job_columns
             .iter()
             .any(|r| r.get::<String, _>("name") == "execution_mode")
         {
             sqlx::query("ALTER TABLE jobs ADD COLUMN execution_mode TEXT")
-                .execute(&pool)
+                .execute(&self.0)
                 .await?;
         }
-        Ok(Self(pool))
+        Ok(())
     }
     pub async fn recover(&self) -> Result<()> {
         sqlx::query("UPDATE jobs SET state='failed',error='ambiguous_pre_mode_job' WHERE execution_mode IS NULL AND state IN ('queued','running')")
@@ -95,13 +100,21 @@ impl Store {
         r.validate()?;
         let id = r.request_id.to_string();
         let mut tx = self.0.begin_with("BEGIN IMMEDIATE").await?;
-        if let Some((old, old_mode, old_report)) =
-            sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
-                "SELECT request,execution_mode,report FROM jobs WHERE id=?",
-            )
-            .bind(&id)
-            .fetch_optional(&mut *tx)
-            .await?
+        if let Some((old, old_mode, old_report, old_delivery, old_hash)) = sqlx::query_as::<
+            _,
+            (
+                String,
+                Option<String>,
+                Option<String>,
+                String,
+                Option<String>,
+            ),
+        >(
+            "SELECT request,execution_mode,report,delivery_state,report_hash FROM jobs WHERE id=?",
+        )
+        .bind(&id)
+        .fetch_optional(&mut *tx)
+        .await?
         {
             ensure!(
                 serde_json::from_str::<CrawlRequest>(&old)? == *r,
@@ -110,7 +123,9 @@ impl Store {
             ensure!(
                 !local
                     && (old_mode.as_deref() == Some("standard")
-                        || (old_mode.is_none() && old_report.is_some())),
+                        || (old_mode.is_none()
+                            && (old_report.is_some()
+                                || (old_delivery == "delivered" && old_hash.is_some())))),
                 "request_id belongs to another or unknown execution mode; use a new request ID"
             );
             return Ok(false);
