@@ -20,6 +20,9 @@ struct Cli {
     /// Experimental S14 policy JSON; requires compatible H04 display before activation.
     #[arg(long, env = "SEOSMITH_ADVISORY_POLICY")]
     advisory_policy: Option<std::path::PathBuf>,
+    /// Local-only experimental structured-data validation; never delivered.
+    #[arg(long, default_value_t = false)]
+    structured_validation: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -75,6 +78,13 @@ async fn main() -> Result<()> {
     ensure!(
         !(cli.evidence_contract_v2 && cli.advisory_policy.is_some()),
         "S14 and S01 cannot be combined until their wire contract is agreed"
+    );
+    ensure!(
+        !cli.structured_validation
+            || (matches!(cli.command, Command::Crawl { .. })
+                && !cli.evidence_contract_v2
+                && cli.advisory_policy.is_none()),
+        "structured validation is local-only and cannot be combined with delivery or other experimental contracts"
     );
     let policy: Option<seosmith::policy::AdvisoryPolicy> = cli
         .advisory_policy
@@ -163,6 +173,17 @@ async fn main() -> Result<()> {
                 "database contains another queued job; use serve to drain it"
             );
             let mut report = crawler::crawl(&store, &job).await?;
+            if cli.structured_validation {
+                store.finish_local_only(&job.request_id.to_string()).await?;
+                let observations: Vec<_> = report.pages.iter().enumerate().map(|(page_index, page)| serde_json::json!({"page_index": page_index, "url": page.url, "observations": seosmith::structured_validation::validate_crawl(page, &report.pages)})).collect();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &serde_json::json!({"profile_version": seosmith::structured_validation::PROFILE_VERSION, "report": report, "structured_validation": observations})
+                    )?
+                );
+                return Ok(());
+            }
             if let Some(policy) = &policy {
                 let result = seosmith::policy::apply_with_evidence(&mut report, policy);
                 if result.is_ok() {
