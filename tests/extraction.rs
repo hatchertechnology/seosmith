@@ -14,6 +14,7 @@ fn response(body: &str) -> Response {
         headers: BTreeMap::from([("content-type".into(), "text/html".into())]),
         body: body.as_bytes().to_vec(),
         ttfb_ms: 1,
+        raw_headers: None,
     }
 }
 fn page(body: &str) -> Page {

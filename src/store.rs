@@ -44,7 +44,9 @@ impl Store {
             delivery_state TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
             next_attempt INTEGER NOT NULL DEFAULT 0, discovery_truncated INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL DEFAULT (unixepoch()));
             CREATE TABLE IF NOT EXISTS frontier (job_id TEXT NOT NULL REFERENCES jobs(id), url TEXT NOT NULL,
-            depth INTEGER NOT NULL, in_sitemap INTEGER NOT NULL, page TEXT, PRIMARY KEY(job_id,url));")
+            depth INTEGER NOT NULL, in_sitemap INTEGER NOT NULL, page TEXT, PRIMARY KEY(job_id,url));
+            CREATE TABLE IF NOT EXISTS local_s02_s03_pages (job_id TEXT NOT NULL REFERENCES jobs(id), url TEXT NOT NULL, evidence TEXT NOT NULL, PRIMARY KEY(job_id,url));
+            CREATE TABLE IF NOT EXISTS local_s02_s03_sitemaps (job_id TEXT NOT NULL REFERENCES jobs(id), url TEXT NOT NULL, evidence TEXT NOT NULL, PRIMARY KEY(job_id,url));")
             .execute(&pool).await?;
         let columns = sqlx::query("PRAGMA table_info(frontier)")
             .fetch_all(&pool)
@@ -193,6 +195,52 @@ impl Store {
             .bind(&p.url)
             .execute(&self.0)
             .await?;
+        Ok(())
+    }
+    /// Atomically checkpoint the legacy page and the opt-in local sidecar.
+    pub async fn save_page_with_s02_s03(
+        &self,
+        id: &str,
+        page: &crate::model::Page,
+        evidence: &crate::collection_evidence::PageCapture,
+    ) -> Result<()> {
+        ensure!(page.url == evidence.url, "sidecar URL mismatch");
+        let mut tx = self.0.begin().await?;
+        let updated = sqlx::query("UPDATE frontier SET page=? WHERE job_id=? AND url=?")
+            .bind(serde_json::to_string(page)?)
+            .bind(id)
+            .bind(&page.url)
+            .execute(&mut *tx)
+            .await?;
+        ensure!(updated.rows_affected() == 1, "page checkpoint missing");
+        sqlx::query("INSERT INTO local_s02_s03_pages(job_id,url,evidence) VALUES(?,?,?) ON CONFLICT(job_id,url) DO UPDATE SET evidence=excluded.evidence")
+            .bind(id).bind(&page.url).bind(serde_json::to_string(evidence)?).execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+    /// Missing rows are unavailable (including legacy checkpoints), not successful empty captures.
+    pub async fn s02_s03_page(
+        &self,
+        id: &str,
+        url: &str,
+    ) -> Result<Option<crate::collection_evidence::PageCapture>> {
+        let raw: Option<String> =
+            sqlx::query_scalar("SELECT evidence FROM local_s02_s03_pages WHERE job_id=? AND url=?")
+                .bind(id)
+                .bind(url)
+                .fetch_optional(&self.0)
+                .await?;
+        raw.map(|s| serde_json::from_str(&s).map_err(Into::into))
+            .transpose()
+    }
+    pub async fn save_s02_s03_sitemap(
+        &self,
+        id: &str,
+        url: &str,
+        evidence: &serde_json::Value,
+    ) -> Result<()> {
+        sqlx::query("INSERT INTO local_s02_s03_sitemaps(job_id,url,evidence) VALUES(?,?,?) ON CONFLICT(job_id,url) DO UPDATE SET evidence=excluded.evidence")
+            .bind(id).bind(url).bind(serde_json::to_string(evidence)?).execute(&self.0).await?;
         Ok(())
     }
     pub async fn pages(&self, id: &str) -> Result<Vec<crate::model::Page>> {

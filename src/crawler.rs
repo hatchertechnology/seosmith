@@ -97,6 +97,7 @@ async fn discover_sitemaps(
     r: &CrawlRequest,
     fetch: &impl Transport,
     body: &str,
+    collect: bool,
 ) -> Result<bool> {
     let id = r.request_id.to_string();
     let mut maps: Vec<Url> = body
@@ -117,6 +118,15 @@ async fn discover_sitemaps(
     let mut complete = true;
     while let Some(u) = maps.pop() {
         if !(Robots { body: body.into() }).allowed(&u) {
+            if collect {
+                store
+                    .save_s02_s03_sitemap(
+                        &id,
+                        u.as_str(),
+                        &serde_json::json!({"version":"s02-s03-local-1", "state":"robots_blocked"}),
+                    )
+                    .await?;
+            }
             complete = false;
             continue;
         }
@@ -124,11 +134,35 @@ async fn discover_sitemaps(
             continue;
         }
         if seen.len() > 20 {
+            if collect {
+                store.save_s02_s03_sitemap(&id, u.as_str(), &serde_json::json!({"version":"s02-s03-local-1", "state":"uncollected", "reason":"sitemap_limit"})).await?;
+                for pending in &maps {
+                    store.save_s02_s03_sitemap(&id, pending.as_str(), &serde_json::json!({"version":"s02-s03-local-1", "state":"uncollected", "reason":"sitemap_limit"})).await?;
+                }
+            }
             complete = false;
             break;
         }
         tokio::time::sleep(Duration::from_millis(r.delay_ms)).await;
-        match fetch.get(&u).await {
+        let fetched = fetch.get(&u).await;
+        if collect {
+            let evidence = match &fetched {
+                Ok(resp) if resp.status == 200 => {
+                    serde_json::json!({"version":"s02-s03-local-1", "state":"available", "status":resp.status, "document":crate::sitemap_evidence::parse(u.as_str(), &resp.body, MAX_BODY, 2_000)})
+                }
+                Ok(resp) if resp.status == 200 => {
+                    serde_json::json!({"version":"s02-s03-local-1", "state":"unavailable", "status":resp.status, "reason":"compressed_capture_unavailable"})
+                }
+                Ok(resp) => {
+                    serde_json::json!({"version":"s02-s03-local-1", "state":"http_error", "status":resp.status})
+                }
+                Err(_) => serde_json::json!({"version":"s02-s03-local-1", "state":"fetch_failed"}),
+            };
+            store
+                .save_s02_s03_sitemap(&id, u.as_str(), &evidence)
+                .await?;
+        }
+        match fetched {
             Ok(resp) if resp.status == 200 => match sitemap_locations(&resp.body) {
                 Ok((index, urls)) => {
                     for url in urls {
@@ -155,6 +189,16 @@ pub async fn crawl(store: &Store, r: &CrawlRequest) -> Result<Report> {
     crawl_with(store, r, &Fetcher::default()).await
 }
 pub async fn crawl_with(store: &Store, r: &CrawlRequest, fetch: &impl Transport) -> Result<Report> {
+    crawl_with_local_s02_s03(store, r, fetch, false).await
+}
+/// Explicitly opt in to a local-only sidecar. Callers must persist local execution
+/// mode before invoking this and prevent local jobs from being delivered.
+pub(crate) async fn crawl_with_local_s02_s03(
+    store: &Store,
+    r: &CrawlRequest,
+    fetch: &impl Transport,
+    collect: bool,
+) -> Result<Report> {
     let id = r.request_id.to_string();
     let started_at = store.started(&id).await?;
     let started = Instant::now();
@@ -166,7 +210,7 @@ pub async fn crawl_with(store: &Store, r: &CrawlRequest, fetch: &impl Transport)
     };
     let map_complete = match tokio::time::timeout(
         Duration::from_secs(60),
-        discover_sitemaps(store, r, fetch, &policy.body),
+        discover_sitemaps(store, r, fetch, &policy.body, collect),
     )
     .await
     {
@@ -207,12 +251,20 @@ pub async fn crawl_with(store: &Store, r: &CrawlRequest, fetch: &impl Transport)
             in_sitemap,
             ..Page::default()
         };
+        let mut sidecar = crate::collection_evidence::PageCapture::unavailable(&url, "not_fetched");
         if policies[&origin(&u)].allowed(&u) {
             tokio::time::sleep(Duration::from_millis(r.delay_ms)).await;
             match fetch.get(&u).await {
                 Ok(response) => {
                     if r.in_scope(&u) || is_resource {
                         page = parse::parse(&u, depth, in_sitemap, &response);
+                        if collect {
+                            sidecar = crate::collection_evidence::PageCapture::from_response(
+                                &url,
+                                &response,
+                                page.html(),
+                            );
+                        }
                     } else {
                         page.status = Some(response.status);
                         page.bytes = response.body.len();
@@ -229,10 +281,14 @@ pub async fn crawl_with(store: &Store, r: &CrawlRequest, fetch: &impl Transport)
                             .map(Into::into);
                     }
                 }
-                Err(_) => page.error = Some("fetch_failed_or_destination_denied".into()),
+                Err(_) => {
+                    page.error = Some("fetch_failed_or_destination_denied".into());
+                    sidecar.state = "fetch_failed".into();
+                }
             }
         } else {
             page.blocked_by_robots = true;
+            sidecar.state = "robots_blocked".into();
         }
         page.is_resource = is_resource;
         let follow = !page
@@ -302,7 +358,11 @@ pub async fn crawl_with(store: &Store, r: &CrawlRequest, fetch: &impl Transport)
             }
         }
         // Checkpoint after discoveries: a crash can replay discovery without losing targets.
-        store.save_page(&id, &page).await?;
+        if collect {
+            store.save_page_with_s02_s03(&id, &page, &sidecar).await?;
+        } else {
+            store.save_page(&id, &page).await?;
+        }
         if is_resource {
             resources += 1;
         } else {
@@ -407,4 +467,85 @@ async fn report(
         evidence_contract: None,
         policy_guidance: None,
     })
+}
+
+#[cfg(test)]
+mod local_capture_tests {
+    use super::*;
+    use crate::fetch::Response;
+    use std::collections::BTreeMap;
+    struct Fixture;
+    impl Transport for Fixture {
+        async fn get(&self, url: &Url) -> Result<Response> {
+            let (status, body) = match url.path() {
+                "/robots.txt" => (200, "User-agent: *\nDisallow: /blocked"),
+                "/sitemap.xml" => (
+                    200,
+                    "<urlset><url><loc>https://example.com/blocked</loc><lastmod>2026-01-01</lastmod></url></urlset>",
+                ),
+                _ => (
+                    200,
+                    "<html><head><meta name='Googlebot' content='noindex'><link rel='canonical' href=''></head></html>",
+                ),
+            };
+            Ok(Response {
+                status,
+                headers: BTreeMap::from([("content-type".into(), "text/html".into())]),
+                raw_headers: Some(vec![
+                    ("x-robots-tag".into(), "Googlebot: noindex".into()),
+                    ("x-robots-tag".into(), "Googlebot: index".into()),
+                ]),
+                body: body.as_bytes().to_vec(),
+                ttfb_ms: 1,
+            })
+        }
+    }
+    #[tokio::test]
+    async fn opt_in_checkpoints_observed_and_blocked_separately() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("db").to_str().unwrap())
+            .await
+            .unwrap();
+        let r = CrawlRequest {
+            request_id: uuid::Uuid::new_v4(),
+            website_id: uuid::Uuid::new_v4(),
+            binding_generation: 1,
+            url: Url::parse("https://example.com/").unwrap(),
+            max_pages: 10,
+            max_duration_seconds: 20,
+            delay_ms: 1000,
+            check_external_links: false,
+            max_resources: 0,
+        };
+        store.submit(&r).await.unwrap();
+        store.claim().await.unwrap();
+        let report = crawl_with_local_s02_s03(&store, &r, &Fixture, true)
+            .await
+            .unwrap();
+        assert_eq!(report.schema_version, 1);
+        let id = r.request_id.to_string();
+        let seed = store
+            .s02_s03_page(&id, r.url.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(seed.http.unwrap().occurrences.len(), 2);
+        assert_eq!(seed.html.unwrap().occurrences.len(), 2);
+        let blocked = store
+            .s02_s03_page(&id, "https://example.com/blocked")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(blocked.state, "robots_blocked");
+        assert!(blocked.html.is_none());
+        let sitemap: String = sqlx::query_scalar(
+            "SELECT evidence FROM local_s02_s03_sitemaps WHERE job_id=? AND url=?",
+        )
+        .bind(id)
+        .bind("https://example.com/sitemap.xml")
+        .fetch_one(&store.0)
+        .await
+        .unwrap();
+        assert!(sitemap.contains("2026-01-01"));
+    }
 }

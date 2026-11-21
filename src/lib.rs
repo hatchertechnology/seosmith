@@ -15,3 +15,9 @@ pub mod policy;
 
 pub mod operations;
 pub mod policy_candidate;
+
+// Local analysis only; not connected to report serialization or delivery.
+pub mod collection_evidence;
+pub mod index_evidence;
+pub mod integrity_evidence;
+pub mod sitemap_evidence;
