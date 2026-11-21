@@ -333,3 +333,18 @@ mod capture_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod unavailable_tests {
+    use super::*;
+    #[test]
+    fn blocked_noindex_cannot_be_inferred() {
+        let capture = crate::collection_evidence::PageCapture::unavailable(
+            "https://example.com/blocked",
+            "robots_blocked",
+        );
+        let result = evaluate_capture("Googlebot", &capture);
+        assert_eq!(result.index, Decision::Unknown);
+        assert!(result.sources.is_empty());
+    }
+}
