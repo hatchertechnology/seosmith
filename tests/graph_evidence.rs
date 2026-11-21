@@ -195,3 +195,58 @@ fn byte_groups_label_decoded_measure_and_partial_collection() {
     assert_eq!(groups[0].content_type.as_deref(), Some("image/png"));
     assert!(!groups[0].complete);
 }
+#[test]
+fn graph_coverage_requires_known_reconciled_sources_and_no_omissions() {
+    use seosmith::graph_evidence::{GraphCoverageInput, graph_coverage};
+    let mut input = GraphCoverageInput {
+        discovery_complete: Some(true),
+        expected_pages: Some(2),
+        observed_pages: 2,
+        unavailable_pages: 0,
+        truncated_pages: 0,
+        omitted_records: Some(0),
+        comparisons_complete: Some(true),
+    };
+    assert!(graph_coverage(&input).complete);
+    input.discovery_complete = None;
+    input.omitted_records = None;
+    let partial = graph_coverage(&input);
+    assert!(!partial.complete);
+    assert!(partial.reasons.contains(&"discovery_incomplete_or_unknown"));
+    assert!(partial.reasons.contains(&"records_omitted_or_unknown"));
+    input.discovery_complete = Some(true);
+    input.omitted_records = Some(0);
+    input.expected_pages = Some(3);
+    assert!(
+        graph_coverage(&input)
+            .reasons
+            .contains(&"page_counts_unreconciled")
+    );
+    input.expected_pages = Some(2);
+    input.truncated_pages = 3;
+    assert!(
+        graph_coverage(&input)
+            .reasons
+            .contains(&"truncation_counts_invalid")
+    );
+}
+#[test]
+fn similarity_clusters_are_connected_review_groups_and_preserve_partial_state() {
+    use seosmith::graph_evidence::{CandidateSet, SimilarityCandidate, similarity_clusters};
+    let edge = |a: &str, b: &str| SimilarityCandidate {
+        first: a.into(),
+        second: b.into(),
+        similarity: 0.8,
+        review_only: true,
+    };
+    let candidates = CandidateSet {
+        candidates: vec![edge("a", "b"), edge("b", "c")],
+        comparisons: 2,
+        complete: false,
+    };
+    let (groups, complete) = similarity_clusters(&candidates);
+    assert!(!complete);
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].urls, vec!["a", "b", "c"]);
+    assert!(groups[0].review_only);
+}
