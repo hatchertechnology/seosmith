@@ -1,0 +1,322 @@
+{
+  "version": 1,
+  "semantics": "s06-fixture-design-1",
+  "provenance": "Hand-authored synthetic source bytes and review labels; no crawler, rendered browser or provider capture.",
+  "cases": [
+    {
+      "id": "product-variants",
+      "url": "https://fixture.invalid/product-variants",
+      "html": "product-red.html",
+      "family": "near_duplicate",
+      "expected": false,
+      "review_state": "no_candidate",
+      "reason": "Shared product copy describes legitimate selectable color/SKU variants; similarity alone is not a defect.",
+      "related": [
+        "product-blue.html"
+      ],
+      "response": {
+        "status": 200,
+        "content_type": "text/html",
+        "availability": "available"
+      },
+      "source_sha256": "7b9bdf3d56e73edef061a894cf80220cb2cc0911951c6325690702d1381b1bf3"
+    },
+    {
+      "id": "useful-hours",
+      "url": "https://fixture.invalid/useful-hours",
+      "html": "short-hours.html",
+      "family": "soft_404",
+      "expected": false,
+      "review_state": "no_candidate",
+      "reason": "Short page fully answers opening-hours intent; no minimum word count.",
+      "related": [],
+      "response": {
+        "status": 200,
+        "content_type": "text/html",
+        "availability": "available"
+      },
+      "source_sha256": "9578e123f04fd7b3e07ca4bd0c8c0ce8f424fe9f2cefde23f714319c4cfbd945"
+    },
+    {
+      "id": "useful-contact",
+      "url": "https://fixture.invalid/useful-contact",
+      "html": "short-contact.html",
+      "family": "soft_404",
+      "expected": false,
+      "review_state": "no_candidate",
+      "reason": "Short contact page supplies actionable contact and access information.",
+      "related": [],
+      "response": {
+        "status": 200,
+        "content_type": "text/html",
+        "availability": "available"
+      },
+      "source_sha256": "ff088a207c109a6c696cb17177b8155a52fdea2adf64cd98a97597d52c3031c5"
+    },
+    {
+      "id": "error-with-success",
+      "url": "https://fixture.invalid/error-with-success",
+      "html": "error-200.html",
+      "family": "soft_404",
+      "expected": true,
+      "review_state": "manual_review",
+      "reason": "HTTP 200 conflicts with explicit missing-item title, heading and main text.",
+      "related": [],
+      "response": {
+        "status": 200,
+        "content_type": "text/html",
+        "availability": "available"
+      },
+      "source_sha256": "6286271f08729ca50f9ef35f7e2f0260616da03cf3f01785e296b1fad2af9f69"
+    },
+    {
+      "id": "real-not-found",
+      "url": "https://fixture.invalid/real-not-found",
+      "html": "error-404.html",
+      "family": "soft_404",
+      "expected": false,
+      "review_state": "no_candidate",
+      "reason": "Actual 404 is an HTTP error, not a suspected soft 404.",
+      "related": [],
+      "response": {
+        "status": 404,
+        "content_type": "text/html",
+        "availability": "available"
+      },
+      "source_sha256": "6286271f08729ca50f9ef35f7e2f0260616da03cf3f01785e296b1fad2af9f69"
+    },
+    {
+      "id": "error-phrase-guide",
+      "url": "https://fixture.invalid/error-phrase-guide",
+      "html": "error-help.html",
+      "family": "soft_404",
+      "expected": false,
+      "review_state": "no_candidate",
+      "reason": "Error wording occurs in useful explanatory content, not a missing-resource response.",
+      "related": [],
+      "response": {
+        "status": 200,
+        "content_type": "text/html",
+        "availability": "available"
+      },
+      "source_sha256": "fa47a4e732476ecf350bcb2e4cb6ddd143b7378a7c0df4053fd17873a3b4a8c0"
+    },
+    {
+      "id": "empty-shell",
+      "url": "https://fixture.invalid/empty-shell",
+      "html": "app-shell.html",
+      "family": "soft_404",
+      "expected": null,
+      "review_state": "unknown",
+      "reason": "Static shell has no main content; rendering was not performed. Resource existence is unknown.",
+      "related": [],
+      "response": {
+        "status": 200,
+        "content_type": "text/html",
+        "availability": "available"
+      },
+      "source_sha256": "f6750e756979267494bd801fd0e3175e11ae7f70acabd5e7de58dcf553fc7044"
+    },
+    {
+      "id": "loading-shell",
+      "url": "https://fixture.invalid/loading-shell",
+      "html": "loading-shell.html",
+      "family": "soft_404",
+      "expected": null,
+      "review_state": "unknown",
+      "reason": "Loading text alone cannot establish an error; render outcome is unavailable.",
+      "related": [],
+      "response": {
+        "status": 200,
+        "content_type": "text/html",
+        "availability": "available"
+      },
+      "source_sha256": "c9acb75b48fc59ebe762ee0085637a66a8b8524b3567f7afbb1b6116ee9bbbf8"
+    },
+    {
+      "id": "location-variants",
+      "url": "https://fixture.invalid/location-variants",
+      "html": "service-east.html",
+      "family": "near_duplicate",
+      "expected": true,
+      "review_state": "manual_review",
+      "reason": "Location token changes amid repeated main text warrant intent review, not a doorway/spam determination.",
+      "related": [
+        "service-west.html"
+      ],
+      "response": {
+        "status": 200,
+        "content_type": "text/html",
+        "availability": "available"
+      },
+      "source_sha256": "1fe60ddb07592152eed193ef78dce3dc8315018566b6cb3cc63e810ccd8f563f"
+    },
+    {
+      "id": "shared-template",
+      "url": "https://fixture.invalid/shared-template",
+      "html": "service-east.html",
+      "family": "near_duplicate",
+      "expected": false,
+      "review_state": "no_candidate",
+      "reason": "Shared navigation/footer do not establish duplicate main content.",
+      "related": [
+        "unique-service.html"
+      ],
+      "response": {
+        "status": 200,
+        "content_type": "text/html",
+        "availability": "available"
+      },
+      "source_sha256": "1fe60ddb07592152eed193ef78dce3dc8315018566b6cb3cc63e810ccd8f563f"
+    },
+    {
+      "id": "exact-duplicate",
+      "url": "https://fixture.invalid/exact-duplicate",
+      "html": "service-east.html",
+      "family": "exact_duplicate",
+      "expected": true,
+      "review_state": "manual_review",
+      "reason": "Exact retained HTML bytes match; duplicate observation requires intent review.",
+      "related": [
+        "exact-copy.html"
+      ],
+      "response": {
+        "status": 200,
+        "content_type": "text/html",
+        "availability": "available"
+      },
+      "source_sha256": "1fe60ddb07592152eed193ef78dce3dc8315018566b6cb3cc63e810ccd8f563f"
+    },
+    {
+      "id": "fetch-failed",
+      "url": "https://fixture.invalid/fetch-failed",
+      "html": null,
+      "family": "soft_404",
+      "expected": null,
+      "review_state": "unknown",
+      "reason": "Incomplete or ineligible source evidence remains unknown; never infer a negative.",
+      "related": [],
+      "response": {
+        "status": null,
+        "content_type": "text/html",
+        "availability": "fetch_failed"
+      },
+      "source_sha256": null
+    },
+    {
+      "id": "robots-blocked",
+      "url": "https://fixture.invalid/robots-blocked",
+      "html": null,
+      "family": "soft_404",
+      "expected": null,
+      "review_state": "unknown",
+      "reason": "Incomplete or ineligible source evidence remains unknown; never infer a negative.",
+      "related": [],
+      "response": {
+        "status": null,
+        "content_type": "text/html",
+        "availability": "robots_blocked"
+      },
+      "source_sha256": null
+    },
+    {
+      "id": "omitted-page",
+      "url": "https://fixture.invalid/omitted-page",
+      "html": null,
+      "family": "soft_404",
+      "expected": null,
+      "review_state": "unknown",
+      "reason": "Incomplete or ineligible source evidence remains unknown; never infer a negative.",
+      "related": [],
+      "response": {
+        "status": null,
+        "content_type": "text/html",
+        "availability": "not_collected"
+      },
+      "source_sha256": null
+    },
+    {
+      "id": "truncated-page",
+      "url": "https://fixture.invalid/truncated-page",
+      "html": "error-200.html",
+      "family": "soft_404",
+      "expected": null,
+      "review_state": "unknown",
+      "reason": "Incomplete or ineligible source evidence remains unknown; never infer a negative.",
+      "related": [],
+      "response": {
+        "status": 200,
+        "content_type": "text/html",
+        "availability": "extraction_truncated"
+      },
+      "source_sha256": "6286271f08729ca50f9ef35f7e2f0260616da03cf3f01785e296b1fad2af9f69"
+    },
+    {
+      "id": "missing-status",
+      "url": "https://fixture.invalid/missing-status",
+      "html": "error-200.html",
+      "family": "soft_404",
+      "expected": null,
+      "review_state": "unknown",
+      "reason": "Incomplete or ineligible source evidence remains unknown; never infer a negative.",
+      "related": [],
+      "response": {
+        "status": null,
+        "content_type": "text/html",
+        "availability": "missing_status"
+      },
+      "source_sha256": "6286271f08729ca50f9ef35f7e2f0260616da03cf3f01785e296b1fad2af9f69"
+    },
+    {
+      "id": "server-error",
+      "url": "https://fixture.invalid/server-error",
+      "html": "error-200.html",
+      "family": "soft_404",
+      "expected": null,
+      "review_state": "unknown",
+      "reason": "Incomplete or ineligible source evidence remains unknown; never infer a negative.",
+      "related": [],
+      "response": {
+        "status": 503,
+        "content_type": "text/html",
+        "availability": "http_error"
+      },
+      "source_sha256": "6286271f08729ca50f9ef35f7e2f0260616da03cf3f01785e296b1fad2af9f69"
+    },
+    {
+      "id": "non-html",
+      "url": "https://fixture.invalid/non-html",
+      "html": null,
+      "family": "soft_404",
+      "expected": null,
+      "review_state": "unknown",
+      "reason": "Incomplete or ineligible source evidence remains unknown; never infer a negative.",
+      "related": [],
+      "response": {
+        "status": 200,
+        "content_type": "application/pdf",
+        "availability": "non_html"
+      },
+      "source_sha256": null
+    },
+    {
+      "id": "unavailable-pair",
+      "url": "https://fixture.invalid/unavailable-pair",
+      "html": "service-east.html",
+      "family": "near_duplicate",
+      "expected": null,
+      "review_state": "unknown",
+      "reason": "Comparison peer was not collected; an absent peer is not evidence of uniqueness.",
+      "related": [],
+      "response": {
+        "status": 200,
+        "content_type": "text/html",
+        "availability": "available"
+      },
+      "source_sha256": "1fe60ddb07592152eed193ef78dce3dc8315018566b6cb3cc63e810ccd8f563f",
+      "unavailable_related": [
+        "https://fixture.invalid/not-collected-peer"
+      ]
+    }
+  ]
+}
