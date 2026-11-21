@@ -349,12 +349,48 @@ pub fn local_sidecar(
         let robots_known = matches!(
             payload.robots_source.as_str(),
             "robots_txt" | "not_found" | "http_denied_synthetic"
-        ) && !payload.robots.is_empty()
-            && payload.robots.iter().all(|r| {
-                r.provenance != "budget_omitted"
-                    && r.provenance != "matcher_disagreement"
-                    && r.provenance != "matched_line_unavailable"
-            });
+        ) && [
+            "Seosmith",
+            "Googlebot",
+            "Bingbot",
+            "GPTBot",
+            "OAI-SearchBot",
+            "ChatGPT-User",
+        ]
+        .iter()
+        .all(|bot| {
+            payload
+                .robots
+                .iter()
+                .filter(|r| r.bot.eq_ignore_ascii_case(bot))
+                .count()
+                == 1
+        }) && payload.robots.len() == 6
+            && payload
+                .robots
+                .iter()
+                .all(|r| match payload.robots_source.as_str() {
+                    "robots_txt" => match r.provenance.as_str() {
+                        "matched_rule" => {
+                            r.matched_line.is_some() && r.rule.is_some() && r.raw_line.is_some()
+                        }
+                        "no_matching_rule" => {
+                            r.allowed
+                                && r.matched_line.is_none()
+                                && r.rule.is_none()
+                                && r.raw_line.is_none()
+                        }
+                        _ => false,
+                    },
+                    "not_found" | "http_denied_synthetic" => {
+                        r.provenance == payload.robots_source
+                            && r.allowed == (payload.robots_source == "not_found")
+                            && r.matched_line.is_none()
+                            && r.rule.is_none()
+                            && r.raw_line.is_none()
+                    }
+                    _ => false,
+                });
         let collections_complete = payload
             .http
             .as_ref()
@@ -420,21 +456,34 @@ mod sidecar_tests {
         observed.http = Some(http_occurrences(&[]));
         observed.html = Some(html_occurrences("<head></head>", true));
         observed.robots_source = "not_found".into();
-        observed.robots.push(crate::robots_evidence::evaluate(
-            "",
+        let url = url::Url::parse(&observed.url).unwrap();
+        for bot in [
+            "Seosmith",
             "Googlebot",
-            &url::Url::parse(&observed.url).unwrap(),
-        ));
-        let wrapped = local_sidecar(&observed, 1024).unwrap();
+            "Bingbot",
+            "GPTBot",
+            "OAI-SearchBot",
+            "ChatGPT-User",
+        ] {
+            let mut decision = crate::robots_evidence::evaluate("", bot, &url);
+            decision.provenance = "not_found".into();
+            observed.robots.push(decision);
+        }
+        let wrapped = local_sidecar(&observed, 4096).unwrap();
         assert_eq!(wrapped["state"], "observed");
         assert_eq!(wrapped["omitted"], 0);
+        let mut missing_bot = observed.clone();
+        missing_bot.robots.pop();
+        let missing = local_sidecar(&missing_bot, 4096).unwrap();
+        assert_eq!(missing["state"], "partial");
+        assert!(missing["omitted"].is_null());
         observed.html.as_mut().unwrap().complete = false;
-        let partial = local_sidecar(&observed, 1024).unwrap();
+        let partial = local_sidecar(&observed, 4096).unwrap();
         assert_eq!(partial["state"], "partial");
         assert!(partial["omitted"].is_null());
         observed.html.as_mut().unwrap().complete = true;
         observed.html.as_mut().unwrap().omitted = 1;
-        let inconsistent = local_sidecar(&observed, 1024).unwrap();
+        let inconsistent = local_sidecar(&observed, 4096).unwrap();
         assert_eq!(inconsistent["state"], "partial");
         assert!(inconsistent["omitted"].is_null());
         observed.version = "unsupported".into();
