@@ -83,7 +83,8 @@ fn types(v: &Value) -> Vec<&str> {
 fn props(v: &Value) -> &Value {
     v.get("properties").unwrap_or(v)
 }
-fn collect_ids<'a>(v: &'a Value, base: &Url, ids: &mut HashMap<String, &'a Value>) {
+type IdIndex<'a> = HashMap<String, Vec<(&'a Value, String)>>;
+fn collect_ids<'a>(v: &'a Value, path: &str, base: &Url, ids: &mut IdIndex<'a>) {
     match v {
         Value::Object(m) => {
             if let Some(id) = m
@@ -93,20 +94,39 @@ fn collect_ids<'a>(v: &'a Value, base: &Url, ids: &mut HashMap<String, &'a Value
                 .filter(|_| !is_reference(v))
             {
                 if let Ok(u) = base.join(id) {
-                    ids.insert(u.to_string(), v);
+                    ids.entry(u.to_string()).or_default().push((v, path.into()));
                 }
             }
-            for child in m.values() {
-                collect_ids(child, base, ids);
+            for (key, child) in m {
+                collect_ids(child, &format!("{path}/{}", escape(key)), base, ids);
             }
         }
         Value::Array(a) => {
-            for child in a {
-                collect_ids(child, base, ids);
+            for (i, child) in a.iter().enumerate() {
+                collect_ids(child, &format!("{path}/{i}"), base, ids);
             }
         }
         _ => {}
     }
+}
+fn unique_reference<'a>(
+    v: &Value,
+    base: &Url,
+    ids: &'a IdIndex<'a>,
+) -> Option<(&'a Value, &'a str)> {
+    let id = v.get("@id")?.as_str()?;
+    let target = base.join(id).ok()?;
+    if target.origin() != base.origin()
+        || target.path() != base.path()
+        || target.query() != base.query()
+    {
+        return None;
+    }
+    let entries = ids.get(target.as_str())?;
+    if entries.len() != 1 {
+        return None;
+    }
+    Some((entries[0].0, entries[0].1.as_str()))
 }
 fn is_reference(v: &Value) -> bool {
     v.as_object()
@@ -120,13 +140,7 @@ fn present(v: &Value) -> bool {
         _ => true,
     }
 }
-fn check_item(
-    v: &Value,
-    path: &str,
-    base: &Url,
-    ids: &HashMap<String, &Value>,
-    out: &mut Vec<Observation>,
-) {
+fn check_item(v: &Value, path: &str, base: &Url, ids: &IdIndex<'_>, out: &mut Vec<Observation>) {
     let ts = types(v);
     let p = props(v);
     let prefix = if v.get("properties").is_some() {
@@ -209,6 +223,24 @@ fn check_item(
                             String::new()
                         }
                     );
+                    let resolved = if is_reference(offer) {
+                        unique_reference(offer, base, ids)
+                    } else {
+                        None
+                    };
+                    let (offer, offer_path) = if let Some((target, target_path)) = resolved {
+                        add(
+                            out,
+                            "coverage",
+                            "local_offer_resolved",
+                            offer_path.clone(),
+                            Some(offer),
+                            "Unique local reference resolved to a retained definition; target property paths point to that definition",
+                        );
+                        (target, target_path.to_string())
+                    } else {
+                        (*offer, offer_path)
+                    };
                     if is_reference(offer) {
                         add(
                             out,
@@ -455,9 +487,9 @@ pub fn validate(page: &Page, observations: &[StructuredData]) -> Vec<Observation
         return out;
     };
     let mut ids = HashMap::new();
-    for block in observations {
+    for (i, block) in observations.iter().enumerate() {
         if let Some(v) = &block.data {
-            collect_ids(v, &base, &mut ids);
+            collect_ids(v, &format!("/{i}/data"), &base, &mut ids);
         }
     }
     for (i, block) in observations.iter().enumerate() {

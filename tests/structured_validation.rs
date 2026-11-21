@@ -225,3 +225,31 @@ fn breadcrumb_position_and_local_address_are_checked_without_assuming_references
     assert!(result.iter().any(|o| o.code == "address_not_expanded"));
     assert!(!result.iter().any(|o| o.code == "address_type_candidate"));
 }
+
+#[test]
+fn offer_reference_resolves_only_a_unique_local_definition() {
+    let unique = block(
+        json!({"@graph":[{"@type":"Product","name":"Item","offers":{"@id":"#offer"}}, {"@id":"#offer","@type":"Offer"}]}),
+    );
+    let result = validate(&page(), &[unique]);
+    assert!(
+        result
+            .iter()
+            .any(|o| o.code == "local_offer_resolved" && o.path == "/0/data/@graph/0/offers")
+    );
+    assert!(
+        result
+            .iter()
+            .any(|o| o.code == "missing_offer_price" && o.path == "/0/data/@graph/1/price")
+    );
+    let ambiguous = block(
+        json!({"@graph":[{"@type":"Product","name":"Item","offers":{"@id":"#offer"}}, {"@id":"#offer","@type":"Offer"}, {"@id":"#offer","price":5}]}),
+    );
+    let result = validate(&page(), &[ambiguous]);
+    assert!(
+        result
+            .iter()
+            .any(|o| o.code == "referenced_offer_not_expanded")
+    );
+    assert!(!result.iter().any(|o| o.code == "missing_offer_price"));
+}
