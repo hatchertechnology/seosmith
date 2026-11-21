@@ -1,0 +1,66 @@
+{
+  "cases": [
+    {
+      "in_scope": true,
+      "input": "https://EXAMPLE.COM/path",
+      "normalized": "https://example.com/path"
+    },
+    {
+      "in_scope": true,
+      "input": "https://%65xample.com/path",
+      "normalized": "https://example.com/path"
+    },
+    {
+      "in_scope": true,
+      "input": "https://example.com:443/path",
+      "normalized": "https://example.com/path"
+    },
+    {
+      "in_scope": false,
+      "input": "https://example.com:8443/path",
+      "normalized": "https://example.com:8443/path"
+    },
+    {
+      "in_scope": false,
+      "input": "https://outside.example:8443/path",
+      "normalized": "https://outside.example:8443/path"
+    },
+    {
+      "in_scope": false,
+      "input": "http://[2001:db8::1]/path",
+      "normalized": "http://[2001:db8::1]/path"
+    },
+    {
+      "in_scope": false,
+      "input": "http://[::ffff:192.0.2.1]/path",
+      "normalized": "http://[::ffff:c000:201]/path"
+    },
+    {
+      "in_scope": false,
+      "input": "http://127.1/path",
+      "normalized": "http://127.0.0.1/path"
+    },
+    {
+      "in_scope": false,
+      "input": "https://bücher.example/path",
+      "normalized": "https://xn--bcher-kva.example/path"
+    },
+    {
+      "in_scope": null,
+      "input": "https://user@example.com/path",
+      "normalized": null
+    },
+    {
+      "in_scope": true,
+      "input": "https://example.com\\@outside.example/path",
+      "normalized": "https://example.com/@outside.example/path"
+    },
+    {
+      "in_scope": null,
+      "input": "https://[bad/path",
+      "normalized": null
+    }
+  ],
+  "scope": "Local producer normalization analysis only; not a wire URL contract.",
+  "status": "candidate-not-frozen"
+}

@@ -26,6 +26,10 @@ for source in sorted((root / 'fixtures/policies').glob('v3-local-*.json')):
     (out / source.name.replace('v3-local-', 'v4-candidate-')).write_bytes(dump(convert(json.loads(source.read_bytes()))))
 mixed = subprocess.check_output(['cargo', 'run', '--quiet', '--example', 'make_mixed_review'], cwd=root)
 (out / 'v4-candidate-mixed-omitted.json').write_bytes(dump(convert(json.loads(mixed))))
+for mode, filename in [('matrix', 'url-normalization-cases-candidate.json'), ('report', 'v4-candidate-url-normalization.json')]:
+    output = subprocess.check_output(['cargo', 'run', '--quiet', '--features', 'policy-wire-prototype', '--example', 'make_wire_url_review', '--', mode], cwd=root)
+    (out / filename).write_bytes(output)
+
 for case in ('control', 'source_missing_status', 'source_non_html', 'source_non_success', 'source_error', 'source_blocked', 'source_truncated', 'target_missing_status', 'target_error', 'target_blocked', 'omitted'):
     output = subprocess.check_output(['cargo', 'run', '--quiet', '--features', 'policy-wire-prototype', '--example', 'make_wire_edge_review', '--', case], cwd=root)
     (out / f'v4-candidate-edge-{case}.json').write_bytes(output)

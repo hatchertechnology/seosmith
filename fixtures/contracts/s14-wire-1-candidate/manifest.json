@@ -195,6 +195,12 @@
       "expected_report_validation": "reference"
     },
     {
+      "path": "url-normalization-cases-candidate.json",
+      "bytes": 1709,
+      "sha256": "e1256980f8a896d5c7d70896f915b5c7237233096c81c0581abc24a65462a7bf",
+      "expected_report_validation": "reference"
+    },
+    {
       "path": "v4-candidate-blocked.json",
       "bytes": 46208,
       "sha256": "557b0564e0a2bba68cb1e63e73c0819fe55f7759220fc9d3f8fe836b8018b0a3",
@@ -348,6 +354,12 @@
       "path": "v4-candidate-unicode-short.json",
       "bytes": 43514,
       "sha256": "fe6c813bcd2e0be9acf7c3b45a7cf729894c67aa01665a0ce427af2a1a58731a",
+      "expected_report_validation": "accept"
+    },
+    {
+      "path": "v4-candidate-url-normalization.json",
+      "bytes": 47115,
+      "sha256": "730c2d22f715a1ac758776bb7098c98aba0b636252d012a76307ab026200eef2",
       "expected_report_validation": "accept"
     },
     {
