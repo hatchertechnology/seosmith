@@ -170,7 +170,9 @@ Other HTTP errors, timeouts, redirects, oversized receipts, incorrect ID/digest 
 hour. A failed delivery never triggers another crawl. Reports are limited to
 16 MiB; oversized results stay checkpointed and require a smaller audit scope.
 Acknowledged local details expire after 30 days; compact idempotency records stay.
-Pending delivery data is never automatically expired. Monitor the volume quota.
+Pending and rejected delivery data is never automatically expired. Rejected reports do
+not count against the delivery queue limit, but still consume storage; monitor the
+volume quota.
 
 Seosmith does not open an HTP connection into Thor or expose a public crawl API.
 Scheduling can initially submit jobs through the private API. An HTP scheduler

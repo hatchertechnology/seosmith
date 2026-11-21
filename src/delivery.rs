@@ -6,7 +6,8 @@ use anyhow::{Result, ensure};
 use reqwest::{Client, StatusCode, redirect::Policy};
 use std::time::Duration;
 use url::Url;
-/// HTP's maximum decoded report_json size, in UTF-8 bytes.
+/// HTP's maximum decoded `report_json` size, in UTF-8 bytes.
+/// Keep synchronized with the HTP receiver's `report_limit` contract.
 pub const HTP_MAX_REPORT_BYTES: usize = 4_952_756;
 
 #[derive(Debug)]

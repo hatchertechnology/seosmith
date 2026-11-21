@@ -570,3 +570,41 @@ async fn htp_size_rejection_preserves_reports_and_only_stops_oversized_413() {
         server.abort();
     }
 }
+
+#[tokio::test]
+async fn rejected_reports_do_not_exhaust_queue_or_expire() {
+    let (_dir, store) = db().await;
+    let r = request();
+    store.submit(&r).await.unwrap();
+    let id = r.request_id.to_string();
+    let body = "immutable report";
+    let sha = seosmith::model::digest(body.as_bytes());
+    sqlx::query("UPDATE jobs SET state='completed', report=?, report_hash=?, created=0 WHERE id=?")
+        .bind(body)
+        .bind(&sha)
+        .bind(&id)
+        .execute(&store.0)
+        .await
+        .unwrap();
+    store.delivery_too_large(&id, &sha).await.unwrap();
+    // Fill the old queue limit with terminal rejections without changing their data.
+    sqlx::query("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<99) INSERT INTO jobs(id,request,state,report,report_hash,delivery_state,created) SELECT 'rejected-' || x,'{}','completed',?,?, 'rejected',0 FROM n")
+        .bind(body).bind(&sha).execute(&store.0).await.unwrap();
+    let next = request();
+    assert!(store.submit(&next).await.unwrap());
+    store.prune().await.unwrap();
+    assert_eq!(store.report(&id).await.unwrap().as_deref(), Some(body));
+    let retained: (String, String) =
+        sqlx::query_as("SELECT report, report_hash FROM jobs WHERE id=?")
+            .bind(&id)
+            .fetch_one(&store.0)
+            .await
+            .unwrap();
+    assert_eq!(retained, (body.into(), sha));
+    // Pending jobs still consume the queue's existing capacity.
+    sqlx::query("UPDATE jobs SET delivery_state='pending' WHERE delivery_state='rejected'")
+        .execute(&store.0)
+        .await
+        .unwrap();
+    assert!(store.submit(&request()).await.is_err());
+}

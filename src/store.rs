@@ -80,7 +80,7 @@ impl Store {
             );
             return Ok(false);
         }
-        let n:i64=sqlx::query_scalar("SELECT count(*) FROM jobs WHERE state IN ('queued','running') OR (report IS NOT NULL AND delivery_state!='delivered')").fetch_one(&mut *tx).await?;
+        let n:i64=sqlx::query_scalar("SELECT count(*) FROM jobs WHERE state IN ('queued','running') OR (report IS NOT NULL AND delivery_state NOT IN ('delivered','rejected'))").fetch_one(&mut *tx).await?;
         ensure!(n < 100, "queue full");
         sqlx::query("INSERT INTO jobs(id,request) VALUES(?,?)")
             .bind(&id)
