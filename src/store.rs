@@ -80,7 +80,7 @@ impl Store {
             );
             return Ok(false);
         }
-        let n:i64=sqlx::query_scalar("SELECT count(*) FROM jobs WHERE state IN ('queued','running') OR (report IS NOT NULL AND delivery_state!='delivered')").fetch_one(&mut *tx).await?;
+        let n:i64=sqlx::query_scalar("SELECT count(*) FROM jobs WHERE state IN ('queued','running') OR (report IS NOT NULL AND delivery_state NOT IN ('delivered','rejected'))").fetch_one(&mut *tx).await?;
         ensure!(n < 100, "queue full");
         sqlx::query("INSERT INTO jobs(id,request) VALUES(?,?)")
             .bind(&id)
@@ -288,6 +288,16 @@ impl Store {
         .await?
         .rows_affected();
         ensure!(n == 1, "delivery hash mismatch");
+        Ok(())
+    }
+    pub async fn delivery_too_large(&self, id: &str, sha: &str) -> Result<()> {
+        let n = sqlx::query("UPDATE jobs SET delivery_state='rejected',error='htp_report_limit',attempts=attempts+1 WHERE id=? AND report_hash=? AND delivery_state='pending'")
+            .bind(id)
+            .bind(sha)
+            .execute(&self.0)
+            .await?
+            .rows_affected();
+        ensure!(n == 1, "delivery state or hash mismatch");
         Ok(())
     }
     pub async fn retry(&self, id: &str, attempt: i64) -> Result<()> {
