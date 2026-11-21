@@ -12,6 +12,7 @@ pub struct RobotsDecision {
     pub allowed: bool,
     pub matched_line: Option<u32>,
     pub rule: Option<String>,
+    pub raw_line: Option<String>,
     pub provenance: String,
 }
 #[derive(Default)]
@@ -119,11 +120,23 @@ pub fn evaluate(body: &str, bot: &str, url: &Url) -> RobotsDecision {
     } else {
         (None, None, "no_matching_rule")
     };
+    let raw_line = line
+        .and_then(|n| usize::try_from(n).ok())
+        .and_then(|n| n.checked_sub(1))
+        .and_then(|n| body.lines().nth(n))
+        .filter(|s| s.len() <= 16_384)
+        .map(str::to_owned);
+    let provenance = if line.is_some() && raw_line.is_none() {
+        "matched_line_unavailable"
+    } else {
+        provenance
+    };
     RobotsDecision {
         bot: bot.into(),
         allowed,
         matched_line: line,
         rule,
+        raw_line,
         provenance: provenance.into(),
     }
 }
@@ -138,6 +151,7 @@ mod tests {
         assert!(d.allowed);
         assert_eq!(d.matched_line, Some(5));
         assert_eq!(d.rule.as_deref(), Some("/private/open"));
+        assert_eq!(d.raw_line.as_deref(), Some("Allow: /private/open"));
         let d = evaluate(body, "GPTBot", &url);
         assert!(!d.allowed);
         assert_eq!(d.matched_line, Some(2));

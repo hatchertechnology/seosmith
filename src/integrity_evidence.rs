@@ -322,6 +322,20 @@ pub fn alternate_cluster(
     limit: usize,
     universe_complete: bool,
 ) -> AlternateCluster {
+    let in_scope = Url::parse(start).is_ok_and(|u| {
+        matches!(u.scheme(), "http" | "https")
+            && u.host_str() == scope.host_str()
+            && u.port().is_none()
+            && u.username().is_empty()
+            && u.password().is_none()
+    });
+    if !in_scope {
+        return AlternateCluster {
+            members: vec![start.into()],
+            edges: Vec::new(),
+            complete: false,
+        };
+    }
     let mut seen = BTreeSet::new();
     let mut queue = std::collections::VecDeque::from([(start.to_owned(), vec![start.to_owned()])]);
     let mut queued = BTreeSet::from([start.to_owned()]);
@@ -472,6 +486,7 @@ mod cluster_tests {
         assert_eq!(inbound.edges[0].source, b);
         assert_eq!(inbound.edges[0].reciprocal, Reciprocity::Missing);
         assert!(!alternate_cluster(a, &incoming_only, &scope, 10, false).complete);
+        assert!(!alternate_cluster("https://outside.example/", &nodes, &scope, 10, true).complete);
     }
 }
 
@@ -763,6 +778,15 @@ pub fn node_from_capture(
     base: &Url,
     scope: &Url,
 ) -> Option<Node> {
+    if !Url::parse(&capture.url).is_ok_and(|u| {
+        matches!(u.scheme(), "http" | "https")
+            && u.host_str() == scope.host_str()
+            && u.port().is_none()
+            && u.username().is_empty()
+            && u.password().is_none()
+    }) {
+        return None;
+    }
     let state = match capture.state.as_str() {
         "available" => TargetState::Available,
         "robots_blocked" => TargetState::Blocked,

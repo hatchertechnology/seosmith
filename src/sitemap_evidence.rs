@@ -419,3 +419,165 @@ mod origin_tests {
         assert!(!entry_origins(root, "https://example.com/a", &docs, &scope, 10).complete);
     }
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PageObservation {
+    pub blocked: bool,
+    pub fetched: bool,
+    pub status: Option<u16>,
+    pub noindex: Option<bool>,
+    /// None is unavailable, Some(None) is an observed absence.
+    pub canonical: Option<Option<String>>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EntryObservation {
+    Blocked,
+    Noindex,
+    Noncanonical,
+    HttpError,
+    Redirect,
+    Available,
+    Unknown,
+    OutsideScope,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EntryEvaluation {
+    pub origins: EntryOrigins,
+    pub observations: Vec<EntryObservation>,
+}
+/// Reports observations only; intentional policy exclusions are evaluated separately.
+pub fn evaluate_entry(
+    root: &str,
+    target: &str,
+    documents: &std::collections::BTreeMap<String, Sitemap>,
+    pages: &std::collections::BTreeMap<String, PageObservation>,
+    scope: &Url,
+    limit: usize,
+) -> EntryEvaluation {
+    let origins = entry_origins(root, target, documents, scope, limit);
+    let Some(url) = crate::model::normalize(scope, target) else {
+        return EntryEvaluation {
+            origins,
+            observations: vec![EntryObservation::Unknown],
+        };
+    };
+    if url.host_str() != scope.host_str() || url.port().is_some() {
+        return EntryEvaluation {
+            origins,
+            observations: vec![EntryObservation::OutsideScope],
+        };
+    }
+    let Some(page) = pages.get(url.as_str()) else {
+        return EntryEvaluation {
+            origins,
+            observations: vec![EntryObservation::Unknown],
+        };
+    };
+    if page.blocked {
+        return EntryEvaluation {
+            origins,
+            observations: vec![EntryObservation::Blocked],
+        };
+    }
+    if !page.fetched || page.status.is_none() {
+        return EntryEvaluation {
+            origins,
+            observations: vec![EntryObservation::Unknown],
+        };
+    }
+    let status = page.status.unwrap_or_default();
+    if (300..400).contains(&status) {
+        return EntryEvaluation {
+            origins,
+            observations: vec![EntryObservation::Redirect],
+        };
+    }
+    if !(200..300).contains(&status) {
+        return EntryEvaluation {
+            origins,
+            observations: vec![EntryObservation::HttpError],
+        };
+    }
+    let mut observations = Vec::new();
+    if page.noindex == Some(true) {
+        observations.push(EntryObservation::Noindex);
+    }
+    if page
+        .canonical
+        .as_ref()
+        .and_then(|c| c.as_deref())
+        .is_some_and(|canonical| canonical != url.as_str())
+    {
+        observations.push(EntryObservation::Noncanonical);
+    }
+    if page.noindex.is_none()
+        || page.canonical.is_none()
+        || !origins.complete
+        || origins.paths.is_empty()
+    {
+        observations.push(EntryObservation::Unknown);
+    }
+    if observations.is_empty() {
+        observations.push(EntryObservation::Available);
+    }
+    EntryEvaluation {
+        origins,
+        observations,
+    }
+}
+#[cfg(test)]
+mod entry_evaluation_tests {
+    use super::*;
+    #[test]
+    fn blocked_and_unavailable_never_become_passes() {
+        let scope = Url::parse("https://example.com/").unwrap();
+        let map = "https://example.com/map.xml";
+        let target = "https://example.com/a";
+        let doc = parse(
+            map,
+            b"<urlset><url><loc>https://example.com/a</loc></url></urlset>",
+            1000,
+            10,
+        );
+        let docs = std::collections::BTreeMap::from([(map.into(), doc)]);
+        let mut pages = std::collections::BTreeMap::from([(
+            target.into(),
+            PageObservation {
+                blocked: true,
+                fetched: false,
+                status: None,
+                noindex: None,
+                canonical: None,
+            },
+        )]);
+        let e = evaluate_entry(map, target, &docs, &pages, &scope, 10);
+        assert_eq!(e.observations, vec![EntryObservation::Blocked]);
+        assert_eq!(e.origins.paths[0].entry_ordinal, 0);
+        pages.get_mut(target).unwrap().blocked = false;
+        assert_eq!(
+            evaluate_entry(map, target, &docs, &pages, &scope, 10).observations,
+            vec![EntryObservation::Unknown]
+        );
+        *pages.get_mut(target).unwrap() = PageObservation {
+            blocked: false,
+            fetched: true,
+            status: Some(200),
+            noindex: Some(true),
+            canonical: Some(Some("https://example.com/b".into())),
+        };
+        assert_eq!(
+            evaluate_entry(map, target, &docs, &pages, &scope, 10).observations,
+            vec![EntryObservation::Noindex, EntryObservation::Noncanonical]
+        );
+        pages.get_mut(target).unwrap().status = Some(404);
+        assert_eq!(
+            evaluate_entry(map, target, &docs, &pages, &scope, 10).observations,
+            vec![EntryObservation::HttpError]
+        );
+        pages.get_mut(target).unwrap().status = Some(301);
+        assert_eq!(
+            evaluate_entry(map, target, &docs, &pages, &scope, 10).observations,
+            vec![EntryObservation::Redirect]
+        );
+    }
+}

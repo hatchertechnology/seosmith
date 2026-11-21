@@ -332,6 +332,7 @@ pub(crate) async fn crawl_with_local_s02_s03(
                 for decision in &mut sidecar.robots {
                     decision.matched_line = None;
                     decision.rule = None;
+                    decision.raw_line = None;
                     decision.provenance = policy.source.into();
                 }
             }
