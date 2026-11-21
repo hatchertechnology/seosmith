@@ -194,3 +194,29 @@ impl PageCapture {
         }
     }
 }
+
+#[cfg(test)]
+mod transport_compat_tests {
+    use super::*;
+    #[test]
+    fn absent_raw_header_support_is_not_an_empty_collection() {
+        let mut response = crate::fetch::Response {
+            status: 200,
+            headers: std::collections::BTreeMap::new(),
+            raw_headers: None,
+            body: vec![],
+            ttfb_ms: 0,
+        };
+        assert!(
+            PageCapture::from_response("https://example.com/", &response, false)
+                .http
+                .is_none()
+        );
+        response.raw_headers = Some(vec![]);
+        let captured = PageCapture::from_response("https://example.com/", &response, false)
+            .http
+            .unwrap();
+        assert!(captured.complete);
+        assert!(captured.occurrences.is_empty());
+    }
+}
