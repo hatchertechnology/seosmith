@@ -282,3 +282,34 @@ fn nesting_limit_counts_containers_not_string_characters() {
     assert!(contract::enable_v2(&mut r).is_err());
     assert_eq!(r.schema_version, 1);
 }
+
+#[tokio::test]
+async fn local_and_unapproved_wire_schemas_never_enter_delivery_queue() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = seosmith::store::Store::open(dir.path().join("state.db").to_str().unwrap())
+        .await
+        .unwrap();
+    let mut r = report(false);
+    store.submit(&r.request).await.unwrap();
+    store.claim().await.unwrap();
+    for version in [3, 4] {
+        r.schema_version = version;
+        assert!(store.finish(&r).await.is_err());
+        assert!(store.pending().await.unwrap().is_none());
+    }
+    // Rejection must preserve standard recovery and single finalization.
+    store.recover().await.unwrap();
+    assert_eq!(
+        store.claim().await.unwrap().unwrap().request_id,
+        r.request.request_id
+    );
+    r.schema_version = 1;
+    store.finish(&r).await.unwrap();
+    let (id, bytes, digest, _) = store.pending().await.unwrap().unwrap();
+    r.pages[0].title = "Replacement must not be persisted".into();
+    assert!(store.finish(&r).await.is_err());
+    store.recover().await.unwrap();
+    assert!(store.claim().await.unwrap().is_none());
+    assert_eq!(store.report(&id).await.unwrap().unwrap(), bytes);
+    assert_eq!(digest, seosmith::model::digest(bytes.as_bytes()));
+}

@@ -15,3 +15,6 @@ pub mod policy;
 
 pub mod operations;
 pub mod policy_candidate;
+
+#[cfg(feature = "policy-wire-prototype")]
+pub mod policy_wire_prototype;

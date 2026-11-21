@@ -1,0 +1,35 @@
+{
+  "status": "candidate-not-frozen",
+  "scope": "Raw embedded-policy preflight only; all sample objects fail the separate closed policy shape or value limits.",
+  "limits": {
+    "max_utf8_bytes": 65536,
+    "max_container_depth": 64,
+    "root_depth": 1
+  },
+  "cases": [
+    {
+      "fixture": "policy-raw-depth-64.json",
+      "expected": "scanner_accept",
+      "depth": 64
+    },
+    {
+      "fixture": "policy-raw-depth-65.json",
+      "expected": "scanner_reject_depth",
+      "depth": 65
+    },
+    {
+      "fixture": "policy-raw-bytes-65536.json",
+      "expected": "scanner_accept",
+      "bytes": 65536
+    },
+    {
+      "fixture": "policy-raw-bytes-65537.json",
+      "expected": "scanner_reject_bytes",
+      "bytes": 65537
+    },
+    {
+      "fixture": "policy-raw-escaped-duplicate.json",
+      "expected": "scanner_reject_duplicate_key"
+    }
+  ]
+}

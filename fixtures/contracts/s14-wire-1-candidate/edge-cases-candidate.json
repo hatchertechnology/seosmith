@@ -1,0 +1,103 @@
+{
+  "status": "candidate-not-frozen",
+  "execution": "Each case uses a fresh isolated receiver store.",
+  "cases": [
+    {
+      "fixture": "v4-candidate-edge-control.json",
+      "context_locator": "/pages/0/links/1",
+      "eligibility": "eligible",
+      "attempt": "completed",
+      "outcome": "observed",
+      "reason": null
+    },
+    {
+      "fixture": "v4-candidate-edge-source_missing_status.json",
+      "context_locator": "/pages/0/links/1",
+      "eligibility": "unknown",
+      "attempt": "not_attempted",
+      "outcome": "unknown",
+      "reason": "source_unavailable"
+    },
+    {
+      "fixture": "v4-candidate-edge-source_non_html.json",
+      "context_locator": "/pages/0/links/1",
+      "eligibility": "unknown",
+      "attempt": "not_attempted",
+      "outcome": "unknown",
+      "reason": "source_unavailable"
+    },
+    {
+      "fixture": "v4-candidate-edge-source_non_success.json",
+      "context_locator": "/pages/0/links/1",
+      "eligibility": "unknown",
+      "attempt": "not_attempted",
+      "outcome": "unknown",
+      "reason": "source_unavailable"
+    },
+    {
+      "fixture": "v4-candidate-edge-source_error.json",
+      "context_locator": "/pages/0/links/1",
+      "eligibility": "unknown",
+      "attempt": "not_attempted",
+      "outcome": "unknown",
+      "reason": "source_unavailable"
+    },
+    {
+      "fixture": "v4-candidate-edge-source_blocked.json",
+      "context_locator": "/pages/0/links/1",
+      "eligibility": "unknown",
+      "attempt": "not_attempted",
+      "outcome": "unknown",
+      "reason": "source_unavailable"
+    },
+    {
+      "fixture": "v4-candidate-edge-source_truncated.json",
+      "context_locator": "/pages/0/links/1",
+      "eligibility": "unknown",
+      "attempt": "not_attempted",
+      "outcome": "unknown",
+      "reason": "source_unavailable"
+    },
+    {
+      "fixture": "v4-candidate-edge-target_missing_status.json",
+      "context_locator": "/pages/0/links/1",
+      "eligibility": "unknown",
+      "attempt": "not_attempted",
+      "outcome": "unknown",
+      "reason": "external_target_unavailable"
+    },
+    {
+      "fixture": "v4-candidate-edge-target_error.json",
+      "context_locator": "/pages/0/links/1",
+      "eligibility": "unknown",
+      "attempt": "not_attempted",
+      "outcome": "unknown",
+      "reason": "external_target_unavailable"
+    },
+    {
+      "fixture": "v4-candidate-edge-target_blocked.json",
+      "context_locator": "/pages/0/links/1",
+      "eligibility": "unknown",
+      "attempt": "not_attempted",
+      "outcome": "unknown",
+      "reason": "external_target_unavailable"
+    },
+    {
+      "fixture": "v4-candidate-edge-omitted.json",
+      "omitted": 112,
+      "outcomes": {
+        "observed": 19,
+        "unknown": 93
+      },
+      "unknown_reasons": {
+        "external_target_not_fetched": 19,
+        "source_unavailable": 74
+      },
+      "complete": false
+    },
+    {
+      "fixture": "invalid-ambiguous-external-target.json",
+      "expected": "reject_ambiguous_external_target"
+    }
+  ]
+}
