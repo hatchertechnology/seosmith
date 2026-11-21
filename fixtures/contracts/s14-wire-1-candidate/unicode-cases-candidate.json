@@ -1,0 +1,28 @@
+{
+  "status": "candidate-not-frozen",
+  "execution": "Each fixture is independently ingested into a fresh store.",
+  "cases": [
+    {
+      "fixture": "v4-candidate-unicode-short.json",
+      "page_pointer": "/pages/0/title",
+      "title": "😀😀",
+      "unicode_scalars": 2,
+      "utf16_code_units": 4,
+      "threshold": 3,
+      "rule": "short_title",
+      "eligibility": "eligible",
+      "outcome": "advisory_triggered"
+    },
+    {
+      "fixture": "v4-candidate-unicode-equal.json",
+      "page_pointer": "/pages/0/title",
+      "title": "😀😀a",
+      "unicode_scalars": 3,
+      "utf16_code_units": 5,
+      "threshold": 3,
+      "rule": "short_title",
+      "eligibility": "eligible",
+      "outcome": "advisory_not_triggered"
+    }
+  ]
+}
