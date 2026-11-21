@@ -1,0 +1,216 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: seosmith-state
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false,Delete=false
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: zfs-local
+  local:
+    path: /hatch1/services/seosmith
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values: [thor]
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: seosmith-state
+  namespace: htp-prod
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false,Delete=false
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: zfs-local
+  volumeName: seosmith-state
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: seosmith
+  namespace: htp-prod
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: seosmith
+  template:
+    metadata:
+      labels:
+        app: seosmith
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: thor
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: seosmith
+          # Build and publish first, then replace this tag with a verified digest.
+          image: localhost/seosmith@sha256:cb2a47997d459a5e4c4b0dd9a11f64bbc4e60f0bc9d231cbe8e039534bd835fd
+          imagePullPolicy: Never
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: SEOSMITH_EVIDENCE_CONTRACT_V2
+              value: "false"
+            - name: SEOSMITH_API_TOKEN_FILE
+              value: /secrets/api-token
+            - name: HTP_INGEST_TOKEN_FILE
+              value: /secrets/htp-token
+            - name: HTP_INGEST_URL
+              value: https://htp-api-kerry-hatcher.fly.dev/integrations/seosmith/audits
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+              ephemeral-storage: 128Mi
+            limits:
+              cpu: '2'
+              memory: 1Gi
+              ephemeral-storage: 512Mi
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          volumeMounts:
+            - name: state
+              mountPath: /data
+            - name: secrets
+              mountPath: /secrets
+              readOnly: true
+      volumes:
+        - name: state
+          persistentVolumeClaim:
+            claimName: seosmith-state
+        - name: secrets
+          secret:
+            secretName: seosmith-credentials
+            defaultMode: 0440
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: seosmith
+  namespace: htp-prod
+spec:
+  selector:
+    app: seosmith
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: seosmith
+  namespace: htp-prod
+spec:
+  podSelector:
+    matchLabels:
+      app: seosmith
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # Label only the trusted private ingress namespace after verifying its identity.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tailscale
+          podSelector:
+            matchLabels:
+              tailscale.com/parent-resource: seosmith
+              tailscale.com/parent-resource-ns: htp-prod
+      ports:
+        - port: 8080
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 0.0.0.0/8
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 192.0.0.0/24
+              - 192.168.0.0/16
+              - 198.18.0.0/15
+              - 224.0.0.0/3
+      ports:
+        - port: 80
+        - port: 443
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: seosmith
+  namespace: htp-prod
+spec:
+  ingressClassName: tailscale
+  tls:
+    - hosts: [seosmith]
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: seosmith
+                port:
+                  number: 8080
