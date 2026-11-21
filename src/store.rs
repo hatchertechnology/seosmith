@@ -8,6 +8,23 @@ use std::{path::Path, time::Duration};
 #[derive(Clone)]
 pub struct Store(pub SqlitePool);
 
+/// Provisional local-only collector identity; never part of a delivered report.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct LocalCollector {
+    pub id: String,
+    pub version: String,
+}
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct LocalSidecar {
+    pub collector: LocalCollector,
+    pub state: String,
+    pub omitted: Option<u64>,
+    pub reason: Option<String>,
+    pub payload: serde_json::Value,
+}
+const LOCAL_SIDECAR_PAGE_LIMIT: usize = 1_048_576;
+// Reserve 1 MiB of a provisional 16 MiB job budget for future run/omission metadata.
+const LOCAL_SIDECAR_PAYLOAD_BUDGET: i64 = 15 * 1024 * 1024;
 #[derive(Debug)]
 pub struct ReportTooLarge;
 impl std::fmt::Display for ReportTooLarge {
@@ -45,7 +62,9 @@ impl Store {
             next_attempt INTEGER NOT NULL DEFAULT 0, discovery_truncated INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL DEFAULT (unixepoch()));
             CREATE TABLE IF NOT EXISTS frontier (job_id TEXT NOT NULL REFERENCES jobs(id), url TEXT NOT NULL,
             depth INTEGER NOT NULL, in_sitemap INTEGER NOT NULL, page TEXT, PRIMARY KEY(job_id,url));
-            CREATE TABLE IF NOT EXISTS local_graph_evidence (job_id TEXT NOT NULL, url TEXT NOT NULL, evidence TEXT NOT NULL, PRIMARY KEY(job_id,url));")
+            CREATE TABLE IF NOT EXISTS local_graph_evidence (job_id TEXT NOT NULL, url TEXT NOT NULL, evidence TEXT NOT NULL, PRIMARY KEY(job_id,url));
+            CREATE TABLE IF NOT EXISTS local_collector_set (job_id TEXT NOT NULL, collector_id TEXT NOT NULL, version TEXT NOT NULL, PRIMARY KEY(job_id,collector_id));
+            CREATE TABLE IF NOT EXISTS local_page_sidecar (job_id TEXT NOT NULL, url TEXT NOT NULL, collector_id TEXT NOT NULL, evidence TEXT NOT NULL, PRIMARY KEY(job_id,url,collector_id));")
             .execute(&pool).await?;
         let columns = sqlx::query("PRAGMA table_info(frontier)")
             .fetch_all(&pool)
@@ -94,12 +113,44 @@ impl Store {
         Ok(())
     }
     pub async fn submit(&self, r: &CrawlRequest) -> Result<bool> {
-        self.submit_mode(r, false).await
+        self.submit_mode(r, false, &[]).await
     }
     pub async fn submit_local(&self, r: &CrawlRequest) -> Result<bool> {
-        self.submit_mode(r, true).await
+        self.submit_mode(r, true, &[]).await
     }
-    async fn submit_mode(&self, r: &CrawlRequest, local: bool) -> Result<bool> {
+    /// Experimental local submission; no crawler, CLI or delivery path activates this.
+    pub async fn submit_local_collectors(
+        &self,
+        r: &CrawlRequest,
+        collectors: &[LocalCollector],
+    ) -> Result<bool> {
+        ensure!(
+            !collectors.is_empty() && collectors.len() <= 8,
+            "invalid collector set"
+        );
+        let mut ids = std::collections::BTreeSet::new();
+        for c in collectors {
+            ensure!(
+                !c.id.is_empty()
+                    && c.id.len() <= 64
+                    && !c.version.is_empty()
+                    && c.version.len() <= 64
+                    && c.id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                    && c.version
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.'),
+                "invalid collector identity"
+            );
+            ensure!(ids.insert(&c.id), "duplicate collector");
+        }
+        self.submit_mode(r, true, collectors).await
+    }
+    async fn submit_mode(
+        &self,
+        r: &CrawlRequest,
+        local: bool,
+        collectors: &[LocalCollector],
+    ) -> Result<bool> {
         r.validate()?;
         let id = r.request_id.to_string();
         let mut tx = self.0.begin_with("BEGIN IMMEDIATE").await?;
@@ -147,6 +198,16 @@ impl Store {
             .bind(r.url.as_str())
             .execute(&mut *tx)
             .await?;
+        for c in collectors {
+            sqlx::query(
+                "INSERT INTO local_collector_set(job_id,collector_id,version) VALUES(?,?,?)",
+            )
+            .bind(&id)
+            .bind(&c.id)
+            .bind(&c.version)
+            .execute(&mut *tx)
+            .await?;
+        }
         tx.commit().await?;
         Ok(true)
     }
@@ -257,6 +318,122 @@ impl Store {
             .bind(&p.url)
             .execute(&self.0)
             .await?;
+        Ok(())
+    }
+    /// Provisional atomic checkpoint. Fails closed on a cap or missing collector; never emits.
+    pub async fn checkpoint_local_sidecars(
+        &self,
+        id: &str,
+        page: &crate::model::Page,
+        sidecars: &[LocalSidecar],
+    ) -> Result<()> {
+        let mut tx = self.0.begin_with("BEGIN IMMEDIATE").await?;
+        let active: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM jobs WHERE id=? AND execution_mode='local' AND state='local_running')").bind(id).fetch_one(&mut *tx).await?;
+        ensure!(active, "local job is not running");
+        let expected: Vec<(String, String)> = sqlx::query_as("SELECT collector_id,version FROM local_collector_set WHERE job_id=? ORDER BY collector_id").bind(id).fetch_all(&mut *tx).await?;
+        ensure!(
+            !expected.is_empty() && expected.len() == sidecars.len(),
+            "collector set mismatch"
+        );
+        let mut encoded = Vec::with_capacity(sidecars.len());
+        for sidecar in sidecars {
+            ensure!(
+                matches!(
+                    sidecar.state.as_str(),
+                    "observed" | "partial" | "unavailable"
+                ),
+                "invalid sidecar state"
+            );
+            ensure!(
+                sidecar.state != "observed" || sidecar.omitted == Some(0),
+                "observed sidecar must have zero omissions"
+            );
+            if sidecar.state == "observed" {
+                ensure!(
+                    sidecar.reason.is_none(),
+                    "observed sidecar cannot have an unavailable reason"
+                );
+            } else {
+                ensure!(
+                    sidecar
+                        .reason
+                        .as_ref()
+                        .is_some_and(|r| !r.trim().is_empty() && r.len() <= 256),
+                    "partial or unavailable sidecar requires a bounded reason"
+                );
+            }
+            let value = serde_json::to_string(sidecar)?;
+            ensure!(
+                value.len() <= LOCAL_SIDECAR_PAGE_LIMIT,
+                "sidecar exceeds page budget"
+            );
+            encoded.push((
+                sidecar.collector.id.clone(),
+                sidecar.collector.version.clone(),
+                value,
+            ));
+        }
+        encoded.sort_by(|a, b| a.0.cmp(&b.0));
+        ensure!(
+            encoded
+                .iter()
+                .map(|(id, version, _)| (id.clone(), version.clone()))
+                .collect::<Vec<_>>()
+                == expected,
+            "collector set mismatch"
+        );
+        let prior: Option<Option<String>> =
+            sqlx::query_scalar("SELECT page FROM frontier WHERE job_id=? AND url=?")
+                .bind(id)
+                .bind(&page.url)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let prior = prior.context("page not in frontier")?;
+        let page_json = serde_json::to_string(page)?;
+        if let Some(prior_page) = prior {
+            ensure!(prior_page == page_json, "checkpoint replay differs");
+            let existing: Vec<(String, String)> = sqlx::query_as("SELECT collector_id,evidence FROM local_page_sidecar WHERE job_id=? AND url=? ORDER BY collector_id").bind(id).bind(&page.url).fetch_all(&mut *tx).await?;
+            ensure!(
+                existing
+                    == encoded
+                        .iter()
+                        .map(|(key, _, value)| (key.clone(), value.clone()))
+                        .collect::<Vec<_>>(),
+                "sidecar replay differs"
+            );
+            tx.commit().await?;
+            return Ok(());
+        }
+        let used: i64 = sqlx::query_scalar("SELECT coalesce(sum(length(CAST(evidence AS BLOB))),0) FROM local_page_sidecar WHERE job_id=?").bind(id).fetch_one(&mut *tx).await?;
+        let added = encoded.iter().try_fold(0_i64, |n, (_, _, value)| {
+            n.checked_add(i64::try_from(value.len())?)
+                .ok_or(anyhow::anyhow!("sidecar size overflow"))
+        })?;
+        ensure!(
+            used.checked_add(added)
+                .is_some_and(|n| n <= LOCAL_SIDECAR_PAYLOAD_BUDGET),
+            "local sidecar budget exhausted"
+        );
+        for (collector, _, value) in encoded {
+            sqlx::query(
+                "INSERT INTO local_page_sidecar(job_id,url,collector_id,evidence) VALUES(?,?,?,?)",
+            )
+            .bind(id)
+            .bind(&page.url)
+            .bind(collector)
+            .bind(value)
+            .execute(&mut *tx)
+            .await?;
+        }
+        let updated =
+            sqlx::query("UPDATE frontier SET page=? WHERE job_id=? AND url=? AND page IS NULL")
+                .bind(page_json)
+                .bind(id)
+                .bind(&page.url)
+                .execute(&mut *tx)
+                .await?;
+        ensure!(updated.rows_affected() == 1, "checkpoint changed");
+        tx.commit().await?;
         Ok(())
     }
     /// Save experimental local evidence atomically with its crawl checkpoint.

@@ -638,3 +638,181 @@ async fn local_graph_collection_fails_closed_without_durable_mode() {
             .is_none()
     );
 }
+
+#[tokio::test]
+async fn local_sidecar_checkpoint_is_atomic_immutable_and_never_delivered() {
+    use seosmith::store::{LocalCollector, LocalSidecar};
+    let (_dir, store) = db().await;
+    let r = request();
+    let collectors = vec![
+        LocalCollector {
+            id: "graph".into(),
+            version: "graph-local-1".into(),
+        },
+        LocalCollector {
+            id: "s04-structured-data".into(),
+            version: "s04-local-1".into(),
+        },
+    ];
+    store
+        .submit_local_collectors(&r, &collectors)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .claim_local(&r.request_id.to_string())
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let id = r.request_id.to_string();
+    let page = Page {
+        url: r.url.to_string(),
+        ..Default::default()
+    };
+    let sidecars: Vec<_> = collectors
+        .iter()
+        .cloned()
+        .map(|collector| LocalSidecar {
+            collector,
+            state: "observed".into(),
+            omitted: Some(0),
+            reason: None,
+            payload: serde_json::json!({"value": "x"}),
+        })
+        .collect();
+    assert!(
+        store
+            .checkpoint_local_sidecars(&id, &page, &sidecars[..1])
+            .await
+            .is_err()
+    );
+    assert!(store.pages(&id).await.unwrap().is_empty());
+    store
+        .checkpoint_local_sidecars(&id, &page, &sidecars)
+        .await
+        .unwrap();
+    store
+        .checkpoint_local_sidecars(&id, &page, &sidecars)
+        .await
+        .unwrap();
+    let mut changed = sidecars.clone();
+    changed[0].payload = serde_json::json!({"value": "different"});
+    assert!(
+        store
+            .checkpoint_local_sidecars(&id, &page, &changed)
+            .await
+            .is_err()
+    );
+    assert_eq!(store.pages(&id).await.unwrap().len(), 1);
+    assert!(store.pending().await.unwrap().is_none());
+    store.recover().await.unwrap();
+    assert!(
+        store
+            .checkpoint_local_sidecars(&id, &page, &sidecars)
+            .await
+            .is_err()
+    );
+    assert!(store.pending().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn local_sidecar_write_failure_rolls_back_page_and_all_collectors() {
+    use seosmith::store::{LocalCollector, LocalSidecar};
+    let (_dir, store) = db().await;
+    let r = request();
+    let collectors: Vec<_> = ["a", "b"]
+        .into_iter()
+        .map(|id| LocalCollector {
+            id: id.into(),
+            version: "v1".into(),
+        })
+        .collect();
+    store
+        .submit_local_collectors(&r, &collectors)
+        .await
+        .unwrap();
+    let id = r.request_id.to_string();
+    store.claim_local(&id).await.unwrap();
+    sqlx::query("CREATE TRIGGER fail_second BEFORE INSERT ON local_page_sidecar WHEN NEW.collector_id='b' BEGIN SELECT RAISE(ABORT, 'injected'); END").execute(&store.0).await.unwrap();
+    let page = Page {
+        url: r.url.to_string(),
+        ..Default::default()
+    };
+    let sidecars: Vec<_> = collectors
+        .into_iter()
+        .map(|collector| LocalSidecar {
+            collector,
+            state: "partial".into(),
+            omitted: None,
+            reason: Some("fixture incomplete".into()),
+            payload: serde_json::json!({}),
+        })
+        .collect();
+    assert!(
+        store
+            .checkpoint_local_sidecars(&id, &page, &sidecars)
+            .await
+            .is_err()
+    );
+    assert!(store.pages(&id).await.unwrap().is_empty());
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM local_page_sidecar WHERE job_id=?")
+        .bind(&id)
+        .fetch_one(&store.0)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn local_sidecar_limits_and_terminal_state_fail_closed() {
+    use seosmith::store::{LocalCollector, LocalSidecar};
+    let (_dir, store) = db().await;
+    let r = request();
+    let collector = LocalCollector {
+        id: "graph".into(),
+        version: "graph-local-1".into(),
+    };
+    store
+        .submit_local_collectors(&r, std::slice::from_ref(&collector))
+        .await
+        .unwrap();
+    let id = r.request_id.to_string();
+    store.claim_local(&id).await.unwrap();
+    let page = Page {
+        url: r.url.to_string(),
+        ..Default::default()
+    };
+    let mut sidecar = LocalSidecar {
+        collector,
+        state: "observed".into(),
+        omitted: Some(0),
+        reason: None,
+        payload: serde_json::json!("x".repeat(1_048_576)),
+    };
+    assert!(
+        store
+            .checkpoint_local_sidecars(&id, &page, std::slice::from_ref(&sidecar))
+            .await
+            .is_err()
+    );
+    assert!(store.pages(&id).await.unwrap().is_empty());
+    sidecar.payload = serde_json::json!({});
+    sidecar.omitted = None;
+    assert!(
+        store
+            .checkpoint_local_sidecars(&id, &page, std::slice::from_ref(&sidecar))
+            .await
+            .is_err()
+    );
+    sidecar.state = "unavailable".into();
+    sidecar.reason = Some("not fetched".into());
+    store.finish_local_only(&id).await.unwrap();
+    assert!(
+        store
+            .checkpoint_local_sidecars(&id, &page, &[sidecar])
+            .await
+            .is_err()
+    );
+    assert!(store.pages(&id).await.unwrap().is_empty());
+}
