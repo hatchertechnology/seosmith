@@ -20,6 +20,7 @@ variant('duplicate-manifest-row', lambda p:p['policy_guidance']['manifest'].__se
 variant('negative-count', lambda p:p['policy_guidance']['candidate']['coverage'][0].__setitem__('candidates',-1))
 write('invalid-schema-exponent.json',raw.replace(b'"schema_version":4',b'"schema_version":4e0',1))
 write('invalid-escaped-duplicate-root.json',raw.replace(b'"schema_version":4',b'"schema_version":4,"schema_\\u0076ersion":4',1))
+write('invalid-escaped-duplicate-nested.json',raw.replace(b'"policy_guidance":{"version":"s14-wire-1"', b'"policy_guidance":{"version":"s14-wire-1","v\\u0065rsion":"s14-wire-1"', 1))
 p=copy.deepcopy(base);c=p['policy_guidance']['candidate'];policy=c['policy_canonical_json'];policy=policy.replace('{"catalog_version":', '{"catalog_version":"s14-1","catalog_version":', 1);digest='sha256:'+hashlib.sha256(policy.encode()).hexdigest();c['policy_canonical_json']=policy;c['policy_digest']=digest
 for r in c['records']: r['policy_ref']=digest
 write('invalid-policy-duplicate-key.json',p)

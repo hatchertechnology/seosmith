@@ -26,6 +26,9 @@ for source in sorted((root / 'fixtures/policies').glob('v3-local-*.json')):
     (out / source.name.replace('v3-local-', 'v4-candidate-')).write_bytes(dump(convert(json.loads(source.read_bytes()))))
 mixed = subprocess.check_output(['cargo', 'run', '--quiet', '--example', 'make_mixed_review'], cwd=root)
 (out / 'v4-candidate-mixed-omitted.json').write_bytes(dump(convert(json.loads(mixed))))
+for case in ('short', 'equal'):
+    local = subprocess.check_output(['cargo', 'run', '--quiet', '--example', 'make_unicode_review', '--', case], cwd=root)
+    (out / f'v4-candidate-unicode-{case}.json').write_bytes(dump(convert(json.loads(local))))
 raw = (out / 'v4-candidate-complete.json').read_bytes(); cap = 4952756
 (out / 'v4-candidate-whitespace.json').write_bytes(raw + b'\n')
 (out / 'v4-candidate-exact-cap.json').write_bytes(raw + b' ' * (cap - len(raw)))
