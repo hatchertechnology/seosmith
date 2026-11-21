@@ -6,8 +6,10 @@ use url::Url;
 
 const MAX_OBSERVATIONS: usize = 512;
 const MAX_VALUE_BYTES: usize = 4096;
+// Reserve room for the collector envelope within the proposed 1 MiB page cap.
+const MAX_OBSERVATION_BYTES: usize = 512 * 1024;
 
-pub const PROFILE_VERSION: &str = "google-subset-2026-11-21.2";
+pub const PROFILE_VERSION: &str = "google-subset-2026-11-21.3";
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Observation {
@@ -55,6 +57,28 @@ fn add(
         value: retained,
         explanation: explanation.into(),
     });
+}
+fn bound_bytes(out: &mut Vec<Observation>) {
+    let mut bytes = 2usize; // JSON array brackets
+    let mut keep = 0;
+    // Reserve enough room for the explicit omission marker.
+    let budget = MAX_OBSERVATION_BYTES - 512;
+    for observation in out.iter() {
+        let Ok(encoded) = serde_json::to_vec(observation) else {
+            break;
+        };
+        let next = bytes.saturating_add(encoded.len()).saturating_add(1);
+        if next > budget {
+            break;
+        }
+        bytes = next;
+        keep += 1;
+    }
+    if keep < out.len() {
+        let omitted = out.len() - keep;
+        out.truncate(keep);
+        out.push(Observation { category: "coverage", code: "observation_byte_limit", path: String::new(), value: None, value_omitted: false, explanation: "Validation observations exceeded the per-page byte budget; later observations were omitted".into() });
+    }
 }
 fn escape(s: &str) -> String {
     s.replace('~', "~0").replace('/', "~1")
@@ -181,7 +205,9 @@ fn check_item(v: &Value, path: &str, base: &Url, ids: &IdIndex<'_>, out: &mut Ve
                 ],
             ),
             "BreadcrumbList" => (&["itemListElement"], &[]),
-            "LocalBusiness" => (&["name", "address"], &["url", "telephone"]),
+            "LocalBusiness" | "Restaurant" | "Store" | "Pharmacy" => {
+                (&["name", "address"], &["url", "telephone"])
+            }
             _ => continue,
         };
         for (fields, code) in [
@@ -226,6 +252,90 @@ fn check_item(v: &Value, path: &str, base: &Url, ids: &IdIndex<'_>, out: &mut Ve
                             format!("{prefix}/{}", escape(field)),
                             Some(x),
                             "Expected text or a reference; full vocabulary validation is unavailable",
+                        );
+                    }
+                }
+            }
+        }
+        if matches!(t, "Article" | "NewsArticle" | "BlogPosting") {
+            if let Some(authors) = p.get("author") {
+                for (i, author) in values(authors).iter().enumerate() {
+                    let source_path = format!(
+                        "{prefix}/author{}",
+                        if authors.is_array() {
+                            format!("/{i}")
+                        } else {
+                            String::new()
+                        }
+                    );
+                    let resolved = if is_reference(author) {
+                        unique_reference(author, base, ids)
+                    } else {
+                        None
+                    };
+                    let (author, author_path) = if let Some((target, target_path)) = resolved {
+                        add(
+                            out,
+                            "coverage",
+                            "local_author_resolved",
+                            source_path.clone(),
+                            Some(author),
+                            "Unique local author reference resolved to a retained definition",
+                        );
+                        (target, target_path.to_string())
+                    } else {
+                        (*author, source_path)
+                    };
+                    if is_reference(author) {
+                        add(
+                            out,
+                            "coverage",
+                            "author_not_expanded",
+                            author_path,
+                            Some(author),
+                            "Author reference could not be uniquely resolved",
+                        );
+                    } else if author.is_object() {
+                        let author_types = types(author);
+                        if !author_types.is_empty()
+                            && !author_types
+                                .iter()
+                                .any(|t| matches!(*t, "Person" | "Organization"))
+                        {
+                            add(
+                                out,
+                                "vocabulary",
+                                "author_type_candidate",
+                                author_path.clone(),
+                                Some(author),
+                                "Article author should be a Person or Organization; custom types may need review",
+                            );
+                        }
+                        if !props(author).get("name").is_some_and(present) {
+                            add(
+                                out,
+                                "provider_eligibility",
+                                "missing_recommended_author_name",
+                                format!(
+                                    "{author_path}{}/name",
+                                    if author.get("properties").is_some() {
+                                        "/properties"
+                                    } else {
+                                        ""
+                                    }
+                                ),
+                                None,
+                                "Author name is recommended where applicable",
+                            );
+                        }
+                    } else {
+                        add(
+                            out,
+                            "vocabulary",
+                            "author_type_candidate",
+                            author_path,
+                            Some(author),
+                            "Article author should be a Person or Organization",
                         );
                     }
                 }
@@ -410,7 +520,7 @@ fn check_item(v: &Value, path: &str, base: &Url, ids: &IdIndex<'_>, out: &mut Ve
                 }
             }
         }
-        if t == "LocalBusiness" {
+        if matches!(t, "LocalBusiness" | "Restaurant" | "Store" | "Pharmacy") {
             if let Some(address) = p.get("address") {
                 for (i, entry) in values(address).iter().enumerate() {
                     let location = format!(
@@ -656,6 +766,7 @@ pub fn validate(page: &Page, observations: &[StructuredData]) -> Vec<Observation
             "Source observations were truncated; absence and identifier checks are incomplete",
         );
     }
+    bound_bytes(&mut out);
     out
 }
 
@@ -755,6 +866,7 @@ pub fn validate_crawl(page: &Page, pages: &[Page]) -> Vec<Observation> {
             resource_observations(v, &format!("/{i}/data"), page, pages, &mut out);
         }
     }
+    bound_bytes(&mut out);
     out
 }
 fn resource_observations(

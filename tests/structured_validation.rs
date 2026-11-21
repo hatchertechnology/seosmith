@@ -369,3 +369,52 @@ fn offer_value_checks_report_precise_array_paths() {
             .any(|o| o.path == "/0/data/offers/lowPrice/0" && o.code == "invalid_offer_value")
     );
 }
+
+#[test]
+fn output_byte_budget_has_explicit_coverage_marker() {
+    let values: Vec<_> = (0..200).map(|_| json!({"@type":"Product", "name":"x", "image":"/x", "description":"x", "offers":{"@type":"Offer", "price":"x".repeat(3000)}})).collect();
+    let result = validate(&page(), &[block(json!(values))]);
+    assert!(serde_json::to_vec(&result).unwrap().len() <= 512 * 1024);
+    assert!(result.iter().any(|o| o.code == "observation_byte_limit"));
+}
+
+#[test]
+fn article_authors_check_local_definitions_and_unknowns() {
+    let result = validate(
+        &page(),
+        &[block(
+            json!({"@graph":[{"@type":"Article","author":[{"@id":"#alice"},{"@id":"#unknown"}]},{"@id":"#alice","@type":"Person"}]}),
+        )],
+    );
+    assert!(
+        result
+            .iter()
+            .any(|o| o.code == "local_author_resolved" && o.path == "/0/data/@graph/0/author/0")
+    );
+    assert!(
+        result
+            .iter()
+            .any(|o| o.code == "missing_recommended_author_name"
+                && o.path == "/0/data/@graph/1/name")
+    );
+    assert!(
+        result
+            .iter()
+            .any(|o| o.code == "author_not_expanded" && o.path == "/0/data/@graph/0/author/1")
+    );
+}
+
+#[test]
+fn supported_local_business_subtype_uses_business_profile() {
+    let result = validate(
+        &page(),
+        &[block(
+            json!({"@context":"https://schema.org", "@type":"Restaurant", "name":"Example"}),
+        )],
+    );
+    assert!(
+        result
+            .iter()
+            .any(|o| o.code == "missing_required" && o.path == "/0/data/address")
+    );
+}
