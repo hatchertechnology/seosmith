@@ -253,3 +253,15 @@ fn offer_reference_resolves_only_a_unique_local_definition() {
     );
     assert!(!result.iter().any(|o| o.code == "missing_offer_price"));
 }
+
+#[test]
+fn custom_context_is_unknown_instead_of_schema_profile_failure() {
+    let result = validate(
+        &page(),
+        &[block(
+            json!({"@context":{"Product":"https://example.org/Other"}, "@type":"Product"}),
+        )],
+    );
+    assert!(result.iter().any(|o| o.code == "unsupported_context"));
+    assert!(!result.iter().any(|o| o.code == "missing_required"));
+}

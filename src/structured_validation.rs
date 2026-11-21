@@ -83,8 +83,14 @@ fn types(v: &Value) -> Vec<&str> {
 fn props(v: &Value) -> &Value {
     v.get("properties").unwrap_or(v)
 }
+fn unsupported_context(v: &Value) -> bool {
+    v.get("@context").is_some_and(|context| !matches!(context, Value::String(s) if matches!(s.as_str(), "https://schema.org" | "http://schema.org" | "https://schema.org/" | "http://schema.org/")))
+}
 type IdIndex<'a> = HashMap<String, Vec<(&'a Value, String)>>;
 fn collect_ids<'a>(v: &'a Value, path: &str, base: &Url, ids: &mut IdIndex<'a>) {
+    if unsupported_context(v) {
+        return;
+    }
     match v {
         Value::Object(m) => {
             if let Some(id) = m
@@ -141,6 +147,19 @@ fn present(v: &Value) -> bool {
     }
 }
 fn check_item(v: &Value, path: &str, base: &Url, ids: &IdIndex<'_>, out: &mut Vec<Observation>) {
+    // Foreign and custom JSON-LD contexts may redefine every compact term.
+    // Do not interpret that subtree as schema.org without expansion.
+    if unsupported_context(v) {
+        add(
+            out,
+            "coverage",
+            "unsupported_context",
+            format!("{path}/@context"),
+            v.get("@context"),
+            "Custom or remote context is not expanded; subtree checks are unavailable",
+        );
+        return;
+    }
     let ts = types(v);
     let p = props(v);
     let prefix = if v.get("properties").is_some() {
