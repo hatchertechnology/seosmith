@@ -379,3 +379,80 @@ mod unavailable_tests {
         assert_eq!(result.sources.len(), 0);
     }
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CrawlPermission {
+    Allowed,
+    Denied,
+    Unknown,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EffectiveIndexing {
+    pub bot: String,
+    pub crawl: CrawlPermission,
+    pub robots: Option<crate::robots_evidence::RobotsDecision>,
+    pub directives: IndexEvaluation,
+    pub intent: IntentResult,
+}
+/// Combines separately retained robots and content observations for one named bot.
+/// A disallowed fetch does not imply a content noindex directive.
+pub fn effective_indexing(
+    bot: &str,
+    capture: &crate::collection_evidence::PageCapture,
+    intent: &Intent,
+) -> EffectiveIndexing {
+    let robots = capture
+        .robots
+        .iter()
+        .find(|d| d.bot.eq_ignore_ascii_case(bot))
+        .cloned();
+    let crawl = if matches!(
+        capture.robots_source.as_str(),
+        "robots_txt" | "not_found" | "http_denied_synthetic"
+    ) {
+        robots.as_ref().map_or(CrawlPermission::Unknown, |r| {
+            if r.allowed {
+                CrawlPermission::Allowed
+            } else {
+                CrawlPermission::Denied
+            }
+        })
+    } else {
+        CrawlPermission::Unknown
+    };
+    let directives = evaluate_capture(bot, capture);
+    let intent = compare_intent(&directives.index, intent);
+    EffectiveIndexing {
+        bot: bot.into(),
+        crawl,
+        robots,
+        directives,
+        intent,
+    }
+}
+#[cfg(test)]
+mod effective_tests {
+    use super::*;
+    #[test]
+    fn blocked_content_is_unknown_even_with_explicit_intent() {
+        let mut c = crate::collection_evidence::PageCapture::unavailable(
+            "https://example.com/private",
+            "robots_blocked",
+        );
+        c.robots_source = "robots_txt".into();
+        c.robots.push(crate::robots_evidence::evaluate(
+            "User-agent: Googlebot\nDisallow: /private\n",
+            "Googlebot",
+            &url::Url::parse(&c.url).unwrap(),
+        ));
+        let result = effective_indexing("Googlebot", &c, &Intent::Exclude);
+        assert_eq!(result.crawl, CrawlPermission::Denied);
+        assert_eq!(result.directives.index, Decision::Unknown);
+        assert_eq!(result.intent, IntentResult::Unknown);
+        c.robots_source = "policy_limit".into();
+        assert_eq!(
+            effective_indexing("Googlebot", &c, &Intent::Exclude).crawl,
+            CrawlPermission::Unknown
+        );
+    }
+}
