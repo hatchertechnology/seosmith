@@ -181,7 +181,12 @@ pub fn generate(report: &mut Report, config: &AdvisoryPolicy) -> Result<Vec<u8>>
     }
     reconcile_wire_edges(report)?;
     let policy = serde_json::json!({"catalog_version":"s14-1","collection":{"check_external_links":report.request.check_external_links,"delay_ms":report.request.delay_ms,"max_duration_seconds":report.request.max_duration_seconds,"max_pages":report.request.max_pages,"max_resources":report.request.max_resources,"seed_url":report.request.url},"engine_version":report.engine_version,"policy":config,"ruleset_version":report.ruleset_version,"schema_version":4,"validator_version":"s14-wire-1","wire_contract_version":"s14-wire-1"});
+    // This typed object has a fixed two-container shape; it is not an untrusted JSON parser.
     let canonical = serde_json::to_string(&policy)?;
+    ensure!(
+        canonical.len() <= 65_536,
+        "prototype policy exceeds byte limit"
+    );
     let signature = format!("sha256:{}", digest(canonical.as_bytes()));
     let guidance = report
         .policy_guidance

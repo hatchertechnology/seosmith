@@ -51,6 +51,15 @@ for generation in (0, 2):
     scope = 'seosmith-scope-v1\n' + tag('website_id', r['website_id']) + tag('binding_generation', generation)
     p['policy_guidance']['candidate']['scope_digest'] = 'sha256:' + hashlib.sha256(scope.encode()).hexdigest()
     (out / f'v4-candidate-generation-{generation}.json').write_bytes(dump(p))
+# Raw embedded-policy scanner boundary vectors; not valid closed policy objects.
+for depth in (64, 65):
+    value = 0
+    for _ in range(depth - 1): value = [value]
+    (out / f'policy-raw-depth-{depth}.json').write_bytes(dump({'probe':value}))
+for size in (65536, 65537):
+    empty = dump({'probe':''})
+    (out / f'policy-raw-bytes-{size}.json').write_bytes(dump({'probe':'a' * (size - len(empty))}))
+(out / 'policy-raw-escaped-duplicate.json').write_bytes(b'{"x":1,"\\u0078":2}')
 p = json.loads(raw); p['findings'][0]['details']['claimed_ingestion'] = 'worker'
 (out / 'v4-candidate-forged-source-claim.json').write_bytes(dump(p))
 subprocess.run(['python3', str(root / 'scripts/make-s14-review-schema.py')], cwd=root, check=True)
