@@ -63,6 +63,34 @@ spec:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
+      # Delay application startup until the sender policy is observed in effect.
+      initContainers:
+        - name: network-policy-gate
+          image: docker.io/curlimages/curl@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69
+          imagePullPolicy: Never
+          command: [sh, -ec]
+          args:
+            - |
+              sleep 10
+              for attempt in 1 2 3; do
+                public_status=$(curl --noproxy '*' -sS -o /dev/null --max-time 10 -w '%{http_code}' https://htp-api-kerry-hatcher.fly.dev/ || true)
+                [ "$public_status" = 200 ] || exit 1
+                private_status=$(curl --noproxy '*' -ksS -o /dev/null --max-time 3 -w '%{http_code}' https://kubernetes.default.svc/ 2>/dev/null || true)
+                [ "$private_status" = 000 ] || exit 1
+                sleep 2
+              done
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
       containers:
         - name: seosmith
           # The imported local image is pinned to its verified manifest digest.
