@@ -629,3 +629,91 @@ pub fn resource_byte_groups(
         )
         .collect()
 }
+
+/// Inputs come from the durable run record, not inferred from an empty sidecar.
+#[derive(Debug)]
+pub struct GraphCoverageInput {
+    pub discovery_complete: Option<bool>,
+    pub expected_pages: Option<usize>,
+    pub observed_pages: usize,
+    pub unavailable_pages: usize,
+    pub truncated_pages: usize,
+    pub omitted_records: Option<usize>,
+    pub comparisons_complete: Option<bool>,
+}
+#[derive(Debug, Serialize)]
+pub struct GraphCoverage {
+    pub complete: bool,
+    pub reasons: Vec<&'static str>,
+}
+/// Unknown and contradictory counts never establish complete coverage.
+pub fn graph_coverage(input: &GraphCoverageInput) -> GraphCoverage {
+    let mut reasons = Vec::new();
+    if input.discovery_complete != Some(true) {
+        reasons.push("discovery_incomplete_or_unknown");
+    }
+    match input.expected_pages {
+        None => reasons.push("page_population_unknown"),
+        Some(expected)
+            if input.observed_pages.checked_add(input.unavailable_pages) != Some(expected) =>
+        {
+            reasons.push("page_counts_unreconciled")
+        }
+        Some(_) => {}
+    }
+    if input.unavailable_pages > 0 {
+        reasons.push("pages_unavailable");
+    }
+    if input.truncated_pages > input.observed_pages {
+        reasons.push("truncation_counts_invalid");
+    } else if input.truncated_pages > 0 {
+        reasons.push("extraction_truncated");
+    }
+    if input.omitted_records != Some(0) {
+        reasons.push("records_omitted_or_unknown");
+    }
+    if input.comparisons_complete != Some(true) {
+        reasons.push("comparisons_incomplete_or_unknown");
+    }
+    GraphCoverage {
+        complete: reasons.is_empty(),
+        reasons,
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct SimilarityCluster {
+    pub urls: Vec<String>,
+    /// Connected components are review groups; not every pair necessarily exceeds the threshold.
+    pub review_only: bool,
+}
+/// Groups only observed candidate edges. Incomplete comparison sets remain incomplete.
+pub fn similarity_clusters(candidates: &CandidateSet) -> (Vec<SimilarityCluster>, bool) {
+    let mut edges: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for c in &candidates.candidates {
+        edges.entry(&c.first).or_default().insert(&c.second);
+        edges.entry(&c.second).or_default().insert(&c.first);
+    }
+    let mut visited = BTreeSet::new();
+    let mut clusters = Vec::new();
+    for &start in edges.keys() {
+        if !visited.insert(start) {
+            continue;
+        }
+        let mut members = BTreeSet::new();
+        let mut pending = VecDeque::from([start]);
+        while let Some(url) = pending.pop_front() {
+            members.insert(url);
+            for &next in &edges[url] {
+                if visited.insert(next) {
+                    pending.push_back(next);
+                }
+            }
+        }
+        clusters.push(SimilarityCluster {
+            urls: members.into_iter().map(str::to_owned).collect(),
+            review_only: true,
+        });
+    }
+    (clusters, candidates.complete)
+}
