@@ -755,3 +755,87 @@ mod canonical_assessment_tests {
         );
     }
 }
+
+/// Construct an analyzable node only when canonical source evidence is complete.
+/// Blocked/failed/uncollected pages retain their state without inferring directives.
+pub fn node_from_capture(
+    capture: &crate::collection_evidence::PageCapture,
+    base: &Url,
+    scope: &Url,
+) -> Option<Node> {
+    let state = match capture.state.as_str() {
+        "available" => TargetState::Available,
+        "robots_blocked" => TargetState::Blocked,
+        "fetch_failed" => TargetState::FetchFailed,
+        _ => TargetState::NotFetched,
+    };
+    if state != TargetState::Available {
+        return Some(Node {
+            url: capture.url.clone(),
+            state,
+            canonical: None,
+            alternates: vec![],
+            alternates_complete: false,
+        });
+    }
+    let assessment = canonical_assessment(capture, base, scope);
+    let canonical = match assessment.agreement {
+        CanonicalAgreement::Consistent => assessment
+            .declarations
+            .iter()
+            .find(|d| d.state == DeclarationState::Valid)
+            .and_then(|d| d.target.clone()),
+        CanonicalAgreement::Absent => None,
+        CanonicalAgreement::Conflicting | CanonicalAgreement::Unknown => return None,
+    };
+    let html = capture.html.as_ref()?;
+    let http = capture.http.as_ref()?;
+    let mut alternate_declarations = declarations(html, base, scope, false);
+    let (header_alternates, header_complete) = header_declarations(http, base, scope, false);
+    alternate_declarations.extend(header_alternates);
+    let complete = html.complete
+        && header_complete
+        && alternate_declarations
+            .iter()
+            .all(|d| d.state == DeclarationState::Valid);
+    let alternates = alternate_declarations
+        .into_iter()
+        .filter_map(|d| Some((d.language?, d.target?)))
+        .collect();
+    Some(Node {
+        url: capture.url.clone(),
+        state,
+        canonical,
+        alternates,
+        alternates_complete: complete,
+    })
+}
+#[cfg(test)]
+mod capture_node_tests {
+    use super::*;
+    #[test]
+    fn incomplete_or_conflicting_canonical_cannot_be_a_terminal_node() {
+        let base = Url::parse("https://example.com/a").unwrap();
+        let mut c =
+            crate::collection_evidence::PageCapture::unavailable(base.as_str(), "available");
+        c.html = Some(crate::collection_evidence::html_occurrences(
+            "<head><link rel='canonical' href='/a'></head>",
+            true,
+        ));
+        c.http = Some(crate::collection_evidence::http_occurrences(&[(
+            "link",
+            "</b>; rel=canonical",
+        )]));
+        assert!(node_from_capture(&c, &base, &base).is_none());
+        c.http = Some(crate::collection_evidence::http_occurrences(&[]));
+        assert_eq!(
+            node_from_capture(&c, &base, &base)
+                .unwrap()
+                .canonical
+                .as_deref(),
+            Some("https://example.com/a")
+        );
+        c.html.as_mut().unwrap().complete = false;
+        assert!(node_from_capture(&c, &base, &base).is_none());
+    }
+}
