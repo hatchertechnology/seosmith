@@ -154,6 +154,11 @@ mod tests {
             canonical_path(a, &nodes, &scope, 10).state,
             GraphState::Blocked
         );
+        nodes.get_mut(b).unwrap().state = TargetState::FetchFailed;
+        assert_eq!(
+            canonical_path(a, &nodes, &scope, 10).state,
+            GraphState::Unavailable
+        );
         nodes.get_mut(a).unwrap().canonical = Some("https://other.example/".into());
         assert_eq!(
             canonical_path(a, &nodes, &scope, 10).state,

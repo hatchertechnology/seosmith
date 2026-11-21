@@ -244,3 +244,53 @@ mod tests {
         );
     }
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EntryScope {
+    InScope,
+    OutsideScope,
+    Invalid,
+}
+/// A sitemap entry outside the crawl host is not an observed passing target.
+pub fn entry_scope(entry: &Entry, scope: &Url) -> EntryScope {
+    if entry.error.is_some() {
+        return EntryScope::Invalid;
+    }
+    let Some(url) = entry
+        .location
+        .as_deref()
+        .and_then(|v| Url::parse(v.trim()).ok())
+    else {
+        return EntryScope::Invalid;
+    };
+    if matches!(url.scheme(), "http" | "https")
+        && url.host_str() == scope.host_str()
+        && url.port().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+    {
+        EntryScope::InScope
+    } else {
+        EntryScope::OutsideScope
+    }
+}
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+    #[test]
+    fn scope_is_independent_of_valid_url_syntax() {
+        let scope = Url::parse("https://example.com/").unwrap();
+        let doc=parse("https://example.com/s.xml", b"<urlset><url><loc>https://example.com/a</loc></url><url><loc>https://outside.example/a</loc></url><url><loc>broken</loc></url></urlset>",1000,10);
+        assert_eq!(
+            doc.entries
+                .iter()
+                .map(|e| entry_scope(e, &scope))
+                .collect::<Vec<_>>(),
+            vec![
+                EntryScope::InScope,
+                EntryScope::OutsideScope,
+                EntryScope::Invalid
+            ]
+        );
+    }
+}
