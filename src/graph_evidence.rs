@@ -225,8 +225,13 @@ pub fn extract(url: &Url, html: &str, status: u16) -> LocalPageEvidence {
             excerpt: main.chars().take(256).collect(),
             main_text_words: main_count,
             body_text_words: body_count,
-            template_proportion: (body_count > 0)
-                .then(|| 1.0 - (main_count.min(body_count) as f64 / body_count as f64)),
+            template_proportion: u32::try_from(body_count).ok().filter(|&n| n > 0).and_then(
+                |body| {
+                    u32::try_from(main_count.min(body_count))
+                        .ok()
+                        .map(|main| 1.0 - f64::from(main) / f64::from(body))
+                },
+            ),
             title,
             h1,
             soft_404_signals: signals,
@@ -316,7 +321,10 @@ pub fn similarity(a: &ContentEvidence, b: &ContentEvidence) -> Option<f64> {
     }
     let a: BTreeSet<_> = a.fingerprint.iter().collect();
     let b: BTreeSet<_> = b.fingerprint.iter().collect();
-    Some(a.intersection(&b).count() as f64 / a.union(&b).count() as f64)
+    Some(
+        f64::from(u32::try_from(a.intersection(&b).count()).ok()?)
+            / f64::from(u32::try_from(a.union(&b).count()).ok()?),
+    )
 }
 
 #[derive(Debug, Serialize)]
@@ -584,8 +592,8 @@ pub fn resource_byte_groups(
     resources: &[ResourceEvidence],
     collection_complete: bool,
 ) -> Vec<ResourceByteGroup> {
-    let mut groups: BTreeMap<(Option<String>, Option<String>), (usize, u64, bool)> =
-        BTreeMap::new();
+    type ByteGroupMap = BTreeMap<(Option<String>, Option<String>), (usize, u64, bool)>;
+    let mut groups: ByteGroupMap = BTreeMap::new();
     for r in resources {
         let origin = Url::parse(&r.url)
             .ok()
@@ -657,7 +665,7 @@ pub fn graph_coverage(input: &GraphCoverageInput) -> GraphCoverage {
         Some(expected)
             if input.observed_pages.checked_add(input.unavailable_pages) != Some(expected) =>
         {
-            reasons.push("page_counts_unreconciled")
+            reasons.push("page_counts_unreconciled");
         }
         Some(_) => {}
     }

@@ -223,53 +223,50 @@ pub async fn crawl_with_local_evidence(
         let mut local_evidence = serde_json::json!({"version":"graph-local-1", "url":url, "state":"unavailable", "reason":"not_html_or_not_fetched"});
         if policies[&origin(&u)].allowed(&u) {
             tokio::time::sleep(Duration::from_millis(r.delay_ms)).await;
-            match fetch.get(&u).await {
-                Ok(response) => {
-                    if collect {
-                        let content_type = response
-                            .headers
-                            .get("content-type")
-                            .map_or("", String::as_str);
-                        if !is_resource
-                            && (200..300).contains(&response.status)
-                            && content_type.split(';').next().is_some_and(|t| {
-                                matches!(
-                                    t.trim().to_ascii_lowercase().as_str(),
-                                    "text/html"
-                                        | "application/xhtml+xml"
-                                        | "application/vnd.wap.xhtml+xml"
-                                )
-                            })
-                        {
-                            let (html, encoding, errors) =
-                                crate::extract::decode(&response.body, content_type);
-                            local_evidence = serde_json::json!({"version":"graph-local-1", "url":url, "state":"observed", "encoding":encoding, "decoding_errors":errors, "html":crate::graph_evidence::extract(&u, &html, response.status)});
-                        } else if is_resource {
-                            local_evidence = serde_json::json!({"version":"graph-local-1", "url":url, "state":"observed", "status":response.status, "resource":crate::graph_evidence::resource(&url, &response.headers, &response.body)});
-                        }
-                    }
-                    if r.in_scope(&u) || is_resource {
-                        page = parse::parse(&u, depth, in_sitemap, &response);
-                    } else {
-                        page.status = Some(response.status);
-                        page.bytes = response.body.len();
-                        page.ttfb_ms = response.ttfb_ms;
-                        page.content_type = response
-                            .headers
-                            .get("content-type")
-                            .cloned()
-                            .unwrap_or_default();
-                        page.redirect = response
-                            .headers
-                            .get("location")
-                            .and_then(|v| normalize(&u, v))
-                            .map(Into::into);
+            if let Ok(response) = fetch.get(&u).await {
+                if collect {
+                    let content_type = response
+                        .headers
+                        .get("content-type")
+                        .map_or("", String::as_str);
+                    if !is_resource
+                        && (200..300).contains(&response.status)
+                        && content_type.split(';').next().is_some_and(|t| {
+                            matches!(
+                                t.trim().to_ascii_lowercase().as_str(),
+                                "text/html"
+                                    | "application/xhtml+xml"
+                                    | "application/vnd.wap.xhtml+xml"
+                            )
+                        })
+                    {
+                        let (html, encoding, errors) =
+                            crate::extract::decode(&response.body, content_type);
+                        local_evidence = serde_json::json!({"version":"graph-local-1", "url":url, "state":"observed", "encoding":encoding, "decoding_errors":errors, "html":crate::graph_evidence::extract(&u, &html, response.status)});
+                    } else if is_resource {
+                        local_evidence = serde_json::json!({"version":"graph-local-1", "url":url, "state":"observed", "status":response.status, "resource":crate::graph_evidence::resource(&url, &response.headers, &response.body)});
                     }
                 }
-                Err(_) => {
-                    page.error = Some("fetch_failed_or_destination_denied".into());
-                    local_evidence["reason"] = "fetch_failed_or_destination_denied".into();
+                if r.in_scope(&u) || is_resource {
+                    page = parse::parse(&u, depth, in_sitemap, &response);
+                } else {
+                    page.status = Some(response.status);
+                    page.bytes = response.body.len();
+                    page.ttfb_ms = response.ttfb_ms;
+                    page.content_type = response
+                        .headers
+                        .get("content-type")
+                        .cloned()
+                        .unwrap_or_default();
+                    page.redirect = response
+                        .headers
+                        .get("location")
+                        .and_then(|v| normalize(&u, v))
+                        .map(Into::into);
                 }
+            } else {
+                page.error = Some("fetch_failed_or_destination_denied".into());
+                local_evidence["reason"] = "fetch_failed_or_destination_denied".into();
             }
         } else {
             page.blocked_by_robots = true;

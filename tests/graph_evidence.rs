@@ -43,7 +43,7 @@ fn content_signals_are_review_only_and_empty_is_not_similarity() {
     );
     let error = page("/missing", "<title>Page not found</title><h1>404</h1>");
     let shell = page("/shell", "<div id=app></div><script>render()</script>");
-    assert!(product.content.soft_404_signals.is_empty());
+    assert_eq!(product.content.soft_404_signals, Vec::<String>::new());
     assert!(
         error
             .content

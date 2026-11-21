@@ -623,12 +623,12 @@ async fn local_graph_collection_fails_closed_without_durable_mode() {
         .unwrap_err();
     assert!(err.to_string().contains("durable local job mode"));
     assert!(fixture.calls.lock().unwrap().is_empty());
-    assert!(
+    assert_eq!(
         store
             .local_graph_evidence(&r.request_id.to_string())
             .await
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+        Vec::<serde_json::Value>::new()
     );
     assert!(
         store
