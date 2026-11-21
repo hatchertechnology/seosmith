@@ -487,3 +487,86 @@ async fn optional_external_observations_and_image_size_findings() {
             .any(|f| f.rule == "broken_internal_link")
     );
 }
+
+#[tokio::test]
+async fn htp_size_rejection_preserves_reports_and_only_stops_oversized_413() {
+    use axum::{Router, routing::post};
+    use seosmith::{
+        delivery::{Delivery, HTP_MAX_REPORT_BYTES},
+        model::digest,
+    };
+
+    for (size, status, expected_state) in [
+        (
+            HTP_MAX_REPORT_BYTES,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "pending",
+        ),
+        (
+            HTP_MAX_REPORT_BYTES + 1,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "pending",
+        ),
+        (
+            HTP_MAX_REPORT_BYTES + 1,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "rejected",
+        ),
+    ] {
+        let (_dir, store) = db().await;
+        let r = request();
+        store.submit(&r).await.unwrap();
+        // A multibyte suffix ensures the boundary is measured in bytes, not characters.
+        let body = format!("{}é", "x".repeat(size - 2));
+        let sha = digest(body.as_bytes());
+        sqlx::query("UPDATE jobs SET state='completed',report=?,report_hash=? WHERE id=?")
+            .bind(&body)
+            .bind(&sha)
+            .bind(r.request_id.to_string())
+            .execute(&store.0)
+            .await
+            .unwrap();
+        let receiver = Router::new().route("/", post(move || async move { status }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, receiver).await.unwrap() });
+        Delivery::new(endpoint, "z".repeat(32))
+            .unwrap()
+            .tick(&store)
+            .await
+            .unwrap();
+        let view = store
+            .view(&r.request_id.to_string())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(view.delivery_state, expected_state);
+        assert_eq!(view.attempts, 1);
+        assert_eq!(
+            view.error.as_deref(),
+            Some(if expected_state == "rejected" {
+                "htp_report_limit"
+            } else {
+                "htp_delivery_failed"
+            })
+        );
+        assert_eq!(
+            store
+                .report(&r.request_id.to_string())
+                .await
+                .unwrap()
+                .unwrap(),
+            body
+        );
+        if expected_state == "rejected" {
+            assert!(store.pending().await.unwrap().is_none());
+            let saved_hash: String = sqlx::query_scalar("SELECT report_hash FROM jobs WHERE id=?")
+                .bind(r.request_id.to_string())
+                .fetch_one(&store.0)
+                .await
+                .unwrap();
+            assert_eq!(saved_hash, sha);
+        }
+        server.abort();
+    }
+}

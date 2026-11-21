@@ -161,7 +161,11 @@ serializer. HTP acknowledges only after durable persistence:
 }
 ```
 
-Any HTTP error, timeout, redirect, oversized receipt, incorrect ID/digest or
+A 413 for a report exceeding HTP’s 4,952,756-byte decoded UTF-8 limit marks
+delivery `rejected` with `htp_report_limit`. The original report remains available;
+reduce the audit scope and submit a new request ID. This includes retries of older
+oversized reports. Deploy the receiver limit before relying on this behavior.
+Other HTTP errors, timeouts, redirects, oversized receipts, incorrect ID/digest or
 `accepted: false` leaves the report pending. Backoff grows from 30 seconds to one
 hour. A failed delivery never triggers another crawl. Reports are limited to
 16 MiB; oversized results stay checkpointed and require a smaller audit scope.

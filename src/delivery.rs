@@ -3,9 +3,21 @@ use crate::{
     store::Store,
 };
 use anyhow::{Result, ensure};
-use reqwest::{Client, redirect::Policy};
+use reqwest::{Client, StatusCode, redirect::Policy};
 use std::time::Duration;
 use url::Url;
+/// HTP's maximum decoded report_json size, in UTF-8 bytes.
+pub const HTP_MAX_REPORT_BYTES: usize = 4_952_756;
+
+#[derive(Debug)]
+struct HtpReportLimit;
+impl std::fmt::Display for HtpReportLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "HTP rejected an oversized report")
+    }
+}
+impl std::error::Error for HtpReportLimit {}
+
 #[derive(Clone)]
 pub struct Delivery {
     client: Client,
@@ -30,6 +42,7 @@ impl Delivery {
         })
     }
     pub async fn send(&self, id: &str, body: String, sha: &str) -> Result<()> {
+        let oversized = body.len() > HTP_MAX_REPORT_BYTES;
         let delivery_id = id.parse()?;
         let envelope = DeliveryEnvelope {
             delivery_id,
@@ -44,6 +57,9 @@ impl Delivery {
             .json(&envelope)
             .send()
             .await?;
+        if oversized && response.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            return Err(HtpReportLimit.into());
+        }
         ensure!(response.status().is_success(), "HTP rejected delivery");
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await? {
@@ -61,12 +77,19 @@ impl Delivery {
         let Some((id, body, sha, attempt)) = store.pending().await? else {
             return Ok(false);
         };
-        if let Ok(()) = self.send(&id, body, &sha).await {
-            store.delivered(&id, &sha).await?;
-            tracing::info!(run_id=%id,"HTP delivery acknowledged");
-        } else {
-            store.retry(&id, attempt).await?;
-            tracing::warn!(run_id=%id,"HTP delivery deferred");
+        match self.send(&id, body, &sha).await {
+            Ok(()) => {
+                store.delivered(&id, &sha).await?;
+                tracing::info!(run_id=%id,"HTP delivery acknowledged");
+            }
+            Err(error) if error.is::<HtpReportLimit>() => {
+                store.delivery_too_large(&id, &sha).await?;
+                tracing::warn!(run_id=%id,"HTP report exceeds receiver limit");
+            }
+            Err(_) => {
+                store.retry(&id, attempt).await?;
+                tracing::warn!(run_id=%id,"HTP delivery deferred");
+            }
         }
         Ok(true)
     }

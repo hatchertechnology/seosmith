@@ -290,6 +290,16 @@ impl Store {
         ensure!(n == 1, "delivery hash mismatch");
         Ok(())
     }
+    pub async fn delivery_too_large(&self, id: &str, sha: &str) -> Result<()> {
+        let n = sqlx::query("UPDATE jobs SET delivery_state='rejected',error='htp_report_limit',attempts=attempts+1 WHERE id=? AND report_hash=? AND delivery_state='pending'")
+            .bind(id)
+            .bind(sha)
+            .execute(&self.0)
+            .await?
+            .rows_affected();
+        ensure!(n == 1, "delivery state or hash mismatch");
+        Ok(())
+    }
     pub async fn retry(&self, id: &str, attempt: i64) -> Result<()> {
         let seconds = 30_i64
             .saturating_mul(2_i64.saturating_pow(u32::try_from(attempt.min(7))?))
