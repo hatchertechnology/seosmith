@@ -377,16 +377,17 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("jobs.sqlite");
         let db = path.to_str().unwrap();
-        let store = Store::open(db).await?;
-        // Refresh SQLite schema metadata before constructing a pre-mode database.
-        sqlx::query("PRAGMA table_info(jobs)")
-            .fetch_all(&store.0)
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(db)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+            .create_if_missing(true);
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
             .await?;
-        sqlx::query("ALTER TABLE jobs DROP COLUMN execution_mode")
-            .execute(&store.0)
-            .await
-            .context("drop pre-mode column")?;
-        drop(store);
+        sqlx::raw_sql("CREATE TABLE jobs (id TEXT PRIMARY KEY, request TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'queued', started_at TEXT, report TEXT, report_hash TEXT, error TEXT, delivery_state TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, next_attempt INTEGER NOT NULL DEFAULT 0, discovery_truncated INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL DEFAULT (unixepoch())); CREATE TABLE frontier (job_id TEXT NOT NULL REFERENCES jobs(id), url TEXT NOT NULL, depth INTEGER NOT NULL, in_sitemap INTEGER NOT NULL, page TEXT, resource INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(job_id,url));")
+            .execute(&pool).await?;
+        pool.close().await;
         let (a, b) = tokio::join!(Store::open(db), Store::open(db));
         a.context("first reopen")?;
         b.context("second reopen")?;
