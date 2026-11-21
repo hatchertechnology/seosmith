@@ -277,8 +277,8 @@ impl Store {
     }
     pub async fn finish(&self, r: &Report) -> Result<()> {
         ensure!(
-            r.schema_version != 3,
-            "schema 3 local output cannot be persisted for delivery"
+            matches!(r.schema_version, 1 | 2),
+            "unsupported or local-only schema cannot be persisted for delivery"
         );
         let mode: Option<String> = sqlx::query_scalar("SELECT execution_mode FROM jobs WHERE id=?")
             .bind(r.request.request_id.to_string())

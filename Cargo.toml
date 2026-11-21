@@ -6,6 +6,9 @@ rust-version = "1.98"
 license = "MIT"
 description = "Headless technical SEO audits with durable delivery to HTP"
 
+[features]
+policy-wire-prototype = []
+
 [dependencies]
 anyhow = "1"
 axum = "0.8"
@@ -45,3 +48,7 @@ pedantic = { level = "warn", priority = -1 }
 missing_errors_doc = "allow"
 must_use_candidate = "allow"
 too_many_lines = "allow"
+
+[[example]]
+name = "make_wire_edge_review"
+required-features = ["policy-wire-prototype"]
