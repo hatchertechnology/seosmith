@@ -311,19 +311,40 @@ pub struct AlternateCluster {
     pub edges: Vec<AlternateEdge>,
     pub complete: bool,
 }
-/// Traverse the observed alternate graph, retaining every declaration and its origin.
-/// An unavailable/out-of-scope member or an incomplete collection makes it partial.
+/// Traverse the observed alternate graph in both directions, retaining each declaration.
+/// Paths can follow incoming edges; source and target preserve declaration direction.
+/// `universe_complete` must cover discovery and alternate extraction for every relevant
+/// page. An unavailable/out-of-scope member or incomplete collection makes it partial.
 pub fn alternate_cluster(
     start: &str,
     nodes: &BTreeMap<String, Node>,
     scope: &Url,
     limit: usize,
+    universe_complete: bool,
 ) -> AlternateCluster {
     let mut seen = BTreeSet::new();
     let mut queue = std::collections::VecDeque::from([(start.to_owned(), vec![start.to_owned()])]);
     let mut queued = BTreeSet::from([start.to_owned()]);
     let mut edges = Vec::new();
-    let mut complete = true;
+    let mut complete = universe_complete;
+    let mut reverse = BTreeMap::<String, Vec<String>>::new();
+    let mut indexed = 0usize;
+    'index: for (source, node) in nodes {
+        if node.state != TargetState::Available {
+            continue;
+        }
+        for (_, target) in &node.alternates {
+            if indexed >= limit.saturating_mul(20).min(100_000) {
+                complete = false;
+                break 'index;
+            }
+            reverse
+                .entry(target.clone())
+                .or_default()
+                .push(source.clone());
+            indexed += 1;
+        }
+    }
     while let Some((url, path)) = queue.pop_front() {
         if seen.contains(&url) {
             continue;
@@ -342,6 +363,30 @@ pub fn alternate_cluster(
         }
         if node.state != TargetState::Available {
             continue;
+        }
+        if let Some(incoming) = reverse.get(&url) {
+            for source in incoming {
+                let in_scope = Url::parse(source).is_ok_and(|u| {
+                    matches!(u.scheme(), "http" | "https")
+                        && u.host_str() == scope.host_str()
+                        && u.port().is_none()
+                        && u.username().is_empty()
+                        && u.password().is_none()
+                });
+                if !in_scope {
+                    complete = false;
+                    continue;
+                }
+                if queued.insert(source.clone()) {
+                    let mut source_path = path.clone();
+                    source_path.push(source.clone());
+                    if queued.len() > limit || source_path.len() > 128 {
+                        complete = false;
+                    } else {
+                        queue.push_back((source.clone(), source_path));
+                    }
+                }
+            }
         }
         for (language, target) in &node.alternates {
             if edges.len() >= limit.saturating_mul(20).min(100_000) {
@@ -412,14 +457,21 @@ mod cluster_tests {
                 },
             ),
         ]);
-        let cluster = alternate_cluster(a, &nodes, &scope, 10);
+        let cluster = alternate_cluster(a, &nodes, &scope, 10, true);
         assert!(!cluster.complete);
         assert_eq!(cluster.members.len(), 2);
         assert_eq!(cluster.edges.len(), 3);
         assert_eq!(cluster.edges[0].source, a);
         assert_eq!(cluster.edges[0].reciprocal, Reciprocity::Present);
         assert_eq!(cluster.edges[1].reciprocal, Reciprocity::OutsideScope);
-        assert!(!alternate_cluster(a, &nodes, &scope, 1).complete);
+        assert!(!alternate_cluster(a, &nodes, &scope, 1, true).complete);
+        let mut incoming_only = nodes.clone();
+        incoming_only.get_mut(a).unwrap().alternates.clear();
+        let inbound = alternate_cluster(a, &incoming_only, &scope, 10, true);
+        assert_eq!(inbound.members.len(), 2);
+        assert_eq!(inbound.edges[0].source, b);
+        assert_eq!(inbound.edges[0].reciprocal, Reciprocity::Missing);
+        assert!(!alternate_cluster(a, &incoming_only, &scope, 10, false).complete);
     }
 }
 
@@ -609,5 +661,97 @@ mod header_tests {
         let malformed =
             crate::collection_evidence::http_occurrences(&[("link", "</a>; rel=\"canonical")]);
         assert!(!header_declarations(&malformed, &base, &base, true).1);
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CanonicalAgreement {
+    Consistent,
+    Conflicting,
+    Absent,
+    Unknown,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CanonicalAssessment {
+    pub declarations: Vec<Declaration>,
+    pub agreement: CanonicalAgreement,
+}
+/// Compare all collected HTML and HTTP declarations; unavailable sources or invalid
+/// occurrences cannot produce an absence or consistency conclusion.
+pub fn canonical_assessment(
+    capture: &crate::collection_evidence::PageCapture,
+    base: &Url,
+    scope: &Url,
+) -> CanonicalAssessment {
+    let mut declarations_found = Vec::new();
+    let mut complete = capture.state == "available";
+    if let Some(html) = &capture.html {
+        complete &= html.complete;
+        declarations_found.extend(declarations(html, base, scope, true));
+    } else {
+        complete = false;
+    }
+    if let Some(http) = &capture.http {
+        let (headers, header_complete) = header_declarations(http, base, scope, true);
+        complete &= header_complete;
+        declarations_found.extend(headers);
+    } else {
+        complete = false;
+    }
+    let valid_targets: BTreeSet<_> = declarations_found
+        .iter()
+        .filter(|d| d.state == DeclarationState::Valid)
+        .filter_map(|d| d.target.clone())
+        .collect();
+    let has_invalid = declarations_found
+        .iter()
+        .any(|d| d.state != DeclarationState::Valid);
+    let agreement = if valid_targets.len() > 1 {
+        CanonicalAgreement::Conflicting
+    } else if !complete || has_invalid {
+        CanonicalAgreement::Unknown
+    } else if valid_targets.is_empty() {
+        CanonicalAgreement::Absent
+    } else {
+        CanonicalAgreement::Consistent
+    };
+    CanonicalAssessment {
+        declarations: declarations_found,
+        agreement,
+    }
+}
+#[cfg(test)]
+mod canonical_assessment_tests {
+    use super::*;
+    #[test]
+    fn source_conflicts_and_missing_evidence_are_distinct() {
+        let base = Url::parse("https://example.com/").unwrap();
+        let mut capture =
+            crate::collection_evidence::PageCapture::unavailable(base.as_str(), "available");
+        capture.html = Some(crate::collection_evidence::html_occurrences(
+            "<head><link rel='canonical' href='/a'></head>",
+            true,
+        ));
+        capture.http = Some(crate::collection_evidence::http_occurrences(&[(
+            "link",
+            "</b>; rel=canonical",
+        )]));
+        let result = canonical_assessment(&capture, &base, &base);
+        assert_eq!(result.agreement, CanonicalAgreement::Conflicting);
+        assert_eq!(result.declarations.len(), 2);
+        capture.http = None;
+        assert_eq!(
+            canonical_assessment(&capture, &base, &base).agreement,
+            CanonicalAgreement::Unknown
+        );
+        capture.html = Some(crate::collection_evidence::html_occurrences(
+            "<head></head>",
+            true,
+        ));
+        capture.http = Some(crate::collection_evidence::http_occurrences(&[]));
+        assert_eq!(
+            canonical_assessment(&capture, &base, &base).agreement,
+            CanonicalAgreement::Absent
+        );
     }
 }

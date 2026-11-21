@@ -294,3 +294,128 @@ mod scope_tests {
         );
     }
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EntryPath {
+    pub documents: Vec<String>,
+    pub entry_ordinal: usize,
+    pub location: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EntryOrigins {
+    pub paths: Vec<EntryPath>,
+    pub complete: bool,
+}
+/// Explain every observed path from a root index to an entry. Missing, failed,
+/// out-of-scope, cyclic or over-budget document traversal makes coverage partial.
+pub fn entry_origins(
+    root: &str,
+    target: &str,
+    documents: &std::collections::BTreeMap<String, Sitemap>,
+    scope: &Url,
+    limit: usize,
+) -> EntryOrigins {
+    let Some(root) = crate::model::normalize(scope, root)
+        .filter(|u| u.host_str() == scope.host_str() && u.port().is_none())
+    else {
+        return EntryOrigins {
+            paths: Vec::new(),
+            complete: false,
+        };
+    };
+    let root = root.to_string();
+    let Some(target) = crate::model::normalize(scope, target)
+        .filter(|u| u.host_str() == scope.host_str() && u.port().is_none())
+    else {
+        return EntryOrigins {
+            paths: Vec::new(),
+            complete: false,
+        };
+    };
+    let target = target.to_string();
+    let mut paths = Vec::new();
+    let mut complete = true;
+    let mut queue = std::collections::VecDeque::from([(root.clone(), vec![root])]);
+    let mut visits = 0usize;
+    while let Some((document, path)) = queue.pop_front() {
+        if visits >= limit {
+            complete = false;
+            break;
+        }
+        visits += 1;
+        let Some(map) = documents.get(&document) else {
+            complete = false;
+            continue;
+        };
+        if map.error.is_some() {
+            complete = false;
+        }
+        for entry in &map.entries {
+            let Some(raw) = entry.location.as_deref() else {
+                complete = false;
+                continue;
+            };
+            match entry_scope(entry, scope) {
+                EntryScope::Invalid | EntryScope::OutsideScope => {
+                    complete = false;
+                    continue;
+                }
+                EntryScope::InScope => {}
+            }
+            let Some(mut parsed) = Url::parse(raw.trim()).ok() else {
+                complete = false;
+                continue;
+            };
+            parsed.set_fragment(None);
+            let location = parsed.to_string();
+            if map.index {
+                if path.iter().any(|p| p == &location) || path.len() >= 128 {
+                    complete = false;
+                    continue;
+                }
+                let mut next = path.clone();
+                next.push(location.clone());
+                if queue.len() >= limit {
+                    complete = false;
+                    continue;
+                }
+                queue.push_back((location, next));
+            } else if location == target {
+                paths.push(EntryPath {
+                    documents: path.clone(),
+                    entry_ordinal: entry.ordinal,
+                    location,
+                });
+                if paths.len() >= limit {
+                    complete = false;
+                    break;
+                }
+            }
+        }
+    }
+    EntryOrigins { paths, complete }
+}
+#[cfg(test)]
+mod origin_tests {
+    use super::*;
+    #[test]
+    fn multiple_index_paths_and_missing_documents_are_explicit() {
+        let scope = Url::parse("https://example.com/").unwrap();
+        let root = "https://example.com/index.xml";
+        let one = "https://example.com/one.xml";
+        let two = "https://example.com/two.xml";
+        let index=parse(root,format!("<sitemapindex><sitemap><loc>{one}</loc></sitemap><sitemap><loc>{two}</loc></sitemap></sitemapindex>").as_bytes(),2000,10);
+        let body = b"<urlset><url><loc>https://example.com/a</loc></url></urlset>";
+        let mut docs = std::collections::BTreeMap::from([
+            (root.into(), index),
+            (one.into(), parse(one, body, 1000, 10)),
+            (two.into(), parse(two, body, 1000, 10)),
+        ]);
+        let origins = entry_origins(root, "https://example.com/a", &docs, &scope, 10);
+        assert!(origins.complete);
+        assert_eq!(origins.paths.len(), 2);
+        assert_eq!(origins.paths[0].documents, vec![root, one]);
+        docs.remove(two);
+        assert!(!entry_origins(root, "https://example.com/a", &docs, &scope, 10).complete);
+    }
+}
