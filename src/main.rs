@@ -373,6 +373,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_open_serializes_execution_mode_migration() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("jobs.sqlite");
+        let db = path.to_str().unwrap();
+        let store = Store::open(db).await?;
+        // Refresh SQLite schema metadata before constructing a pre-mode database.
+        sqlx::query("PRAGMA table_info(jobs)")
+            .fetch_all(&store.0)
+            .await?;
+        sqlx::query("ALTER TABLE jobs DROP COLUMN execution_mode")
+            .execute(&store.0)
+            .await
+            .context("drop pre-mode column")?;
+        drop(store);
+        let (a, b) = tokio::join!(Store::open(db), Store::open(db));
+        a.context("first reopen")?;
+        b.context("second reopen")?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pending_rejects_local_even_if_report_exists() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(dir.path().join("jobs.sqlite").to_str().unwrap()).await?;
+        let report: seosmith::model::Report =
+            serde_json::from_str(include_str!("../fixtures/contracts/legacy.json"))?;
+        store.submit_local(&report.request).await?;
+        sqlx::query("UPDATE jobs SET report='{}',report_hash='unexpected' WHERE id=?")
+            .bind(report.request.request_id.to_string())
+            .execute(&store.0)
+            .await?;
+        assert!(store.pending().await?.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn pre_mode_delivered_tombstone_remains_idempotent() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let store = Store::open(dir.path().join("jobs.sqlite").to_str().unwrap()).await?;

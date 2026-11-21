@@ -62,17 +62,19 @@ impl Store {
         Ok(store)
     }
     pub async fn ensure_execution_mode(&self) -> Result<()> {
+        let mut tx = self.0.begin_with("BEGIN IMMEDIATE").await?;
         let job_columns = sqlx::query("PRAGMA table_info(jobs)")
-            .fetch_all(&self.0)
+            .fetch_all(&mut *tx)
             .await?;
         if !job_columns
             .iter()
             .any(|r| r.get::<String, _>("name") == "execution_mode")
         {
             sqlx::query("ALTER TABLE jobs ADD COLUMN execution_mode TEXT")
-                .execute(&self.0)
+                .execute(&mut *tx)
                 .await?;
         }
+        tx.commit().await?;
         Ok(())
     }
     pub async fn recover(&self) -> Result<()> {
@@ -340,7 +342,7 @@ impl Store {
         )
     }
     pub async fn pending(&self) -> Result<Option<(String, String, String, i64)>> {
-        let row=sqlx::query("SELECT id,report,report_hash,attempts FROM jobs WHERE report IS NOT NULL AND delivery_state='pending' AND next_attempt<=unixepoch() ORDER BY created LIMIT 1").fetch_optional(&self.0).await?;
+        let row=sqlx::query("SELECT id,report,report_hash,attempts FROM jobs WHERE report IS NOT NULL AND (execution_mode='standard' OR execution_mode IS NULL) AND delivery_state='pending' AND next_attempt<=unixepoch() ORDER BY created LIMIT 1").fetch_optional(&self.0).await?;
         row.map(|r| {
             Ok((
                 r.try_get("id")?,
