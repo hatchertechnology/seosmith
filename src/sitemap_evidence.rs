@@ -18,6 +18,8 @@ pub struct Sitemap {
     pub source: String,
     pub index: bool,
     pub entries: Vec<Entry>,
+    /// None means the number of omitted entries is not known.
+    pub omitted_entries: Option<usize>,
     pub error: Option<String>,
 }
 /// Parse bounded XML or gzip-compressed XML, retaining raw entry values.
@@ -27,10 +29,12 @@ pub fn parse(source: &str, bytes: &[u8], max_bytes: usize, max_entries: usize) -
         source: source.into(),
         index: false,
         entries: vec![],
+        omitted_entries: Some(0),
         error: None,
     };
     if bytes.len() > max_bytes {
         result.error = Some("size_limit".into());
+        result.omitted_entries = None;
         return result;
     }
     let decoded;
@@ -42,10 +46,12 @@ pub fn parse(source: &str, bytes: &[u8], max_bytes: usize, max_entries: usize) -
             .is_err()
         {
             result.error = Some("invalid_gzip".into());
+            result.omitted_entries = None;
             return result;
         }
         if output.len() > max_bytes {
             result.error = Some("size_limit".into());
+            result.omitted_entries = None;
             return result;
         }
         decoded = output;
@@ -198,6 +204,9 @@ pub fn parse(source: &str, bytes: &[u8], max_bytes: usize, max_entries: usize) -
             }
             _ => {}
         }
+    }
+    if result.error.is_some() {
+        result.omitted_entries = None;
     }
     result
 }
@@ -573,5 +582,51 @@ mod entry_evaluation_tests {
             evaluate_entry(map, target, &docs, &pages, &scope, 10).observations,
             vec![EntryObservation::Redirect]
         );
+    }
+}
+
+/// Reduce a local sitemap document to a deterministic entry prefix that fits the
+/// compact UTF-8 byte budget. An incomplete parse has unknown omissions; a
+/// complete document has an exact count of entries dropped by this operation.
+pub fn enforce_document_budget(
+    document: &mut Sitemap,
+    max_bytes: usize,
+) -> Result<(), &'static str> {
+    loop {
+        if serde_json::to_vec(document)
+            .map_err(|_| "serialization_failed")?
+            .len()
+            <= max_bytes
+        {
+            return Ok(());
+        }
+        if document.entries.pop().is_none() {
+            return Err("minimum_marker_exceeds_budget");
+        }
+        document.omitted_entries = document.omitted_entries.map(|n| n.saturating_add(1));
+        if document.error.is_none() {
+            document.error = Some("budget_limit".into());
+        }
+    }
+}
+#[cfg(test)]
+mod document_budget_tests {
+    use super::*;
+    #[test]
+    fn bounded_prefix_never_claims_full_coverage() {
+        let mut doc=parse("https://example.com/map",b"<urlset><url><loc>https://example.com/a</loc></url><url><loc>https://example.com/b</loc></url></urlset>",1000,10);
+        let limit = serde_json::to_vec(&doc).unwrap().len() - 1;
+        enforce_document_budget(&mut doc, limit).unwrap();
+        assert_eq!(doc.entries.len(), 1);
+        assert_eq!(doc.omitted_entries, Some(1));
+        assert_eq!(doc.error.as_deref(), Some("budget_limit"));
+        assert_eq!(
+            enforce_document_budget(&mut doc, 1),
+            Err("minimum_marker_exceeds_budget")
+        );
+        let mut partial = parse("x", b"<urlset><url>", 1000, 10);
+        assert_eq!(partial.omitted_entries, None);
+        let _ = enforce_document_budget(&mut partial, 1);
+        assert_eq!(partial.omitted_entries, None);
     }
 }
