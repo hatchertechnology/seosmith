@@ -153,11 +153,14 @@ async fn main() -> Result<()> {
         Command::Crawl { request } => {
             let r: CrawlRequest = serde_json::from_slice(&tokio::fs::read(request).await?)?;
 
-            store.submit(&r).await?;
-            let job = store
-                .claim()
-                .await?
-                .context("no queued job; use report API for completed runs")?;
+            let job = if policy.is_some() {
+                store.submit_local(&r).await?;
+                store.claim_local(&r.request_id.to_string()).await?
+            } else {
+                store.submit(&r).await?;
+                store.claim().await?
+            }
+            .context("no queued job; use report API for completed runs")?;
             ensure!(
                 job.request_id == r.request_id,
                 "database contains another queued job; use serve to drain it"
@@ -275,13 +278,121 @@ async fn finalize_job(
             tracing::error!(run_id=%report.request.request_id, %error, "report finalization failed");
             Ok(false)
         }
-        Err(error) => Err(error),
+        Err(error) => {
+            if store
+                .cancelled(&report.request.request_id.to_string())
+                .await?
+            {
+                Ok(false)
+            } else {
+                Err(error)
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn local_jobs_never_recover_into_delivery() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("jobs.sqlite");
+        let store = Store::open(path.to_str().unwrap()).await?;
+        let report: seosmith::model::Report =
+            serde_json::from_str(include_str!("../fixtures/contracts/legacy.json"))?;
+        let mut queued = report.request.clone();
+        queued.request_id = uuid::Uuid::new_v4();
+        let mut running = report.request.clone();
+        running.request_id = uuid::Uuid::new_v4();
+        store.submit_local(&queued).await?;
+        store.submit_local(&running).await?;
+        store
+            .claim_local(&running.request_id.to_string())
+            .await?
+            .unwrap();
+        let mut page = report.pages[0].clone();
+        page.url = running.url.to_string();
+        store
+            .save_page(&running.request_id.to_string(), &page)
+            .await?;
+        assert_eq!(store.pages(&running.request_id.to_string()).await?.len(), 1);
+        let mut local_report = report.clone();
+        local_report.request = running.clone();
+        assert!(store.finish(&local_report).await.is_err());
+        drop(store);
+        let store = Store::open(path.to_str().unwrap()).await?;
+        store.recover().await?;
+        for request in [&queued, &running] {
+            assert_eq!(
+                store
+                    .view(&request.request_id.to_string())
+                    .await?
+                    .unwrap()
+                    .state,
+                "local_only"
+            );
+            assert!(store.submit(request).await.is_err());
+        }
+        assert!(store.claim().await?.is_none());
+        assert!(store.pending().await?.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recovery_quarantines_ambiguous_jobs_but_requeues_standard() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(dir.path().join("jobs.sqlite").to_str().unwrap()).await?;
+        let report: seosmith::model::Report =
+            serde_json::from_str(include_str!("../fixtures/contracts/legacy.json"))?;
+        let mut old = report.request.clone();
+        old.request_id = uuid::Uuid::new_v4();
+        store.submit(&old).await?;
+        sqlx::query("UPDATE jobs SET execution_mode=NULL WHERE id=?")
+            .bind(old.request_id.to_string())
+            .execute(&store.0)
+            .await?;
+        let mut standard = report.request.clone();
+        standard.request_id = uuid::Uuid::new_v4();
+        store.submit(&standard).await?;
+        // Claim the standard request directly to avoid relying on queue ordering.
+        sqlx::query("UPDATE jobs SET state='running' WHERE id=?")
+            .bind(standard.request_id.to_string())
+            .execute(&store.0)
+            .await?;
+        store.recover().await?;
+        let view = store.view(&old.request_id.to_string()).await?.unwrap();
+        assert_eq!(view.state, "failed");
+        assert_eq!(view.error.as_deref(), Some("ambiguous_pre_mode_job"));
+        assert_eq!(
+            store.claim().await?.unwrap().request_id,
+            standard.request_id
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_or_finalized_jobs_cannot_be_written() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(dir.path().join("jobs.sqlite").to_str().unwrap()).await?;
+        let mut report: seosmith::model::Report =
+            serde_json::from_str(include_str!("../fixtures/contracts/legacy.json"))?;
+        report.request.request_id = uuid::Uuid::new_v4();
+        store.submit(&report.request).await?;
+        store.claim().await?.unwrap();
+        store.cancel(&report.request.request_id.to_string()).await?;
+        assert!(store.finish(&report).await.is_err());
+        assert!(store.pending().await?.is_none());
+        report.request.request_id = uuid::Uuid::new_v4();
+        store.submit(&report.request).await?;
+        store.claim().await?.unwrap();
+        store.finish(&report).await?;
+        let before = store.pending().await?.unwrap();
+        assert!(store.finish(&report).await.is_err());
+        assert_eq!(store.pending().await?.unwrap(), before);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn oversized_job_fails_and_next_job_survives_restart() -> Result<()> {
