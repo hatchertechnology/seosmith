@@ -73,9 +73,9 @@ spec:
             - |
               sleep 10
               for attempt in 1 2 3; do
-                public_status=$(curl --noproxy '*' -sS -o /dev/null --max-time 10 -w '%{http_code}' https://htp-api-kerry-hatcher.fly.dev/ || true)
+                public_status=$(curl -4 --noproxy '*' -sS -o /dev/null --max-time 10 -w '%{http_code}' https://htp-api-kerry-hatcher.fly.dev/ || true)
                 [ "$public_status" = 200 ] || exit 1
-                private_status=$(curl --noproxy '*' -ksS -o /dev/null --max-time 3 -w '%{http_code}' https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}/ 2>/dev/null || true)
+                private_status=$(curl -4 --noproxy '*' -ksS -o /dev/null --max-time 3 -w '%{http_code}' https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}/ 2>/dev/null || true)
                 [ "$private_status" = 000 ] || exit 1
                 sleep 2
               done
