@@ -861,3 +861,90 @@ mod capture_node_tests {
         assert!(node_from_capture(&c, &base, &base).is_none());
     }
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AlternateIssue {
+    MissingSelf,
+    InvalidLanguage {
+        language: String,
+        target: String,
+    },
+    ConflictingLanguage {
+        language: String,
+        targets: Vec<String>,
+    },
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AlternateAssessment {
+    pub issues: Vec<AlternateIssue>,
+    pub complete: bool,
+}
+/// Evaluate the fully observed declarations of one node; missing x-default is
+/// not treated as a defect. An incomplete collection never proves absence.
+pub fn assess_alternates(node: &Node) -> AlternateAssessment {
+    let complete = node.state == TargetState::Available && node.alternates_complete;
+    let mut issues = Vec::new();
+    let mut by_language = BTreeMap::<String, BTreeSet<String>>::new();
+    for (language, target) in &node.alternates {
+        let normalized = language.to_ascii_lowercase();
+        if normalized != "x-default" && language.parse::<language_tags::LanguageTag>().is_err() {
+            issues.push(AlternateIssue::InvalidLanguage {
+                language: language.clone(),
+                target: target.clone(),
+            });
+        }
+        by_language
+            .entry(normalized)
+            .or_default()
+            .insert(target.clone());
+    }
+    for (language, targets) in by_language {
+        if targets.len() > 1 {
+            issues.push(AlternateIssue::ConflictingLanguage {
+                language,
+                targets: targets.into_iter().collect(),
+            });
+        }
+    }
+    if complete
+        && !node.alternates.is_empty()
+        && !node
+            .alternates
+            .iter()
+            .any(|(_, target)| target == &node.url)
+    {
+        issues.push(AlternateIssue::MissingSelf);
+    }
+    AlternateAssessment { issues, complete }
+}
+#[cfg(test)]
+mod alternate_assessment_tests {
+    use super::*;
+    #[test]
+    fn missing_self_requires_complete_collection_and_xdefault_is_optional() {
+        let mut n = Node {
+            url: "https://example.com/a".into(),
+            state: TargetState::Available,
+            canonical: None,
+            alternates: vec![
+                ("en".into(), "https://example.com/b".into()),
+                ("EN".into(), "https://example.com/c".into()),
+            ],
+            alternates_complete: false,
+        };
+        let partial = assess_alternates(&n);
+        assert!(!partial.complete);
+        assert!(!partial.issues.contains(&AlternateIssue::MissingSelf));
+        n.alternates_complete = true;
+        let complete = assess_alternates(&n);
+        assert!(complete.issues.contains(&AlternateIssue::MissingSelf));
+        assert!(
+            complete
+                .issues
+                .iter()
+                .any(|i| matches!(i, AlternateIssue::ConflictingLanguage { .. }))
+        );
+        n.alternates = vec![("en".into(), n.url.clone())];
+        assert_eq!(assess_alternates(&n).issues.len(), 0);
+    }
+}
