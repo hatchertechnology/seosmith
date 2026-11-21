@@ -289,3 +289,129 @@ mod declaration_tests {
         );
     }
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AlternateEdge {
+    pub path: Vec<String>,
+    pub source: String,
+    pub language: String,
+    pub target: String,
+    pub reciprocal: Reciprocity,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AlternateCluster {
+    pub members: Vec<String>,
+    pub edges: Vec<AlternateEdge>,
+    pub complete: bool,
+}
+/// Traverse the observed alternate graph, retaining every declaration and its origin.
+/// An unavailable/out-of-scope member or an incomplete collection makes it partial.
+pub fn alternate_cluster(
+    start: &str,
+    nodes: &BTreeMap<String, Node>,
+    scope: &Url,
+    limit: usize,
+) -> AlternateCluster {
+    let mut seen = BTreeSet::new();
+    let mut queue = std::collections::VecDeque::from([(start.to_owned(), vec![start.to_owned()])]);
+    let mut queued = BTreeSet::from([start.to_owned()]);
+    let mut edges = Vec::new();
+    let mut complete = true;
+    while let Some((url, path)) = queue.pop_front() {
+        if seen.contains(&url) {
+            continue;
+        }
+        if seen.len() >= limit {
+            complete = false;
+            break;
+        }
+        seen.insert(url.clone());
+        let Some(node) = nodes.get(&url) else {
+            complete = false;
+            continue;
+        };
+        if node.state != TargetState::Available || !node.alternates_complete {
+            complete = false;
+        }
+        if node.state != TargetState::Available {
+            continue;
+        }
+        for (language, target) in &node.alternates {
+            if edges.len() >= limit.saturating_mul(20).min(100_000) {
+                complete = false;
+                break;
+            }
+            let reciprocity = reciprocal(&url, target, nodes, scope);
+            if matches!(
+                reciprocity,
+                Reciprocity::Unknown | Reciprocity::OutsideScope
+            ) {
+                complete = false;
+            }
+            let mut edge_path = path.clone();
+            edge_path.push(target.clone());
+            edges.push(AlternateEdge {
+                path: edge_path.clone(),
+                source: url.clone(),
+                language: language.clone(),
+                target: target.clone(),
+                reciprocal: reciprocity.clone(),
+            });
+            if reciprocity != Reciprocity::OutsideScope && queued.insert(target.clone()) {
+                if queued.len() > limit || edge_path.len() > 128 {
+                    complete = false;
+                } else {
+                    queue.push_back((target.clone(), edge_path));
+                }
+            }
+        }
+    }
+    AlternateCluster {
+        members: seen.into_iter().collect(),
+        edges,
+        complete,
+    }
+}
+#[cfg(test)]
+mod cluster_tests {
+    use super::*;
+    #[test]
+    fn preserves_origin_and_partial_targets() {
+        let scope = Url::parse("https://example.com/").unwrap();
+        let a = "https://example.com/a";
+        let b = "https://example.com/b";
+        let nodes = BTreeMap::from([
+            (
+                a.into(),
+                Node {
+                    url: a.into(),
+                    state: TargetState::Available,
+                    canonical: None,
+                    alternates: vec![
+                        ("fr".into(), b.into()),
+                        ("de".into(), "https://outside.example/".into()),
+                    ],
+                    alternates_complete: true,
+                },
+            ),
+            (
+                b.into(),
+                Node {
+                    url: b.into(),
+                    state: TargetState::Available,
+                    canonical: None,
+                    alternates: vec![("en".into(), a.into())],
+                    alternates_complete: true,
+                },
+            ),
+        ]);
+        let cluster = alternate_cluster(a, &nodes, &scope, 10);
+        assert!(!cluster.complete);
+        assert_eq!(cluster.members.len(), 2);
+        assert_eq!(cluster.edges.len(), 3);
+        assert_eq!(cluster.edges[0].source, a);
+        assert_eq!(cluster.edges[0].reciprocal, Reciprocity::Present);
+        assert_eq!(cluster.edges[1].reciprocal, Reciprocity::OutsideScope);
+        assert!(!alternate_cluster(a, &nodes, &scope, 1).complete);
+    }
+}

@@ -152,3 +152,184 @@ mod tests {
         );
     }
 }
+
+/// Desired indexing is supplied by an explicit, independently scoped policy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Intent {
+    Index,
+    Exclude,
+    Unspecified,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IntentResult {
+    Conforms,
+    Conflicts,
+    Unknown,
+}
+pub fn compare_intent(index: &Decision, intent: &Intent) -> IntentResult {
+    match (index, intent) {
+        (Decision::Restricted, Intent::Exclude) | (Decision::Allowed, Intent::Index) => {
+            IntentResult::Conforms
+        }
+        (Decision::Restricted, Intent::Index) | (Decision::Allowed, Intent::Exclude) => {
+            IntentResult::Conflicts
+        }
+        _ => IntentResult::Unknown,
+    }
+}
+#[cfg(test)]
+mod intent_tests {
+    use super::*;
+    #[test]
+    fn exclusions_are_not_implicitly_defects() {
+        assert_eq!(
+            compare_intent(&Decision::Restricted, &Intent::Exclude),
+            IntentResult::Conforms
+        );
+        assert_eq!(
+            compare_intent(&Decision::Restricted, &Intent::Unspecified),
+            IntentResult::Unknown
+        );
+        assert_eq!(
+            compare_intent(&Decision::Unknown, &Intent::Index),
+            IntentResult::Unknown
+        );
+        assert_eq!(
+            compare_intent(&Decision::Restricted, &Intent::Index),
+            IntentResult::Conflicts
+        );
+    }
+}
+
+/// Interpret an explicitly requested bot's declarations. Unknown header syntax makes
+/// negative conclusions unavailable; retained raw occurrences remain authoritative.
+pub fn evaluate_capture(
+    bot: &str,
+    capture: &crate::collection_evidence::PageCapture,
+) -> IndexEvaluation {
+    let mut sources = Vec::new();
+    let mut complete = capture.state == "available";
+    if let Some(http) = &capture.http {
+        complete &= http.complete;
+        for field in http
+            .occurrences
+            .iter()
+            .filter(|o| o.source == "x-robots-tag")
+        {
+            let Some(raw) = &field.raw_value else {
+                complete = false;
+                continue;
+            };
+            let mut agent: Option<String> = None;
+            for part in raw.split(',') {
+                let mut value = part.trim();
+                if let Some((prefix, suffix)) = value.split_once(':') {
+                    let key = prefix.trim().to_ascii_lowercase();
+                    if matches!(
+                        key.as_str(),
+                        "max-snippet" | "max-image-preview" | "max-video-preview"
+                    ) {
+                        // Parameter is part of a directive, not an agent prefix.
+                    } else if key == "unavailable_after" {
+                        // Dates can contain commas; do not infer absence from an ambiguous parse.
+                        complete = false;
+                    } else if !key.is_empty()
+                        && key
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                    {
+                        agent = Some(key);
+                        value = suffix.trim();
+                    } else {
+                        complete = false;
+                    }
+                }
+                if !value.is_empty() {
+                    sources.push(DirectiveSource {
+                        source: Source::HttpHeader,
+                        bot: agent.clone(),
+                        value: value.into(),
+                    });
+                }
+            }
+        }
+    } else {
+        complete = false;
+    }
+    if let Some(html) = &capture.html {
+        complete &= html.complete;
+        for meta in html
+            .occurrences
+            .iter()
+            .filter(|o| o.source == "html_head_meta")
+        {
+            let Some(name) = meta.raw_name.as_deref() else {
+                continue;
+            };
+            let name = name.trim();
+            if name.eq_ignore_ascii_case("robots") || name.eq_ignore_ascii_case(bot) {
+                if let Some(value) = &meta.raw_value {
+                    sources.push(DirectiveSource {
+                        source: Source::HtmlMeta,
+                        bot: (!name.eq_ignore_ascii_case("robots")).then(|| name.to_owned()),
+                        value: value.clone(),
+                    });
+                } else {
+                    complete = false;
+                }
+            }
+        }
+    } else {
+        complete = false;
+    }
+    let state = if capture.state == "robots_blocked" {
+        ContentState::Blocked
+    } else if capture.state == "fetch_failed" {
+        ContentState::FetchFailed
+    } else if complete {
+        ContentState::Available
+    } else {
+        ContentState::Truncated
+    };
+    evaluate(bot, state, &sources)
+}
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+    #[test]
+    fn header_and_html_bots_are_distinct_and_partial_is_unknown() {
+        let mut capture = crate::collection_evidence::PageCapture::unavailable(
+            "https://example.com/",
+            "available",
+        );
+        capture.http = Some(crate::collection_evidence::http_occurrences(&[
+            ("x-robots-tag", "Googlebot: noindex, nofollow"),
+            ("x-robots-tag", "GPTBot: noindex"),
+        ]));
+        capture.html = Some(crate::collection_evidence::html_occurrences(
+            "<head><meta name='robots' content='index'><meta name='OAI-SearchBot' content='noindex'></head>",
+            true,
+        ));
+        assert_eq!(
+            evaluate_capture("Googlebot", &capture).index,
+            Decision::Restricted
+        );
+        assert_eq!(
+            evaluate_capture("GPTBot", &capture).follow,
+            Decision::Allowed
+        );
+        assert_eq!(
+            evaluate_capture("OAI-SearchBot", &capture).index,
+            Decision::Restricted
+        );
+        assert_eq!(
+            evaluate_capture("Bingbot", &capture).index,
+            Decision::Allowed
+        );
+        capture.html.as_mut().unwrap().complete = false;
+        assert_eq!(
+            evaluate_capture("Bingbot", &capture).index,
+            Decision::Unknown
+        );
+    }
+}

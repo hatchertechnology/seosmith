@@ -180,7 +180,7 @@ pub fn parse(source: &str, bytes: &[u8], max_bytes: usize, max_entries: usize) -
                         {
                             "valid"
                         } else {
-                            "invalid"
+                            "unrecognized"
                         }
                         .into(),
                         error,
@@ -236,7 +236,7 @@ mod tests {
         let compressed = encoder.finish().unwrap();
         let parsed = parse("https://example.com/map", &compressed, 1024, 10);
         assert_eq!(parsed.entries[0].error.as_deref(), Some("empty_location"));
-        assert_eq!(parsed.entries[0].lastmod_state, "invalid");
+        assert_eq!(parsed.entries[0].lastmod_state, "unrecognized");
         assert_eq!(parsed.entries[1].lastmod_state, "absent");
         assert_eq!(
             parse("x", &compressed, 4, 10).error.as_deref(),

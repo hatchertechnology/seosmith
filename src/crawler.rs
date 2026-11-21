@@ -15,6 +15,7 @@ use std::{
 use url::Url;
 struct Robots {
     body: String,
+    source: &'static str,
 }
 impl Robots {
     fn allowed(&self, url: &Url) -> bool {
@@ -31,14 +32,24 @@ fn origin(u: &Url) -> String {
 async fn robots(fetch: &impl Transport, u: &Url) -> Result<Robots> {
     let r = fetch.get(&u.join("/robots.txt")?).await?;
     match r.status {
-        200 => Ok(Robots {
-            body: String::from_utf8_lossy(&r.body).into_owned(),
-        }),
+        200 => {
+            let source = if std::str::from_utf8(&r.body).is_ok() {
+                "robots_txt"
+            } else {
+                "robots_encoding_lossy"
+            };
+            Ok(Robots {
+                body: String::from_utf8_lossy(&r.body).into_owned(),
+                source,
+            })
+        }
         404 | 410 => Ok(Robots {
             body: String::new(),
+            source: "not_found",
         }),
         401 | 403 => Ok(Robots {
             body: "User-agent: *\nDisallow: /".into(),
+            source: "http_denied_synthetic",
         }),
         _ => bail!("robots_unavailable"),
     }
@@ -117,7 +128,12 @@ async fn discover_sitemaps(
     let mut seen = HashSet::new();
     let mut complete = true;
     while let Some(u) = maps.pop() {
-        if !(Robots { body: body.into() }).allowed(&u) {
+        if !(Robots {
+            body: body.into(),
+            source: "robots_txt",
+        })
+        .allowed(&u)
+        {
             if collect {
                 store
                     .save_s02_s03_sitemap(
@@ -289,6 +305,32 @@ pub(crate) async fn crawl_with_local_s02_s03(
         } else {
             page.blocked_by_robots = true;
             sidecar.state = "robots_blocked".into();
+        }
+        if collect {
+            let policy = &policies[&origin(&u)];
+            sidecar.robots_source = policy.source.into();
+            if policy.body.len() <= 64 * 1024 {
+                sidecar.robots = [
+                    "Seosmith",
+                    "Googlebot",
+                    "Bingbot",
+                    "GPTBot",
+                    "OAI-SearchBot",
+                    "ChatGPT-User",
+                ]
+                .iter()
+                .map(|bot| crate::robots_evidence::evaluate(&policy.body, bot, &u))
+                .collect();
+            } else {
+                sidecar.robots_source = "policy_limit".into();
+            }
+            if policy.source != "robots_txt" {
+                for decision in &mut sidecar.robots {
+                    decision.matched_line = None;
+                    decision.rule = None;
+                    decision.provenance = policy.source.into();
+                }
+            }
         }
         page.is_resource = is_resource;
         let follow = !page

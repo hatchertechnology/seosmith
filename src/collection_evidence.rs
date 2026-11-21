@@ -150,6 +150,8 @@ pub struct PageCapture {
     pub version: String,
     pub url: String,
     pub state: String,
+    pub robots: Vec<crate::robots_evidence::RobotsDecision>,
+    pub robots_source: String,
     pub http: Option<Collection>,
     pub html: Option<Collection>,
 }
@@ -159,6 +161,8 @@ impl PageCapture {
             version: "s02-s03-local-1".into(),
             url: url.into(),
             state: reason.into(),
+            robots: vec![],
+            robots_source: "unavailable".into(),
             http: None,
             html: None,
         }
@@ -183,6 +187,8 @@ impl PageCapture {
             version: "s02-s03-local-1".into(),
             url: url.into(),
             state: "available".into(),
+            robots: vec![],
+            robots_source: "unavailable".into(),
             http,
             html,
         }

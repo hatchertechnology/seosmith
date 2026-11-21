@@ -20,4 +20,5 @@ pub mod policy_candidate;
 pub mod collection_evidence;
 pub mod index_evidence;
 pub mod integrity_evidence;
+pub mod robots_evidence;
 pub mod sitemap_evidence;
