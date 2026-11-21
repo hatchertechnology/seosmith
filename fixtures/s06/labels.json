@@ -19,7 +19,10 @@
         "content_type": "text/html",
         "availability": "available"
       },
-      "source_sha256": "7b9bdf3d56e73edef061a894cf80220cb2cc0911951c6325690702d1381b1bf3"
+      "source_sha256": "7b9bdf3d56e73edef061a894cf80220cb2cc0911951c6325690702d1381b1bf3",
+      "related_sha256": {
+        "product-blue.html": "bfabb00c9f6255613b6362693fb86ef007a2cd696ddb8d0282657367d945470d"
+      }
     },
     {
       "id": "useful-hours",
@@ -35,7 +38,8 @@
         "content_type": "text/html",
         "availability": "available"
       },
-      "source_sha256": "9578e123f04fd7b3e07ca4bd0c8c0ce8f424fe9f2cefde23f714319c4cfbd945"
+      "source_sha256": "9578e123f04fd7b3e07ca4bd0c8c0ce8f424fe9f2cefde23f714319c4cfbd945",
+      "related_sha256": {}
     },
     {
       "id": "useful-contact",
@@ -51,7 +55,8 @@
         "content_type": "text/html",
         "availability": "available"
       },
-      "source_sha256": "ff088a207c109a6c696cb17177b8155a52fdea2adf64cd98a97597d52c3031c5"
+      "source_sha256": "ff088a207c109a6c696cb17177b8155a52fdea2adf64cd98a97597d52c3031c5",
+      "related_sha256": {}
     },
     {
       "id": "error-with-success",
@@ -67,7 +72,8 @@
         "content_type": "text/html",
         "availability": "available"
       },
-      "source_sha256": "6286271f08729ca50f9ef35f7e2f0260616da03cf3f01785e296b1fad2af9f69"
+      "source_sha256": "6286271f08729ca50f9ef35f7e2f0260616da03cf3f01785e296b1fad2af9f69",
+      "related_sha256": {}
     },
     {
       "id": "real-not-found",
@@ -83,7 +89,8 @@
         "content_type": "text/html",
         "availability": "available"
       },
-      "source_sha256": "6286271f08729ca50f9ef35f7e2f0260616da03cf3f01785e296b1fad2af9f69"
+      "source_sha256": "6286271f08729ca50f9ef35f7e2f0260616da03cf3f01785e296b1fad2af9f69",
+      "related_sha256": {}
     },
     {
       "id": "error-phrase-guide",
@@ -99,7 +106,8 @@
         "content_type": "text/html",
         "availability": "available"
       },
-      "source_sha256": "fa47a4e732476ecf350bcb2e4cb6ddd143b7378a7c0df4053fd17873a3b4a8c0"
+      "source_sha256": "fa47a4e732476ecf350bcb2e4cb6ddd143b7378a7c0df4053fd17873a3b4a8c0",
+      "related_sha256": {}
     },
     {
       "id": "empty-shell",
@@ -115,7 +123,8 @@
         "content_type": "text/html",
         "availability": "available"
       },
-      "source_sha256": "f6750e756979267494bd801fd0e3175e11ae7f70acabd5e7de58dcf553fc7044"
+      "source_sha256": "f6750e756979267494bd801fd0e3175e11ae7f70acabd5e7de58dcf553fc7044",
+      "related_sha256": {}
     },
     {
       "id": "loading-shell",
@@ -131,7 +140,8 @@
         "content_type": "text/html",
         "availability": "available"
       },
-      "source_sha256": "c9acb75b48fc59ebe762ee0085637a66a8b8524b3567f7afbb1b6116ee9bbbf8"
+      "source_sha256": "c9acb75b48fc59ebe762ee0085637a66a8b8524b3567f7afbb1b6116ee9bbbf8",
+      "related_sha256": {}
     },
     {
       "id": "location-variants",
@@ -149,7 +159,10 @@
         "content_type": "text/html",
         "availability": "available"
       },
-      "source_sha256": "1fe60ddb07592152eed193ef78dce3dc8315018566b6cb3cc63e810ccd8f563f"
+      "source_sha256": "1fe60ddb07592152eed193ef78dce3dc8315018566b6cb3cc63e810ccd8f563f",
+      "related_sha256": {
+        "service-west.html": "44da9e65b14cccfea31a0c953e6bf8d316311409b34f4684f35ce504d5edf7ad"
+      }
     },
     {
       "id": "shared-template",
@@ -167,7 +180,10 @@
         "content_type": "text/html",
         "availability": "available"
       },
-      "source_sha256": "1fe60ddb07592152eed193ef78dce3dc8315018566b6cb3cc63e810ccd8f563f"
+      "source_sha256": "1fe60ddb07592152eed193ef78dce3dc8315018566b6cb3cc63e810ccd8f563f",
+      "related_sha256": {
+        "unique-service.html": "a3c9248ceeefae0adce0d18ce9fe3f3ff92df9c68e7a1eb2112c8a0d8d9840a7"
+      }
     },
     {
       "id": "exact-duplicate",
@@ -185,7 +201,10 @@
         "content_type": "text/html",
         "availability": "available"
       },
-      "source_sha256": "1fe60ddb07592152eed193ef78dce3dc8315018566b6cb3cc63e810ccd8f563f"
+      "source_sha256": "1fe60ddb07592152eed193ef78dce3dc8315018566b6cb3cc63e810ccd8f563f",
+      "related_sha256": {
+        "exact-copy.html": "1fe60ddb07592152eed193ef78dce3dc8315018566b6cb3cc63e810ccd8f563f"
+      }
     },
     {
       "id": "fetch-failed",
@@ -201,7 +220,8 @@
         "content_type": "text/html",
         "availability": "fetch_failed"
       },
-      "source_sha256": null
+      "source_sha256": null,
+      "related_sha256": {}
     },
     {
       "id": "robots-blocked",
@@ -217,7 +237,8 @@
         "content_type": "text/html",
         "availability": "robots_blocked"
       },
-      "source_sha256": null
+      "source_sha256": null,
+      "related_sha256": {}
     },
     {
       "id": "omitted-page",
@@ -233,7 +254,8 @@
         "content_type": "text/html",
         "availability": "not_collected"
       },
-      "source_sha256": null
+      "source_sha256": null,
+      "related_sha256": {}
     },
     {
       "id": "truncated-page",
@@ -249,7 +271,8 @@
         "content_type": "text/html",
         "availability": "extraction_truncated"
       },
-      "source_sha256": "6286271f08729ca50f9ef35f7e2f0260616da03cf3f01785e296b1fad2af9f69"
+      "source_sha256": "6286271f08729ca50f9ef35f7e2f0260616da03cf3f01785e296b1fad2af9f69",
+      "related_sha256": {}
     },
     {
       "id": "missing-status",
@@ -265,7 +288,8 @@
         "content_type": "text/html",
         "availability": "missing_status"
       },
-      "source_sha256": "6286271f08729ca50f9ef35f7e2f0260616da03cf3f01785e296b1fad2af9f69"
+      "source_sha256": "6286271f08729ca50f9ef35f7e2f0260616da03cf3f01785e296b1fad2af9f69",
+      "related_sha256": {}
     },
     {
       "id": "server-error",
@@ -281,7 +305,8 @@
         "content_type": "text/html",
         "availability": "http_error"
       },
-      "source_sha256": "6286271f08729ca50f9ef35f7e2f0260616da03cf3f01785e296b1fad2af9f69"
+      "source_sha256": "6286271f08729ca50f9ef35f7e2f0260616da03cf3f01785e296b1fad2af9f69",
+      "related_sha256": {}
     },
     {
       "id": "non-html",
@@ -297,7 +322,8 @@
         "content_type": "application/pdf",
         "availability": "non_html"
       },
-      "source_sha256": null
+      "source_sha256": null,
+      "related_sha256": {}
     },
     {
       "id": "unavailable-pair",
@@ -316,7 +342,8 @@
       "source_sha256": "1fe60ddb07592152eed193ef78dce3dc8315018566b6cb3cc63e810ccd8f563f",
       "unavailable_related": [
         "https://fixture.invalid/not-collected-peer"
-      ]
+      ],
+      "related_sha256": {}
     }
   ]
 }

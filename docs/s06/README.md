@@ -6,7 +6,7 @@ Scope is the live [S06 issue](https://github.com/hatchertechnology/seosmith/issu
 
 Like S15, `fixtures/s06/labels.json` retains synthetic `fixture.invalid` URLs, relative HTML files, a local version/semantics identifier, case families and nullable expected labels. S06 is separate from S15: its boolean means **candidate for human review**, not a missing-metadata finding, penalty, spam determination or production rule result. `false` means no candidate for this hand-authored example; it does not prove overall page quality. `null` means unknown, never a pass. `review_state` makes this distinction explicit. These fields are corpus annotations, not proposed wire fields or a contract freeze.
 
-Each case includes a rationale, modeled response status/content type/availability, a primary source SHA-256 and related retained HTML where applicable. These are modeled responses, not real HTTP captures. The committed bytes are authoritative; hashes identify them without replacing evidence. No JavaScript runs, no script asset is fetched and no rendering outcome is invented. Pair URLs are not canonicalized or conflated. `unavailable_related` explicitly records an uncollected comparison peer.
+Each case includes a rationale, modeled response status/content type/availability, a primary source SHA-256 and related retained HTML with SHA-256 hashes where applicable. These are modeled responses, not real HTTP captures. The committed bytes are authoritative; hashes identify them without replacing evidence. No JavaScript runs, no script asset is fetched and no rendering outcome is invented. Pair URLs are not canonicalized or conflated. `unavailable_related` explicitly records an uncollected comparison peer.
 
 | Cases | Review label and reason |
 | --- | --- |
@@ -32,7 +32,7 @@ python3 -m unittest discover -s tests/s06 -v
 python3 -m unittest discover -s tests/s15 -v
 ```
 
-The S06 checks verify corpus identity, retained bytes, duplicate/status controls and review/unknown boundaries. They do not run a classifier, extraction algorithm, wire validator or crawler, and cannot establish precision, recall or production readiness. S15's existing harness maps only metadata rules; do not feed S06 labels into it or count unmapped S06 observations as negatives. No new dependencies are required beyond Python's standard library.
+The S06 checks pin the full case and peer inventory, provenance, primary and related retained bytes, duplicate/status and shared-template controls, source-less cases and unavailable peers, and review/unknown boundaries. The existing Rust backend CI workflow runs this Python corpus suite on pushes and pull requests. They do not run a classifier, extraction algorithm, wire validator or crawler, and cannot establish precision, recall or production readiness. S15's existing harness maps only metadata rules; do not feed S06 labels into it or count unmapped S06 observations as negatives. No new dependencies are required beyond Python's standard library.
 
 ## Deferred implementation test design
 
