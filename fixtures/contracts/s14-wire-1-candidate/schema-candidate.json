@@ -1,0 +1,965 @@
+{
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 4
+    },
+    "engine_version": {
+      "type": "string"
+    },
+    "ruleset_version": {
+      "type": "string"
+    },
+    "request": {
+      "type": "object",
+      "properties": {
+        "request_id": {
+          "type": "string"
+        },
+        "website_id": {
+          "type": "string"
+        },
+        "binding_generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "$comment": "Structural range permits zero for unverified local/import scope, matching local checker; authenticated worker ingestion separately requires an independently verified positive current binding generation. This distinction is proposed pending agreement."
+        },
+        "url": {
+          "type": "string"
+        },
+        "max_pages": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20000
+        },
+        "max_resources": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 20000
+        },
+        "max_duration_seconds": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 7200
+        },
+        "delay_ms": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 60000
+        },
+        "check_external_links": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "request_id",
+        "website_id",
+        "binding_generation",
+        "url",
+        "max_pages",
+        "max_resources",
+        "max_duration_seconds",
+        "delay_ms",
+        "check_external_links"
+      ],
+      "additionalProperties": false
+    },
+    "started_at": {
+      "type": "string"
+    },
+    "finished_at": {
+      "type": "string"
+    },
+    "outcome": {
+      "type": "string"
+    },
+    "stop_reason": {
+      "type": "string"
+    },
+    "coverage_complete": {
+      "type": "boolean"
+    },
+    "pages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string"
+          },
+          "content_type": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "language": {
+            "type": "string"
+          },
+          "robots": {
+            "type": "string"
+          },
+          "body_hash": {
+            "type": "string"
+          },
+          "encoding": {
+            "type": "string"
+          },
+          "language_source": {
+            "type": "string"
+          },
+          "depth": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991,
+            "$comment": "Structural range permits zero for unverified local/import scope, matching local checker; authenticated worker ingestion separately requires an independently verified positive current binding generation. This distinction is proposed pending agreement."
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991,
+            "$comment": "Structural range permits zero for unverified local/import scope, matching local checker; authenticated worker ingestion separately requires an independently verified positive current binding generation. This distinction is proposed pending agreement."
+          },
+          "ttfb_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991,
+            "$comment": "Structural range permits zero for unverified local/import scope, matching local checker; authenticated worker ingestion separately requires an independently verified positive current binding generation. This distinction is proposed pending agreement."
+          },
+          "words": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991,
+            "$comment": "Structural range permits zero for unverified local/import scope, matching local checker; authenticated worker ingestion separately requires an independently verified positive current binding generation. This distinction is proposed pending agreement."
+          },
+          "dom_nodes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991,
+            "$comment": "Structural range permits zero for unverified local/import scope, matching local checker; authenticated worker ingestion separately requires an independently verified positive current binding generation. This distinction is proposed pending agreement."
+          },
+          "in_sitemap": {
+            "type": "boolean"
+          },
+          "blocked_by_robots": {
+            "type": "boolean"
+          },
+          "is_resource": {
+            "type": "boolean"
+          },
+          "extraction_truncated": {
+            "type": "boolean"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "canonical": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "header_canonical": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "redirect": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "refresh_target": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 65535
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "refresh_delay": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "headings": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "prefixItems": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991,
+                  "$comment": "Structural range permits zero for unverified local/import scope, matching local checker; authenticated worker ingestion separately requires an independently verified positive current binding generation. This distinction is proposed pending agreement."
+                },
+                {
+                  "type": "string"
+                }
+              ],
+              "items": false,
+              "minItems": 2,
+              "maxItems": 2
+            }
+          },
+          "links": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "url": {
+                  "type": "string"
+                },
+                "nofollow": {
+                  "type": "boolean"
+                },
+                "sponsored": {
+                  "type": "boolean"
+                },
+                "ugc": {
+                  "type": "boolean"
+                },
+                "rel": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "url",
+                "nofollow",
+                "sponsored",
+                "ugc",
+                "rel",
+                "text"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "images": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "url": {
+                  "type": "string"
+                },
+                "alt": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "width": {
+                  "type": "boolean"
+                },
+                "height": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "url",
+                "alt",
+                "width",
+                "height"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "alternates": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "language": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "language",
+                "url"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "relationships": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string"
+                },
+                "descriptor": {
+                  "type": "string"
+                },
+                "resource": {
+                  "type": "boolean"
+                },
+                "state": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "url",
+                "descriptor",
+                "resource",
+                "state"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "structured_data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "format": {
+                  "type": "string"
+                },
+                "data": {},
+                "error": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "format",
+                "data",
+                "error"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "flags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "open_graph": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "twitter": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "required": [
+          "url",
+          "content_type",
+          "title",
+          "description",
+          "language",
+          "robots",
+          "body_hash",
+          "encoding",
+          "language_source",
+          "depth",
+          "bytes",
+          "ttfb_ms",
+          "words",
+          "dom_nodes",
+          "in_sitemap",
+          "blocked_by_robots",
+          "is_resource",
+          "extraction_truncated",
+          "error",
+          "canonical",
+          "header_canonical",
+          "redirect",
+          "refresh_target",
+          "status",
+          "refresh_delay",
+          "headings",
+          "links",
+          "images",
+          "alternates",
+          "relationships",
+          "structured_data",
+          "flags",
+          "open_graph",
+          "twitter"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 40000
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "rule": {
+            "type": "string"
+          },
+          "severity": {
+            "enum": [
+              "critical",
+              "alert",
+              "warning"
+            ]
+          },
+          "url": {
+            "type": "string"
+          },
+          "evidence": {
+            "type": "string"
+          },
+          "evidence_items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "details": {}
+        },
+        "required": [
+          "key",
+          "rule",
+          "severity",
+          "url",
+          "evidence",
+          "evidence_items",
+          "details"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 400000
+    },
+    "policy_guidance": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "const": "s14-wire-1"
+        },
+        "config": {
+          "type": "object",
+          "properties": {
+            "title_min": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000
+            },
+            "title_max": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000
+            },
+            "description_min": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000
+            },
+            "description_max": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000
+            },
+            "words_min": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000
+            },
+            "links_max": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000
+            },
+            "require_indexable": {
+              "type": "boolean"
+            },
+            "forbid_redirects": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "title_min",
+            "title_max",
+            "description_min",
+            "description_max",
+            "words_min",
+            "links_max",
+            "require_indexable",
+            "forbid_redirects"
+          ],
+          "additionalProperties": false
+        },
+        "catalog": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "rule": {
+                "type": "string"
+              },
+              "version": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "applicability": {
+                "type": "string"
+              },
+              "explanation": {
+                "type": "string"
+              },
+              "evidence_schema": {
+                "type": "string"
+              },
+              "source": {
+                "type": "string"
+              },
+              "reviewed_at": {
+                "type": "string"
+              },
+              "confidence": {
+                "type": "string"
+              },
+              "fix_guidance": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "rule",
+              "version",
+              "kind",
+              "applicability",
+              "explanation",
+              "evidence_schema",
+              "source",
+              "reviewed_at",
+              "confidence",
+              "fix_guidance"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "candidate": {
+          "type": "object",
+          "properties": {
+            "policy_canonical_json": {
+              "type": "string"
+            },
+            "policy_digest": {
+              "type": "string"
+            },
+            "scope_digest": {
+              "type": "string"
+            },
+            "manifest_digest": {
+              "type": "string"
+            },
+            "observed_at": {
+              "type": "object",
+              "properties": {
+                "started_at": {
+                  "type": "string"
+                },
+                "finished_at": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "started_at",
+                "finished_at"
+              ],
+              "additionalProperties": false
+            },
+            "records": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "record_id": {
+                    "type": "string"
+                  },
+                  "category": {
+                    "type": "string"
+                  },
+                  "rule_id": {
+                    "type": "string"
+                  },
+                  "rule_version": {
+                    "type": "string"
+                  },
+                  "entity_id": {
+                    "type": "string"
+                  },
+                  "discriminator": {
+                    "type": "string"
+                  },
+                  "eligibility": {
+                    "type": "string"
+                  },
+                  "attempt": {
+                    "type": "string"
+                  },
+                  "outcome": {
+                    "type": "string"
+                  },
+                  "actual": {
+                    "type": "string"
+                  },
+                  "confidence": {
+                    "type": "string"
+                  },
+                  "interval_ref": {
+                    "type": "string"
+                  },
+                  "policy_ref": {
+                    "type": "string"
+                  },
+                  "source_locator": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "expected": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "reason": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "context_locator": {
+                    "type": "string"
+                  },
+                  "target_locator": {
+                    "type": "string"
+                  },
+                  "observed_fact": {
+                    "anyOf": [
+                      {
+                        "type": "boolean"
+                      },
+                      {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991,
+                        "$comment": "Structural range permits zero for unverified local/import scope, matching local checker; authenticated worker ingestion separately requires an independently verified positive current binding generation. This distinction is proposed pending agreement."
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "count": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991,
+                            "$comment": "Structural range permits zero for unverified local/import scope, matching local checker; authenticated worker ingestion separately requires an independently verified positive current binding generation. This distinction is proposed pending agreement."
+                          },
+                          "x_default_present": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "count",
+                          "x_default_present"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "record_id",
+                  "category",
+                  "rule_id",
+                  "rule_version",
+                  "entity_id",
+                  "discriminator",
+                  "eligibility",
+                  "attempt",
+                  "outcome",
+                  "actual",
+                  "confidence",
+                  "interval_ref",
+                  "policy_ref",
+                  "source_locator",
+                  "expected",
+                  "reason"
+                ],
+                "additionalProperties": false
+              },
+              "maxItems": 512
+            },
+            "coverage": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "category": {
+                    "type": "string"
+                  },
+                  "rule_id": {
+                    "type": "string"
+                  },
+                  "candidates": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991,
+                    "$comment": "Structural range permits zero for unverified local/import scope, matching local checker; authenticated worker ingestion separately requires an independently verified positive current binding generation. This distinction is proposed pending agreement."
+                  },
+                  "emitted": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991,
+                    "$comment": "Structural range permits zero for unverified local/import scope, matching local checker; authenticated worker ingestion separately requires an independently verified positive current binding generation. This distinction is proposed pending agreement."
+                  },
+                  "omitted": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991,
+                    "$comment": "Structural range permits zero for unverified local/import scope, matching local checker; authenticated worker ingestion separately requires an independently verified positive current binding generation. This distinction is proposed pending agreement."
+                  },
+                  "omission_reason": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "complete": {
+                    "type": "boolean"
+                  },
+                  "eligibility_counts": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991,
+                      "$comment": "Structural range permits zero for unverified local/import scope, matching local checker; authenticated worker ingestion separately requires an independently verified positive current binding generation. This distinction is proposed pending agreement."
+                    }
+                  },
+                  "attempt_counts": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991,
+                      "$comment": "Structural range permits zero for unverified local/import scope, matching local checker; authenticated worker ingestion separately requires an independently verified positive current binding generation. This distinction is proposed pending agreement."
+                    }
+                  },
+                  "outcomes": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991,
+                      "$comment": "Structural range permits zero for unverified local/import scope, matching local checker; authenticated worker ingestion separately requires an independently verified positive current binding generation. This distinction is proposed pending agreement."
+                    }
+                  },
+                  "unknown_reasons": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991,
+                      "$comment": "Structural range permits zero for unverified local/import scope, matching local checker; authenticated worker ingestion separately requires an independently verified positive current binding generation. This distinction is proposed pending agreement."
+                    }
+                  }
+                },
+                "required": [
+                  "category",
+                  "rule_id",
+                  "candidates",
+                  "emitted",
+                  "omitted",
+                  "omission_reason",
+                  "complete",
+                  "eligibility_counts",
+                  "attempt_counts",
+                  "outcomes",
+                  "unknown_reasons"
+                ],
+                "additionalProperties": false
+              },
+              "maxItems": 256
+            }
+          },
+          "required": [
+            "policy_canonical_json",
+            "policy_digest",
+            "scope_digest",
+            "manifest_digest",
+            "observed_at",
+            "records",
+            "coverage"
+          ],
+          "additionalProperties": false
+        },
+        "manifest": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "category": {
+                "type": "string"
+              },
+              "rule_id": {
+                "type": "string"
+              },
+              "rule_version": {
+                "type": "string"
+              },
+              "expected_pointer": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "candidates": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "category",
+              "rule_id",
+              "rule_version",
+              "expected_pointer",
+              "candidates"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 13,
+          "maxItems": 13
+        }
+      },
+      "required": [
+        "version",
+        "config",
+        "catalog",
+        "candidate",
+        "manifest"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "schema_version",
+    "engine_version",
+    "ruleset_version",
+    "request",
+    "started_at",
+    "finished_at",
+    "outcome",
+    "stop_reason",
+    "coverage_complete",
+    "pages",
+    "findings",
+    "policy_guidance"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:seosmith:s14-wire-1:candidate",
+  "title": "S14 wire structural schema — candidate, not frozen",
+  "$comment": "Structural approximation only: raw lexical, UTF-8 byte, scope, identity, tuple, coverage, registry, canonicalization and authorization invariants require independent validation. Review all required source fields before freeze."
+}
