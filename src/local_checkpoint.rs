@@ -5,6 +5,27 @@ use serde_json::{Value, json};
 use url::Url;
 
 const COLLECTOR_LIMIT: usize = 24 * 1024;
+const URL_COPY_LIMIT: usize = 8192;
+
+fn set_url_identity(value: &mut Value, url: &str) {
+    if url.len() <= URL_COPY_LIMIT {
+        value["url"] = json!(url);
+    } else {
+        value["url"] = Value::Null;
+        value["url_omission"] = json!("url_copy_byte_limit");
+        value["url_sha256"] = json!(crate::model::digest(url.as_bytes()));
+    }
+}
+pub(crate) fn url_identity_matches(value: &Value, url: &str) -> bool {
+    if url.len() <= URL_COPY_LIMIT {
+        value.get("url").and_then(Value::as_str) == Some(url)
+    } else {
+        value.get("url") == Some(&Value::Null)
+            && value.get("url_omission").and_then(Value::as_str) == Some("url_copy_byte_limit")
+            && value.get("url_sha256").and_then(Value::as_str)
+                == Some(crate::model::digest(url.as_bytes()).as_str())
+    }
+}
 
 #[derive(Serialize)]
 struct Observation {
@@ -77,8 +98,26 @@ pub(crate) fn capture(url: &Url, page: &Page, response: Option<&Response>) -> Va
             unavailable("resource", reason),
         )
     };
-    json!({"version": 1, "url": url.as_str(), "collectors": [html, graph, resource], "omissions": ["http_occurrences_raw_headers_unavailable", "robots_provenance_not_captured", "sitemap_not_captured", "content_detector_not_integrated"]})
+    let mut value = json!({"version": 1, "collectors": [html, graph, resource], "omissions": ["http_occurrences_raw_headers_unavailable", "robots_provenance_not_captured", "sitemap_not_captured", "content_detector_not_integrated"]});
+    set_url_identity(&mut value, url.as_str());
+    value
 }
 pub(crate) fn budget_omission(url: &str) -> Value {
-    json!({"version": 1, "url": url, "collectors": [unavailable("html_occurrences", "run_byte_limit"), unavailable("graph", "run_byte_limit"), unavailable("resource", "run_byte_limit")], "omissions": ["http_occurrences_raw_headers_unavailable", "robots_provenance_not_captured", "sitemap_not_captured", "content_detector_not_integrated"]})
+    let mut value = json!({"version": 1, "collectors": [unavailable("html_occurrences", "run_byte_limit"), unavailable("graph", "run_byte_limit"), unavailable("resource", "run_byte_limit")], "omissions": ["http_occurrences_raw_headers_unavailable", "robots_provenance_not_captured", "sitemap_not_captured", "content_detector_not_integrated"]});
+    set_url_identity(&mut value, url);
+    value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn long_url_budget_marker_is_bounded_and_bound_to_full_identity() {
+        let url = format!("https://example.test/{}", "x".repeat(100_000));
+        let marker = budget_omission(&url);
+        assert!(url_identity_matches(&marker, &url));
+        assert!(!url_identity_matches(&marker, &(url.clone() + "x")));
+        assert_eq!(marker["url_omission"], "url_copy_byte_limit");
+        assert!(serde_json::to_vec(&marker).unwrap().len() < 2048);
+    }
 }

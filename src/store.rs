@@ -286,11 +286,7 @@ impl Store {
             &serde_json::json!({"input_hash": input_hash, "capture": evidence}),
         )?;
         ensure!(
-            page.url.len() <= 8192,
-            "page URL exceeds local evidence limit"
-        );
-        ensure!(
-            evidence.get("url").and_then(serde_json::Value::as_str) == Some(page.url.as_str()),
+            crate::local_checkpoint::url_identity_matches(evidence, &page.url),
             "evidence URL mismatch"
         );
         let mut tx = self.0.begin_with("BEGIN IMMEDIATE").await?;

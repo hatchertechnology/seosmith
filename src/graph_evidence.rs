@@ -104,6 +104,9 @@ pub fn extract(url: &Url, html: &str, _status: u16) -> LocalPageEvidence {
             .filter(|s| !s.is_empty())
             .or_else(|| el.value().attr("alt").map(words).filter(|s| !s.is_empty()))
             .unwrap_or_else(|| text(el));
+        if name.chars().count() > 256 {
+            complete = false;
+        }
         links.push(LinkEvidence {
             raw_href: raw.chars().take(2048).collect(),
             resolved_url: target.to_string(),

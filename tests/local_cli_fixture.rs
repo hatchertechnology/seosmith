@@ -73,7 +73,7 @@ async fn policy_cli_fixtures_upgrade_and_reopen_without_delivery_changes() -> an
         ),
         (
             "https://fixture.invalid/",
-            serde_json::json!({"status":200,"headers":{"content-type":"text/html"},"body":"<html><head><meta name='robots' content='index'><link rel='canonical' href='/'></head><body><a href='/next'>Next</a><a href='/private'>Private</a></body></html>"}),
+            serde_json::json!({"status":200,"headers":{"content-type":"text/html"},"body":format!("<html><head><meta name='robots' content='index'><link rel='canonical' href='/'></head><body><a href='/next'>{}</a><a href='/private'>Private</a></body></html>", "n".repeat(300))}),
         ),
         (
             "https://fixture.invalid/next",
@@ -127,6 +127,15 @@ async fn policy_cli_fixtures_upgrade_and_reopen_without_delivery_changes() -> an
                 2
             );
             assert_eq!(value["capture"]["collectors"][1]["data"]["url"], url);
+            assert_eq!(value["capture"]["collectors"][1]["state"], "partial");
+            assert_eq!(
+                value["capture"]["collectors"][1]["reason"],
+                "source_or_extraction_incomplete"
+            );
+            assert_eq!(
+                value["capture"]["collectors"][1]["data"]["extraction_complete"],
+                false
+            );
         }
     }
     assert_eq!(store.view(&id).await?.unwrap().state, "local_only");
