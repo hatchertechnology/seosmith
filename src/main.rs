@@ -206,7 +206,7 @@ async fn main() -> Result<()> {
                 "database contains another queued job; use serve to drain it"
             );
             let mut report = if policy.is_some() {
-                crawler::crawl_local(&store, &job).await?
+                local_crawl(&store, &job).await?
             } else {
                 crawler::crawl(&store, &job).await?
             };
@@ -302,6 +302,48 @@ async fn process_jobs(
                 _ = stopped.changed() => return Ok(()),
             }
         }
+    }
+}
+
+// The optional fixture transport is compiled only for offline acceptance. It never
+// falls back to the network and is only consulted by the local policy-mode CLI.
+async fn local_crawl(store: &Store, request: &CrawlRequest) -> Result<seosmith::model::Report> {
+    #[cfg(feature = "local-cli-fixtures")]
+    if let Some(path) = std::env::var_os("SEOSMITH_LOCAL_FIXTURES") {
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)?
+            .take(1024 * 1024 + 1)
+            .read_to_end(&mut bytes)?;
+        ensure!(bytes.len() <= 1024 * 1024, "fixture file exceeds limit");
+        let fixtures: std::collections::BTreeMap<String, FixtureResponse> =
+            serde_json::from_slice(&bytes)?;
+        return crawler::crawl_local_with(store, request, &FixtureTransport(fixtures)).await;
+    }
+    crawler::crawl_local(store, request).await
+}
+
+#[cfg(feature = "local-cli-fixtures")]
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FixtureResponse {
+    status: u16,
+    #[serde(default)]
+    headers: std::collections::BTreeMap<String, String>,
+    body: String,
+}
+#[cfg(feature = "local-cli-fixtures")]
+struct FixtureTransport(std::collections::BTreeMap<String, FixtureResponse>);
+#[cfg(feature = "local-cli-fixtures")]
+impl seosmith::fetch::Transport for FixtureTransport {
+    #[allow(clippy::unused_async_trait_impl)] // Matches the production transport's async interface.
+    async fn get(&self, url: &url::Url) -> Result<seosmith::fetch::Response> {
+        let fixture = self.0.get(url.as_str()).context("fixture URL missing")?;
+        Ok(seosmith::fetch::Response {
+            status: fixture.status,
+            headers: fixture.headers.clone(),
+            body: fixture.body.as_bytes().to_vec(),
+            ttfb_ms: 0,
+        })
     }
 }
 
