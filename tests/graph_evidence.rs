@@ -310,3 +310,12 @@ fn graph_requires_a_fragment_free_seed() {
     assert_eq!(normalized[0].navigation_distance, Some(0));
     assert_eq!(normalized[1].navigation_distance, Some(1));
 }
+
+#[test]
+fn truncated_accessible_names_mark_extraction_partial() {
+    let exact = page("/", &format!("<a href='/a'>{}</a>", "é".repeat(256)));
+    assert!(exact.extraction_complete);
+    let long = page("/", &format!("<a href='/a'>{}</a>", "é".repeat(257)));
+    assert!(!long.extraction_complete);
+    assert_eq!(long.links[0].accessible_name.chars().count(), 256);
+}

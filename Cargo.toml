@@ -8,6 +8,8 @@ description = "Headless technical SEO audits with durable delivery to HTP"
 
 [features]
 policy-wire-prototype = []
+# Explicitly enabled only for offline CLI acceptance tests.
+local-cli-fixtures = []
 
 [dependencies]
 anyhow = "1"

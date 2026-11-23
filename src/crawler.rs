@@ -155,7 +155,28 @@ pub async fn crawl(store: &Store, r: &CrawlRequest) -> Result<Report> {
     crawl_with(store, r, &Fetcher::default()).await
 }
 pub async fn crawl_with(store: &Store, r: &CrawlRequest, fetch: &impl Transport) -> Result<Report> {
+    crawl_internal(store, r, fetch, false).await
+}
+pub async fn crawl_local(store: &Store, r: &CrawlRequest) -> Result<Report> {
+    crawl_local_with(store, r, &Fetcher::default()).await
+}
+pub async fn crawl_local_with(
+    store: &Store,
+    r: &CrawlRequest,
+    fetch: &impl Transport,
+) -> Result<Report> {
+    crawl_internal(store, r, fetch, true).await
+}
+async fn crawl_internal(
+    store: &Store,
+    r: &CrawlRequest,
+    fetch: &impl Transport,
+    local: bool,
+) -> Result<Report> {
     let id = r.request_id.to_string();
+    if local {
+        store.require_local_running(r).await?;
+    }
     let started_at = store.started(&id).await?;
     let started = Instant::now();
     let deadline = chrono::DateTime::parse_from_rfc3339(&started_at)?.timestamp()
@@ -207,10 +228,14 @@ pub async fn crawl_with(store: &Store, r: &CrawlRequest, fetch: &impl Transport)
             in_sitemap,
             ..Page::default()
         };
+        let mut local_response = None;
         if policies[&origin(&u)].allowed(&u) {
             tokio::time::sleep(Duration::from_millis(r.delay_ms)).await;
             match fetch.get(&u).await {
                 Ok(response) => {
+                    if local {
+                        local_response = Some(response.clone());
+                    }
                     if r.in_scope(&u) || is_resource {
                         page = parse::parse(&u, depth, in_sitemap, &response);
                     } else {
@@ -302,7 +327,12 @@ pub async fn crawl_with(store: &Store, r: &CrawlRequest, fetch: &impl Transport)
             }
         }
         // Checkpoint after discoveries: a crash can replay discovery without losing targets.
-        store.save_page(&id, &page).await?;
+        if local {
+            let evidence = crate::local_checkpoint::capture(&u, &page, local_response.as_ref());
+            store.checkpoint_local(&id, &page, &evidence).await?;
+        } else {
+            store.save_page(&id, &page).await?;
+        }
         if is_resource {
             resources += 1;
         } else {

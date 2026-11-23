@@ -608,3 +608,137 @@ async fn rejected_reports_do_not_exhaust_queue_or_expire() {
         .unwrap();
     assert!(store.submit(&request()).await.is_err());
 }
+
+#[tokio::test]
+async fn local_crawl_persists_typed_evidence_across_reopen_without_delivery() {
+    let (dir, store) = db().await;
+    let r = request();
+    let id = r.request_id.to_string();
+    store.submit_local(&r).await.unwrap();
+    store.claim_local(&id).await.unwrap().unwrap();
+    let fixture = Fixture {
+        calls: Arc::default(),
+    };
+    let report = crawler::crawl_local_with(&store, &r, &fixture)
+        .await
+        .unwrap();
+    assert_eq!(report.pages.len(), 4);
+    store.finish_local_only(&id).await.unwrap();
+    drop(store);
+    let store = Store::open(dir.path().join("test.sqlite").to_str().unwrap())
+        .await
+        .unwrap();
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT url,evidence FROM local_page_evidence WHERE job_id=? ORDER BY url")
+            .bind(&id)
+            .fetch_all(&store.0)
+            .await
+            .unwrap();
+    assert_eq!(rows.len(), 4);
+    for (url, value) in rows {
+        let value: serde_json::Value = serde_json::from_str(&value).unwrap();
+        assert_eq!(value["capture"]["url"], url);
+        assert_eq!(value["capture"]["collectors"].as_array().unwrap().len(), 3);
+        if url.ends_with("/private") {
+            assert_eq!(
+                value["capture"]["collectors"][0]["reason"],
+                "blocked_by_robots"
+            );
+        } else if url.ends_with('/') {
+            assert_eq!(value["capture"]["collectors"][0]["state"], "observed");
+            assert_eq!(value["capture"]["collectors"][1]["data"]["url"], url);
+        }
+    }
+    assert!(store.pending().await.unwrap().is_none());
+    assert!(store.report(&id).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn long_accepted_seed_is_checkpointed_with_bounded_url_copy() {
+    let (dir, store) = db().await;
+    let mut r = request();
+    r.url = Url::parse(&format!("https://example.com/{}", "x".repeat(10_000))).unwrap();
+    r.max_pages = 1;
+    r.max_resources = 0;
+    let id = r.request_id.to_string();
+    store.submit_local(&r).await.unwrap();
+    store.claim_local(&id).await.unwrap().unwrap();
+    let fixture = Fixture {
+        calls: Arc::default(),
+    };
+    let report = crawler::crawl_local_with(&store, &r, &fixture)
+        .await
+        .unwrap();
+    assert_eq!(report.pages[0].url, r.url.as_str());
+    store.finish_local_only(&id).await.unwrap();
+    drop(store);
+    let store = Store::open(dir.path().join("test.sqlite").to_str().unwrap())
+        .await
+        .unwrap();
+    let (url, raw): (String, String) =
+        sqlx::query_as("SELECT url,evidence FROM local_page_evidence WHERE job_id=?")
+            .bind(&id)
+            .fetch_one(&store.0)
+            .await
+            .unwrap();
+    assert_eq!(url, r.url.as_str());
+    let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert!(value["capture"]["url"].is_null());
+    assert_eq!(value["capture"]["url_omission"], "url_copy_byte_limit");
+    assert_eq!(
+        value["capture"]["url_sha256"],
+        seosmith::model::digest(url.as_bytes())
+    );
+    assert!(store.pending().await.unwrap().is_none());
+}
+
+struct LongDiscoveredFixture;
+impl Transport for LongDiscoveredFixture {
+    #[allow(clippy::unused_async_trait_impl)] // Mirrors the production transport.
+    async fn get(&self, u: &Url) -> anyhow::Result<Response> {
+        Ok(match u.path() {
+            "/robots.txt" => Response {
+                status: 200,
+                headers: BTreeMap::new(),
+                body: b"User-agent: *\nAllow: /".to_vec(),
+                ttfb_ms: 0,
+            },
+            "/sitemap.xml" => Response {
+                status: 404,
+                headers: BTreeMap::new(),
+                body: vec![],
+                ttfb_ms: 0,
+            },
+            "/" => response(&format!("<a href='/{}'>Long</a>", "x".repeat(10_000))),
+            _ => response("<html><body>Long target</body></html>"),
+        })
+    }
+}
+#[tokio::test]
+async fn long_discovered_url_is_checkpointed() {
+    let (_dir, store) = db().await;
+    let mut r = request();
+    r.max_pages = 2;
+    r.max_resources = 0;
+    let id = r.request_id.to_string();
+    store.submit_local(&r).await.unwrap();
+    store.claim_local(&id).await.unwrap().unwrap();
+    let report = crawler::crawl_local_with(&store, &r, &LongDiscoveredFixture)
+        .await
+        .unwrap();
+    assert_eq!(report.pages.len(), 2);
+    let target = report.pages.iter().find(|p| p.url.len() > 8192).unwrap();
+    let raw: String =
+        sqlx::query_scalar("SELECT evidence FROM local_page_evidence WHERE job_id=? AND url=?")
+            .bind(&id)
+            .bind(&target.url)
+            .fetch_one(&store.0)
+            .await
+            .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(value["capture"]["url_omission"], "url_copy_byte_limit");
+    assert_eq!(
+        value["capture"]["url_sha256"],
+        seosmith::model::digest(target.url.as_bytes())
+    );
+}

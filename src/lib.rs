@@ -31,3 +31,5 @@ pub mod graph_evidence;
 
 /// Experimental offline static resource observations.
 pub mod resource_evidence;
+
+mod local_checkpoint;
