@@ -921,7 +921,7 @@ mod capture_node_tests {
         let mut capture =
             crate::collection_evidence::PageCapture::unavailable(base.as_str(), "available");
         capture.html = Some(crate::collection_evidence::html_occurrences(
-            "<html><head><link rel='stylesheet' hreflang='fr' href='/style.css'><link rel='alternate' hreflang='fr' href='/b'></head><body><link rel='alternate' hreflang='de' href='/bad'></body></html>",
+            "<html><head><link rel='stylesheet' hreflang='fr' href='/style.css'><link rel='alternate' hreflang='fr' href='/b'><link rel='alternate' hreflang='es' href='https://outside.example/es'></head><body><link rel='alternate' hreflang='de' href='/bad'></body></html>",
             true,
         ));
         capture.http = Some(crate::collection_evidence::http_occurrences(&[
@@ -932,8 +932,13 @@ mod capture_node_tests {
             ("link", "</b>; rel=alternate; hreflang=fr"),
         ]));
         let node = node_from_capture(&capture, &base, &base).unwrap();
-        assert_eq!(node.alternates.len(), 5);
+        assert_eq!(node.alternates.len(), 6);
         assert!(!node.alternates_complete);
+        assert!(
+            node.alternates
+                .iter()
+                .any(|d| d.state == DeclarationState::OutsideScope)
+        );
         assert_eq!(
             node.alternates
                 .iter()
