@@ -96,7 +96,7 @@ spec:
       containers:
         - name: seosmith
           # The imported local image is pinned to its verified manifest digest.
-          image: localhost/seosmith@sha256:cb2a47997d459a5e4c4b0dd9a11f64bbc4e60f0bc9d231cbe8e039534bd835fd
+          image: localhost/seosmith@sha256:7073b6d33435d0a393dae26e6a25c34c4d2182f27870ef5372768d585a4822f1
           imagePullPolicy: Never
           securityContext:
             allowPrivilegeEscalation: false

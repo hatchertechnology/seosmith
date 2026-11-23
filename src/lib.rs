@@ -17,3 +17,6 @@ pub mod operations;
 pub mod policy_candidate;
 
 pub mod structured_validation;
+
+#[cfg(feature = "policy-wire-prototype")]
+pub mod policy_wire_prototype;

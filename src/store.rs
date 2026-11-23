@@ -57,34 +57,88 @@ impl Store {
                 .execute(&pool)
                 .await?;
         }
-        Ok(Self(pool))
+        let store = Self(pool);
+        store.ensure_execution_mode().await?;
+        Ok(store)
+    }
+    pub async fn ensure_execution_mode(&self) -> Result<()> {
+        let mut tx = self.0.begin_with("BEGIN IMMEDIATE").await?;
+        let job_columns = sqlx::query("PRAGMA table_info(jobs)")
+            .fetch_all(&mut *tx)
+            .await?;
+        if !job_columns
+            .iter()
+            .any(|r| r.get::<String, _>("name") == "execution_mode")
+        {
+            sqlx::query("ALTER TABLE jobs ADD COLUMN execution_mode TEXT")
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(())
     }
     pub async fn recover(&self) -> Result<()> {
-        sqlx::query("UPDATE jobs SET state='queued' WHERE state='running'")
-            .execute(&self.0)
-            .await?;
+        sqlx::query("UPDATE jobs SET state='failed',error='ambiguous_pre_mode_job' WHERE execution_mode IS NULL AND state IN ('queued','running')")
+            .execute(&self.0).await?;
+        sqlx::query(
+            "UPDATE jobs SET state='queued' WHERE state='running' AND execution_mode='standard'",
+        )
+        .execute(&self.0)
+        .await?;
+        sqlx::query(
+            "UPDATE jobs SET state='local_only' WHERE state IN ('local_queued','local_running')",
+        )
+        .execute(&self.0)
+        .await?;
         Ok(())
     }
     pub async fn submit(&self, r: &CrawlRequest) -> Result<bool> {
+        self.submit_mode(r, false).await
+    }
+    pub async fn submit_local(&self, r: &CrawlRequest) -> Result<bool> {
+        self.submit_mode(r, true).await
+    }
+    async fn submit_mode(&self, r: &CrawlRequest, local: bool) -> Result<bool> {
         r.validate()?;
         let id = r.request_id.to_string();
         let mut tx = self.0.begin_with("BEGIN IMMEDIATE").await?;
-        if let Some(old) = sqlx::query_scalar::<_, String>("SELECT request FROM jobs WHERE id=?")
-            .bind(&id)
-            .fetch_optional(&mut *tx)
-            .await?
+        if let Some((old, old_mode, old_report, old_delivery, old_hash)) = sqlx::query_as::<
+            _,
+            (
+                String,
+                Option<String>,
+                Option<String>,
+                String,
+                Option<String>,
+            ),
+        >(
+            "SELECT request,execution_mode,report,delivery_state,report_hash FROM jobs WHERE id=?",
+        )
+        .bind(&id)
+        .fetch_optional(&mut *tx)
+        .await?
         {
             ensure!(
                 serde_json::from_str::<CrawlRequest>(&old)? == *r,
                 "request_id conflict"
             );
+            ensure!(
+                !local
+                    && (old_mode.as_deref() == Some("standard")
+                        || (old_mode.is_none()
+                            && (old_report.is_some()
+                                || (old_delivery == "delivered" && old_hash.is_some())))),
+                "request_id belongs to another or unknown execution mode; use a new request ID"
+            );
             return Ok(false);
         }
-        let n:i64=sqlx::query_scalar("SELECT count(*) FROM jobs WHERE state IN ('queued','running') OR (report IS NOT NULL AND delivery_state NOT IN ('delivered','rejected'))").fetch_one(&mut *tx).await?;
+        let n:i64=sqlx::query_scalar("SELECT count(*) FROM jobs WHERE state IN ('queued','running','local_queued','local_running') OR (report IS NOT NULL AND delivery_state NOT IN ('delivered','rejected'))").fetch_one(&mut *tx).await?;
         ensure!(n < 100, "queue full");
-        sqlx::query("INSERT INTO jobs(id,request) VALUES(?,?)")
+        sqlx::query("INSERT INTO jobs(id,request,state,execution_mode) VALUES(?,?,?,?)")
             .bind(&id)
             .bind(serde_json::to_string(r)?)
+            .bind(if local { "local_queued" } else { "queued" })
+            .bind(if local { "local" } else { "standard" })
             .execute(&mut *tx)
             .await?;
         sqlx::query("INSERT INTO frontier(job_id,url,depth,in_sitemap) VALUES(?,?,0,0)")
@@ -96,7 +150,16 @@ impl Store {
         Ok(true)
     }
     pub async fn claim(&self) -> Result<Option<CrawlRequest>> {
-        let value:Option<String>=sqlx::query_scalar("UPDATE jobs SET state='running', started_at=coalesce(started_at,strftime('%Y-%m-%dT%H:%M:%fZ','now')) WHERE id=(SELECT id FROM jobs WHERE state='queued' ORDER BY created,id LIMIT 1) RETURNING request").fetch_optional(&self.0).await?;
+        let value:Option<String>=sqlx::query_scalar("UPDATE jobs SET state='running', started_at=coalesce(started_at,strftime('%Y-%m-%dT%H:%M:%fZ','now')) WHERE id=(SELECT id FROM jobs WHERE state='queued' AND execution_mode='standard' ORDER BY created,id LIMIT 1) RETURNING request").fetch_optional(&self.0).await?;
+        value
+            .map(|v| serde_json::from_str(&v).map_err(Into::into))
+            .transpose()
+    }
+    pub async fn claim_local(&self, id: &str) -> Result<Option<CrawlRequest>> {
+        let value: Option<String> = sqlx::query_scalar("UPDATE jobs SET state='local_running', started_at=coalesce(started_at,strftime('%Y-%m-%dT%H:%M:%fZ','now')) WHERE id=? AND state='local_queued' AND execution_mode='local' RETURNING request")
+            .bind(id)
+            .fetch_optional(&self.0)
+            .await?;
         value
             .map(|v| serde_json::from_str(&v).map_err(Into::into))
             .transpose()
@@ -214,31 +277,43 @@ impl Store {
     }
     pub async fn finish(&self, r: &Report) -> Result<()> {
         ensure!(
-            r.schema_version != 3,
-            "schema 3 local output cannot be persisted for delivery"
+            matches!(r.schema_version, 1 | 2),
+            "unsupported or local-only schema cannot be persisted for delivery"
+        );
+        let mode: Option<String> = sqlx::query_scalar("SELECT execution_mode FROM jobs WHERE id=?")
+            .bind(r.request.request_id.to_string())
+            .fetch_optional(&self.0)
+            .await?
+            .flatten();
+        ensure!(
+            mode.as_deref() == Some("standard"),
+            "local or ambiguous job cannot be persisted for delivery"
         );
         let body = serde_json::to_string(r)?;
         if body.len() > 16 * 1024 * 1024 {
             return Err(ReportTooLarge.into());
         }
-        sqlx::query("UPDATE jobs SET report=?,report_hash=?,state=? WHERE id=?")
+        let updated = sqlx::query("UPDATE jobs SET report=?,report_hash=?,state=? WHERE id=? AND state='running' AND execution_mode='standard' AND report IS NULL")
             .bind(&body)
             .bind(digest(body.as_bytes()))
             .bind(&r.outcome)
             .bind(r.request.request_id.to_string())
             .execute(&self.0)
-            .await?;
+            .await?.rows_affected();
+        ensure!(updated == 1, "job is not running or already finalized");
         Ok(())
     }
     pub async fn finish_local_only(&self, id: &str) -> Result<()> {
-        sqlx::query("UPDATE jobs SET state='local_only',error=NULL WHERE id=? AND state='running'")
-            .bind(id)
-            .execute(&self.0)
-            .await?;
+        sqlx::query(
+            "UPDATE jobs SET state='local_only',error=NULL WHERE id=? AND state='local_running'",
+        )
+        .bind(id)
+        .execute(&self.0)
+        .await?;
         Ok(())
     }
     pub async fn fail(&self, id: &str) -> Result<()> {
-        sqlx::query("UPDATE jobs SET state='failed',error='crawl_internal_error' WHERE id=? AND state='running'").bind(id).execute(&self.0).await?;
+        sqlx::query("UPDATE jobs SET state='failed',error='crawl_internal_error' WHERE id=? AND state IN ('running','local_running')").bind(id).execute(&self.0).await?;
         Ok(())
     }
     pub async fn view(&self, id: &str) -> Result<Option<JobView>> {
@@ -267,7 +342,7 @@ impl Store {
         )
     }
     pub async fn pending(&self) -> Result<Option<(String, String, String, i64)>> {
-        let row=sqlx::query("SELECT id,report,report_hash,attempts FROM jobs WHERE report IS NOT NULL AND delivery_state='pending' AND next_attempt<=unixepoch() ORDER BY created LIMIT 1").fetch_optional(&self.0).await?;
+        let row=sqlx::query("SELECT id,report,report_hash,attempts FROM jobs WHERE report IS NOT NULL AND (execution_mode='standard' OR execution_mode IS NULL) AND delivery_state='pending' AND next_attempt<=unixepoch() ORDER BY created LIMIT 1").fetch_optional(&self.0).await?;
         row.map(|r| {
             Ok((
                 r.try_get("id")?,

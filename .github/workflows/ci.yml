@@ -13,5 +13,7 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked --all-targets
+      - name: Check S06 local fixture corpus
+        run: python3 -m unittest discover -s tests/s06 -v
       - run: sh scripts/s15/check.sh
       - run: docker build -t seosmith:ci .

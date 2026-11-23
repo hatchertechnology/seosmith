@@ -122,10 +122,9 @@ fn collect_ids<'a>(v: &'a Value, path: &str, base: &Url, ids: &mut IdIndex<'a>) 
                 .or_else(|| m.get("id"))
                 .and_then(Value::as_str)
                 .filter(|_| !is_reference(v))
+                && let Ok(u) = base.join(id)
             {
-                if let Ok(u) = base.join(id) {
-                    ids.entry(u.to_string()).or_default().push((v, path.into()));
-                }
+                ids.entry(u.to_string()).or_default().push((v, path.into()));
             }
             for (key, child) in m {
                 collect_ids(child, &format!("{path}/{}", escape(key)), base, ids);
@@ -257,398 +256,395 @@ fn check_item(v: &Value, path: &str, base: &Url, ids: &IdIndex<'_>, out: &mut Ve
                 }
             }
         }
-        if matches!(t, "Article" | "NewsArticle" | "BlogPosting") {
-            if let Some(authors) = p.get("author") {
-                for (i, author) in values(authors).iter().enumerate() {
-                    let source_path = format!(
-                        "{prefix}/author{}",
-                        if authors.is_array() {
-                            format!("/{i}")
-                        } else {
-                            String::new()
-                        }
+        if matches!(t, "Article" | "NewsArticle" | "BlogPosting")
+            && let Some(authors) = p.get("author")
+        {
+            for (i, author) in values(authors).iter().enumerate() {
+                let source_path = format!(
+                    "{prefix}/author{}",
+                    if authors.is_array() {
+                        format!("/{i}")
+                    } else {
+                        String::new()
+                    }
+                );
+                let resolved = if is_reference(author) {
+                    unique_reference(author, base, ids)
+                } else {
+                    None
+                };
+                let (author, author_path) = if let Some((target, target_path)) = resolved {
+                    add(
+                        out,
+                        "coverage",
+                        "local_author_resolved",
+                        source_path.clone(),
+                        Some(author),
+                        "Unique local author reference resolved to a retained definition",
                     );
-                    let resolved = if is_reference(author) {
-                        unique_reference(author, base, ids)
-                    } else {
-                        None
-                    };
-                    let (author, author_path) = if let Some((target, target_path)) = resolved {
+                    (target, target_path.to_string())
+                } else {
+                    (*author, source_path)
+                };
+                if is_reference(author) {
+                    add(
+                        out,
+                        "coverage",
+                        "author_not_expanded",
+                        author_path,
+                        Some(author),
+                        "Author reference could not be uniquely resolved",
+                    );
+                } else if author.is_object() {
+                    let author_types = types(author);
+                    if !author_types.is_empty()
+                        && !author_types
+                            .iter()
+                            .any(|t| matches!(*t, "Person" | "Organization"))
+                    {
                         add(
                             out,
-                            "coverage",
-                            "local_author_resolved",
-                            source_path.clone(),
+                            "vocabulary",
+                            "author_type_candidate",
+                            author_path.clone(),
                             Some(author),
-                            "Unique local author reference resolved to a retained definition",
+                            "Article author should be a Person or Organization; custom types may need review",
                         );
-                        (target, target_path.to_string())
-                    } else {
-                        (*author, source_path)
-                    };
-                    if is_reference(author) {
+                    }
+                    if !props(author).get("name").is_some_and(present) {
                         add(
                             out,
-                            "coverage",
-                            "author_not_expanded",
-                            author_path,
-                            Some(author),
-                            "Author reference could not be uniquely resolved",
+                            "provider_eligibility",
+                            "missing_recommended_author_name",
+                            format!(
+                                "{author_path}{}/name",
+                                if author.get("properties").is_some() {
+                                    "/properties"
+                                } else {
+                                    ""
+                                }
+                            ),
+                            None,
+                            "Author name is recommended where applicable",
                         );
-                    } else if author.is_object() {
-                        let author_types = types(author);
-                        if !author_types.is_empty()
-                            && !author_types
-                                .iter()
-                                .any(|t| matches!(*t, "Person" | "Organization"))
-                        {
-                            add(
-                                out,
-                                "vocabulary",
-                                "author_type_candidate",
-                                author_path.clone(),
-                                Some(author),
-                                "Article author should be a Person or Organization; custom types may need review",
-                            );
+                    }
+                } else {
+                    add(
+                        out,
+                        "vocabulary",
+                        "author_type_candidate",
+                        author_path,
+                        Some(author),
+                        "Article author should be a Person or Organization",
+                    );
+                }
+            }
+        }
+        if t == "Product"
+            && let Some(offers) = p.get("offers")
+        {
+            for (i, offer) in values(offers).iter().enumerate() {
+                let offer_path = format!(
+                    "{prefix}/offers{}",
+                    if offers.is_array() {
+                        format!("/{i}")
+                    } else {
+                        String::new()
+                    }
+                );
+                let resolved = if is_reference(offer) {
+                    unique_reference(offer, base, ids)
+                } else {
+                    None
+                };
+                let (offer, offer_path) = if let Some((target, target_path)) = resolved {
+                    add(
+                        out,
+                        "coverage",
+                        "local_offer_resolved",
+                        offer_path.clone(),
+                        Some(offer),
+                        "Unique local reference resolved to a retained definition; target property paths point to that definition",
+                    );
+                    (target, target_path.to_string())
+                } else {
+                    (*offer, offer_path)
+                };
+                if is_reference(offer) {
+                    add(
+                        out,
+                        "coverage",
+                        "referenced_offer_not_expanded",
+                        offer_path,
+                        Some(offer),
+                        "Offer reference requires graph expansion before its properties can be assessed",
+                    );
+                } else if offer.is_object() {
+                    let op = props(offer);
+                    let opath = if offer.get("properties").is_some() {
+                        format!("{offer_path}/properties")
+                    } else {
+                        offer_path.clone()
+                    };
+                    for field in ["price", "lowPrice", "priceCurrency"] {
+                        if let Some(raw) = op.get(field) {
+                            for (j, value) in values(raw).iter().enumerate() {
+                                let valid = if field == "priceCurrency" {
+                                    value.as_str().is_some_and(|s| {
+                                        s.len() == 3 && s.bytes().all(|b| b.is_ascii_uppercase())
+                                    })
+                                } else {
+                                    value.as_f64().is_some_and(|n| n >= 0.0)
+                                        || value.as_str().is_some_and(|s| {
+                                            s.parse::<f64>()
+                                                .is_ok_and(|n| n.is_finite() && n >= 0.0)
+                                        })
+                                };
+                                if !valid {
+                                    add(
+                                        out,
+                                        "vocabulary",
+                                        "invalid_offer_value",
+                                        format!(
+                                            "{opath}/{field}{}",
+                                            if raw.is_array() {
+                                                format!("/{j}")
+                                            } else {
+                                                String::new()
+                                            }
+                                        ),
+                                        Some(value),
+                                        "Expected a nonnegative numeric price or an uppercase three-letter currency code",
+                                    );
+                                }
+                            }
                         }
-                        if !props(author).get("name").is_some_and(present) {
+                    }
+                    let offer_types = types(offer);
+                    if offer_types.contains(&"AggregateOffer") {
+                        for field in ["lowPrice", "priceCurrency"] {
+                            if !op.get(field).is_some_and(present) {
+                                add(
+                                    out,
+                                    "provider_eligibility",
+                                    "missing_aggregate_offer_property",
+                                    format!("{opath}/{field}"),
+                                    None,
+                                    "AggregateOffer property is absent from the observed item",
+                                );
+                            }
+                        }
+                    } else if offer_types.contains(&"Offer") {
+                        let mut has_price = op.get("price").is_some_and(present);
+                        let mut unknown = false;
+                        if let Some(specifications) = op.get("priceSpecification") {
+                            for (i, specification) in values(specifications).iter().enumerate() {
+                                let path = format!(
+                                    "{opath}/priceSpecification{}",
+                                    if specifications.is_array() {
+                                        format!("/{i}")
+                                    } else {
+                                        String::new()
+                                    }
+                                );
+                                let resolved = if is_reference(specification) {
+                                    unique_reference(specification, base, ids)
+                                } else {
+                                    None
+                                };
+                                let (specification, target_path) = if let Some((
+                                    target,
+                                    target_path,
+                                )) = resolved
+                                {
+                                    add(
+                                        out,
+                                        "coverage",
+                                        "local_price_specification_resolved",
+                                        path.clone(),
+                                        Some(specification),
+                                        "Unique local price specification resolved to a retained definition",
+                                    );
+                                    (target, target_path.to_string())
+                                } else {
+                                    (*specification, path)
+                                };
+                                if is_reference(specification) {
+                                    unknown = true;
+                                    add(
+                                        out,
+                                        "coverage",
+                                        "price_specification_not_expanded",
+                                        target_path,
+                                        Some(specification),
+                                        "Referenced price specification could not be uniquely resolved",
+                                    );
+                                } else if props(specification).get("price").is_some_and(present) {
+                                    has_price = true;
+                                }
+                            }
+                        }
+                        if !has_price && !unknown {
                             add(
                                 out,
                                 "provider_eligibility",
-                                "missing_recommended_author_name",
+                                "missing_offer_price",
+                                format!("{opath}/price"),
+                                None,
+                                "Offer price or priceSpecification.price was not observed",
+                            );
+                        }
+                    } else {
+                        add(
+                            out,
+                            "coverage",
+                            "offer_type_unknown",
+                            offer_path,
+                            Some(offer),
+                            "Offer type is not recognized; required properties were not assessed",
+                        );
+                    }
+                } else {
+                    add(
+                        out,
+                        "vocabulary",
+                        "unexpected_value_type",
+                        offer_path,
+                        Some(offer),
+                        "Expected an Offer, AggregateOffer or reference",
+                    );
+                }
+            }
+        }
+        if matches!(t, "LocalBusiness" | "Restaurant" | "Store" | "Pharmacy")
+            && let Some(address) = p.get("address")
+        {
+            for (i, entry) in values(address).iter().enumerate() {
+                let location = format!(
+                    "{prefix}/address{}",
+                    if address.is_array() {
+                        format!("/{i}")
+                    } else {
+                        String::new()
+                    }
+                );
+                let resolved = if is_reference(entry) {
+                    unique_reference(entry, base, ids)
+                } else {
+                    None
+                };
+                let (entry, location) = if let Some((target, target_path)) = resolved {
+                    add(
+                        out,
+                        "coverage",
+                        "local_address_resolved",
+                        location.clone(),
+                        Some(entry),
+                        "Unique local address reference resolved to a retained definition",
+                    );
+                    (target, target_path.to_string())
+                } else {
+                    (*entry, location)
+                };
+                if is_reference(entry) {
+                    add(
+                        out,
+                        "coverage",
+                        "address_not_expanded",
+                        location,
+                        Some(entry),
+                        "Referenced address could not be uniquely resolved",
+                    );
+                } else if !entry.is_object() {
+                    add(
+                        out,
+                        "vocabulary",
+                        "address_type_candidate",
+                        location,
+                        Some(entry),
+                        "LocalBusiness provider profile expects PostalAddress; context expansion is unavailable",
+                    );
+                }
+            }
+        }
+        if t == "BreadcrumbList"
+            && let Some(elements) = p.get("itemListElement")
+        {
+            for (i, item) in values(elements).iter().enumerate() {
+                let item_path = format!(
+                    "{prefix}/itemListElement{}",
+                    if elements.is_array() {
+                        format!("/{i}")
+                    } else {
+                        String::new()
+                    }
+                );
+                if let Some(position) = props(item).get("position") {
+                    for (j, value) in values(position).iter().enumerate() {
+                        let valid = value.as_u64().is_some_and(|n| n > 0)
+                            || value
+                                .as_str()
+                                .is_some_and(|s| s.parse::<u64>().is_ok_and(|n| n > 0));
+                        if !valid {
+                            let position_path = format!(
+                                "{item_path}{}/position{}",
+                                if item.get("properties").is_some() {
+                                    "/properties"
+                                } else {
+                                    ""
+                                },
+                                if position.is_array() {
+                                    format!("/{j}")
+                                } else {
+                                    String::new()
+                                }
+                            );
+                            add(
+                                out,
+                                "vocabulary",
+                                "invalid_breadcrumb_position",
+                                position_path,
+                                Some(value),
+                                "Expected a positive integer position",
+                            );
+                        }
+                    }
+                }
+                if item.is_object() && !is_reference(item) {
+                    for field in ["position", "name"] {
+                        if !(props(item).get(field).is_some_and(present)
+                            || field == "name"
+                                && props(item)
+                                    .get("item")
+                                    .and_then(|v| v.get("name"))
+                                    .is_some_and(present))
+                        {
+                            add(
+                                out,
+                                "provider_eligibility",
+                                "missing_breadcrumb_property",
                                 format!(
-                                    "{author_path}{}/name",
-                                    if author.get("properties").is_some() {
+                                    "{item_path}{}/{field}",
+                                    if item.get("properties").is_some() {
                                         "/properties"
                                     } else {
                                         ""
                                     }
                                 ),
                                 None,
-                                "Author name is recommended where applicable",
+                                "Breadcrumb ListItem property is absent; reference and context resolution are limited",
                             );
                         }
-                    } else {
-                        add(
-                            out,
-                            "vocabulary",
-                            "author_type_candidate",
-                            author_path,
-                            Some(author),
-                            "Article author should be a Person or Organization",
-                        );
                     }
-                }
-            }
-        }
-        if t == "Product" {
-            if let Some(offers) = p.get("offers") {
-                for (i, offer) in values(offers).iter().enumerate() {
-                    let offer_path = format!(
-                        "{prefix}/offers{}",
-                        if offers.is_array() {
-                            format!("/{i}")
-                        } else {
-                            String::new()
-                        }
+                } else if !item.is_object() {
+                    add(
+                        out,
+                        "vocabulary",
+                        "unexpected_value_type",
+                        item_path,
+                        Some(item),
+                        "Expected a ListItem or reference",
                     );
-                    let resolved = if is_reference(offer) {
-                        unique_reference(offer, base, ids)
-                    } else {
-                        None
-                    };
-                    let (offer, offer_path) = if let Some((target, target_path)) = resolved {
-                        add(
-                            out,
-                            "coverage",
-                            "local_offer_resolved",
-                            offer_path.clone(),
-                            Some(offer),
-                            "Unique local reference resolved to a retained definition; target property paths point to that definition",
-                        );
-                        (target, target_path.to_string())
-                    } else {
-                        (*offer, offer_path)
-                    };
-                    if is_reference(offer) {
-                        add(
-                            out,
-                            "coverage",
-                            "referenced_offer_not_expanded",
-                            offer_path,
-                            Some(offer),
-                            "Offer reference requires graph expansion before its properties can be assessed",
-                        );
-                    } else if offer.is_object() {
-                        let op = props(offer);
-                        let opath = if offer.get("properties").is_some() {
-                            format!("{offer_path}/properties")
-                        } else {
-                            offer_path.clone()
-                        };
-                        for field in ["price", "lowPrice", "priceCurrency"] {
-                            if let Some(raw) = op.get(field) {
-                                for (j, value) in values(raw).iter().enumerate() {
-                                    let valid = if field == "priceCurrency" {
-                                        value.as_str().is_some_and(|s| {
-                                            s.len() == 3
-                                                && s.bytes().all(|b| b.is_ascii_uppercase())
-                                        })
-                                    } else {
-                                        value.as_f64().is_some_and(|n| n >= 0.0)
-                                            || value.as_str().is_some_and(|s| {
-                                                s.parse::<f64>()
-                                                    .is_ok_and(|n| n.is_finite() && n >= 0.0)
-                                            })
-                                    };
-                                    if !valid {
-                                        add(
-                                            out,
-                                            "vocabulary",
-                                            "invalid_offer_value",
-                                            format!(
-                                                "{opath}/{field}{}",
-                                                if raw.is_array() {
-                                                    format!("/{j}")
-                                                } else {
-                                                    String::new()
-                                                }
-                                            ),
-                                            Some(value),
-                                            "Expected a nonnegative numeric price or an uppercase three-letter currency code",
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        let offer_types = types(offer);
-                        if offer_types.contains(&"AggregateOffer") {
-                            for field in ["lowPrice", "priceCurrency"] {
-                                if !op.get(field).is_some_and(present) {
-                                    add(
-                                        out,
-                                        "provider_eligibility",
-                                        "missing_aggregate_offer_property",
-                                        format!("{opath}/{field}"),
-                                        None,
-                                        "AggregateOffer property is absent from the observed item",
-                                    );
-                                }
-                            }
-                        } else if offer_types.contains(&"Offer") {
-                            let mut has_price = op.get("price").is_some_and(present);
-                            let mut unknown = false;
-                            if let Some(specifications) = op.get("priceSpecification") {
-                                for (i, specification) in values(specifications).iter().enumerate()
-                                {
-                                    let path = format!(
-                                        "{opath}/priceSpecification{}",
-                                        if specifications.is_array() {
-                                            format!("/{i}")
-                                        } else {
-                                            String::new()
-                                        }
-                                    );
-                                    let resolved = if is_reference(specification) {
-                                        unique_reference(specification, base, ids)
-                                    } else {
-                                        None
-                                    };
-                                    let (specification, target_path) = if let Some((
-                                        target,
-                                        target_path,
-                                    )) = resolved
-                                    {
-                                        add(
-                                            out,
-                                            "coverage",
-                                            "local_price_specification_resolved",
-                                            path.clone(),
-                                            Some(specification),
-                                            "Unique local price specification resolved to a retained definition",
-                                        );
-                                        (target, target_path.to_string())
-                                    } else {
-                                        (*specification, path)
-                                    };
-                                    if is_reference(specification) {
-                                        unknown = true;
-                                        add(
-                                            out,
-                                            "coverage",
-                                            "price_specification_not_expanded",
-                                            target_path,
-                                            Some(specification),
-                                            "Referenced price specification could not be uniquely resolved",
-                                        );
-                                    } else if props(specification).get("price").is_some_and(present)
-                                    {
-                                        has_price = true;
-                                    }
-                                }
-                            }
-                            if !has_price && !unknown {
-                                add(
-                                    out,
-                                    "provider_eligibility",
-                                    "missing_offer_price",
-                                    format!("{opath}/price"),
-                                    None,
-                                    "Offer price or priceSpecification.price was not observed",
-                                );
-                            }
-                        } else {
-                            add(
-                                out,
-                                "coverage",
-                                "offer_type_unknown",
-                                offer_path,
-                                Some(offer),
-                                "Offer type is not recognized; required properties were not assessed",
-                            );
-                        }
-                    } else {
-                        add(
-                            out,
-                            "vocabulary",
-                            "unexpected_value_type",
-                            offer_path,
-                            Some(offer),
-                            "Expected an Offer, AggregateOffer or reference",
-                        );
-                    }
-                }
-            }
-        }
-        if matches!(t, "LocalBusiness" | "Restaurant" | "Store" | "Pharmacy") {
-            if let Some(address) = p.get("address") {
-                for (i, entry) in values(address).iter().enumerate() {
-                    let location = format!(
-                        "{prefix}/address{}",
-                        if address.is_array() {
-                            format!("/{i}")
-                        } else {
-                            String::new()
-                        }
-                    );
-                    let resolved = if is_reference(entry) {
-                        unique_reference(entry, base, ids)
-                    } else {
-                        None
-                    };
-                    let (entry, location) = if let Some((target, target_path)) = resolved {
-                        add(
-                            out,
-                            "coverage",
-                            "local_address_resolved",
-                            location.clone(),
-                            Some(entry),
-                            "Unique local address reference resolved to a retained definition",
-                        );
-                        (target, target_path.to_string())
-                    } else {
-                        (*entry, location)
-                    };
-                    if is_reference(entry) {
-                        add(
-                            out,
-                            "coverage",
-                            "address_not_expanded",
-                            location,
-                            Some(entry),
-                            "Referenced address could not be uniquely resolved",
-                        );
-                    } else if !entry.is_object() {
-                        add(
-                            out,
-                            "vocabulary",
-                            "address_type_candidate",
-                            location,
-                            Some(entry),
-                            "LocalBusiness provider profile expects PostalAddress; context expansion is unavailable",
-                        );
-                    }
-                }
-            }
-        }
-        if t == "BreadcrumbList" {
-            if let Some(elements) = p.get("itemListElement") {
-                for (i, item) in values(elements).iter().enumerate() {
-                    let item_path = format!(
-                        "{prefix}/itemListElement{}",
-                        if elements.is_array() {
-                            format!("/{i}")
-                        } else {
-                            String::new()
-                        }
-                    );
-                    if let Some(position) = props(item).get("position") {
-                        for (j, value) in values(position).iter().enumerate() {
-                            let valid = value.as_u64().is_some_and(|n| n > 0)
-                                || value
-                                    .as_str()
-                                    .is_some_and(|s| s.parse::<u64>().is_ok_and(|n| n > 0));
-                            if !valid {
-                                let position_path = format!(
-                                    "{item_path}{}/position{}",
-                                    if item.get("properties").is_some() {
-                                        "/properties"
-                                    } else {
-                                        ""
-                                    },
-                                    if position.is_array() {
-                                        format!("/{j}")
-                                    } else {
-                                        String::new()
-                                    }
-                                );
-                                add(
-                                    out,
-                                    "vocabulary",
-                                    "invalid_breadcrumb_position",
-                                    position_path,
-                                    Some(value),
-                                    "Expected a positive integer position",
-                                );
-                            }
-                        }
-                    }
-                    if item.is_object() && !is_reference(item) {
-                        for field in ["position", "name"] {
-                            if !props(item).get(field).is_some_and(present)
-                                && !(field == "name"
-                                    && props(item)
-                                        .get("item")
-                                        .and_then(|v| v.get("name"))
-                                        .is_some_and(present))
-                            {
-                                add(
-                                    out,
-                                    "provider_eligibility",
-                                    "missing_breadcrumb_property",
-                                    format!(
-                                        "{item_path}{}/{field}",
-                                        if item.get("properties").is_some() {
-                                            "/properties"
-                                        } else {
-                                            ""
-                                        }
-                                    ),
-                                    None,
-                                    "Breadcrumb ListItem property is absent; reference and context resolution are limited",
-                                );
-                            }
-                        }
-                    } else if !item.is_object() {
-                        add(
-                            out,
-                            "vocabulary",
-                            "unexpected_value_type",
-                            item_path,
-                            Some(item),
-                            "Expected a ListItem or reference",
-                        );
-                    }
                 }
             }
         }
@@ -666,21 +662,20 @@ fn check_item(v: &Value, path: &str, base: &Url, ids: &IdIndex<'_>, out: &mut Ve
         Value::Object(m) => {
             if is_reference(v) {
                 let id = v["@id"].as_str().unwrap_or_default();
-                if let Ok(u) = base.join(id) {
-                    if u.origin() == base.origin()
-                        && u.path() == base.path()
-                        && u.query() == base.query()
-                        && !ids.contains_key(u.as_str())
-                    {
-                        add(
-                            out,
-                            "vocabulary",
-                            "unresolved_local_id",
-                            format!("{path}/@id"),
-                            v.get("@id"),
-                            "No matching local identifier was observed; extraction may be incomplete",
-                        );
-                    }
+                if let Ok(u) = base.join(id)
+                    && u.origin() == base.origin()
+                    && u.path() == base.path()
+                    && u.query() == base.query()
+                    && !ids.contains_key(u.as_str())
+                {
+                    add(
+                        out,
+                        "vocabulary",
+                        "unresolved_local_id",
+                        format!("{path}/@id"),
+                        v.get("@id"),
+                        "No matching local identifier was observed; extraction may be incomplete",
+                    );
                 }
             }
             for (k, child) in m {
@@ -751,7 +746,7 @@ pub fn validate(page: &Page, observations: &[StructuredData]) -> Vec<Observation
             &mut out,
             "coverage",
             "visible_source_unavailable",
-            "".into(),
+            String::new(),
             None,
             "No nonempty source headings were retained; visible-content comparison is unavailable",
         );
@@ -761,7 +756,7 @@ pub fn validate(page: &Page, observations: &[StructuredData]) -> Vec<Observation
             &mut out,
             "coverage",
             "extraction_truncated",
-            "".into(),
+            String::new(),
             None,
             "Source observations were truncated; absence and identifier checks are incomplete",
         );
@@ -854,7 +849,7 @@ pub fn validate_crawl(page: &Page, pages: &[Page]) -> Vec<Observation> {
             &mut out,
             "coverage",
             "page_unavailable",
-            "".into(),
+            String::new(),
             None,
             "Successful HTML source was not available for structured-data validation",
         );

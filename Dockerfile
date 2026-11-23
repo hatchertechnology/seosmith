@@ -2,6 +2,7 @@ FROM rust:1.98.1-bookworm AS build
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY examples ./examples
 COPY fixtures/policies/state-matrix.json ./fixtures/policies/state-matrix.json
 RUN cargo build --locked --release
 FROM debian:bookworm-slim

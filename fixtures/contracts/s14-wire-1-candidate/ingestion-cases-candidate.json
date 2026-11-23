@@ -1,0 +1,172 @@
+{
+  "status": "candidate-not-frozen",
+  "assumptions": {
+    "authenticated_website": "00000000-0000-4000-8000-000000000002",
+    "current_generation": 1
+  },
+  "cases": [
+    {
+      "fixture": "v4-candidate-complete.json",
+      "ingestion": "worker",
+      "expected": "accept",
+      "lifecycle_scope": "verified"
+    },
+    {
+      "fixture": "v4-candidate-generation-0.json",
+      "ingestion": "worker",
+      "expected": "reject"
+    },
+    {
+      "fixture": "v4-candidate-generation-2.json",
+      "ingestion": "worker",
+      "expected": "reject"
+    },
+    {
+      "fixture": "v4-candidate-generation-0.json",
+      "ingestion": "owner_import",
+      "expected": "accept",
+      "lifecycle_scope": "unverified"
+    },
+    {
+      "fixture": "v4-candidate-complete.json",
+      "ingestion": "owner_import",
+      "expected": "accept",
+      "lifecycle_scope": "unverified"
+    },
+    {
+      "fixture": "v4-candidate-complete.json",
+      "ingestion": "worker",
+      "authenticated_website": "00000000-0000-4000-8000-000000000003",
+      "expected": "reject"
+    },
+    {
+      "fixture": "v4-candidate-forged-source-claim.json",
+      "ingestion": "owner_import",
+      "expected": "accept",
+      "lifecycle_scope": "unverified"
+    },
+    {
+      "fixture": "v4-candidate-generation-2.json",
+      "ingestion": "owner_import",
+      "expected": "accept",
+      "lifecycle_scope": "unverified"
+    },
+    {
+      "fixture": "v4-candidate-complete.json",
+      "ingestion": "owner_import",
+      "actor": "cross_owner",
+      "expected": "reject"
+    },
+    {
+      "fixture": "v4-candidate-complete.json",
+      "ingestion": "owner_import",
+      "actor": "anonymous",
+      "expected": "reject"
+    },
+    {
+      "fixture": "v4-candidate-complete.json",
+      "ingestion": "worker",
+      "host": "wrong.example",
+      "expected": "reject"
+    },
+    {
+      "fixture": "v4-candidate-complete.json",
+      "ingestion": "worker",
+      "token": "stale",
+      "expected": "reject"
+    },
+    {
+      "fixture": "v4-candidate-complete.json",
+      "ingestion": "worker",
+      "token": "disabled",
+      "expected": "reject"
+    }
+  ],
+  "execution": "Each standalone case uses a fresh isolated receiver store; request UUIDs are intentionally reused across candidate reports. Only explicit sequence cases share a store.",
+  "sequences": [
+    {
+      "name": "worker-exact-retry",
+      "steps": [
+        {
+          "ingestion": "worker",
+          "fixture": "v4-candidate-complete.json",
+          "expected": "accept"
+        },
+        {
+          "ingestion": "worker",
+          "fixture": "v4-candidate-complete.json",
+          "expected": "same_receipt"
+        }
+      ]
+    },
+    {
+      "name": "same-uuid-different-bytes",
+      "steps": [
+        {
+          "ingestion": "worker",
+          "fixture": "v4-candidate-complete.json",
+          "expected": "accept"
+        },
+        {
+          "ingestion": "worker",
+          "fixture": "v4-candidate-whitespace.json",
+          "expected": "conflict"
+        }
+      ]
+    },
+    {
+      "name": "worker-then-import-same-uuid",
+      "steps": [
+        {
+          "ingestion": "worker",
+          "fixture": "v4-candidate-complete.json",
+          "expected": "accept",
+          "lifecycle_scope": "verified"
+        },
+        {
+          "ingestion": "owner_import",
+          "fixture": "v4-candidate-complete.json",
+          "expected": "same_receipt",
+          "lifecycle_scope": "verified"
+        }
+      ],
+      "note": "Preserve first provenance; owner authentication remains required."
+    },
+    {
+      "name": "import-then-worker-same-uuid",
+      "steps": [
+        {
+          "ingestion": "owner_import",
+          "fixture": "v4-candidate-complete.json",
+          "expected": "accept",
+          "lifecycle_scope": "unverified"
+        },
+        {
+          "ingestion": "worker",
+          "fixture": "v4-candidate-complete.json",
+          "expected": "same_receipt",
+          "lifecycle_scope": "unverified"
+        }
+      ],
+      "note": "Authenticate current worker before retry; preserve original import provenance and never upgrade scope."
+    },
+    {
+      "name": "import-then-disabled-worker-retry",
+      "steps": [
+        {
+          "ingestion": "owner_import",
+          "fixture": "v4-candidate-complete.json",
+          "expected": "accept",
+          "lifecycle_scope": "unverified"
+        },
+        {
+          "ingestion": "worker",
+          "fixture": "v4-candidate-complete.json",
+          "token": "disabled",
+          "expected": "reject",
+          "lifecycle_scope": "unverified"
+        }
+      ]
+    }
+  ]
+}
