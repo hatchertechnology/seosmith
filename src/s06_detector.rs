@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 const MAX_BYTES: usize = 256 * 1024;
 const MAX_TEXT: usize = 32 * 1024;
-pub const SEMANTICS: &str = "s06-local-detector-1";
+pub const SEMANTICS: &str = "s06-local-detector-2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
@@ -35,6 +35,15 @@ pub struct Analysis {
     pub reason: &'static str,
     pub evidence: Option<Evidence>,
     pub similarity: Option<f64>,
+    /// Extracted peer evidence for pairwise results, when available.
+    pub peer_evidence: Option<Evidence>,
+    /// Identifies the side whose extraction or eligibility failed.
+    pub unavailable_side: Option<Side>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Source,
+    Peer,
 }
 fn result(
     decision: Decision,
@@ -47,6 +56,8 @@ fn result(
         reason,
         evidence,
         similarity,
+        peer_evidence: None,
+        unavailable_side: None,
     }
 }
 fn selector(s: &str) -> Selector {
@@ -140,6 +151,13 @@ fn similarity(a: &str, b: &str) -> f64 {
             / f64::from(u32::try_from(union).expect("bounded text"))
     }
 }
+fn main_available(main: &str) -> bool {
+    let main = main.trim();
+    !main.is_empty()
+        && !["loading", "loading...", "loading…"]
+            .iter()
+            .any(|s| main.eq_ignore_ascii_case(s))
+}
 /// Assess a single retained response. Unknown is distinct from no candidate.
 pub fn soft_404(source: &Source<'_>) -> Analysis {
     let evidence = match extract(source) {
@@ -165,7 +183,7 @@ pub fn soft_404(source: &Source<'_>) -> Analysis {
             );
         }
     }
-    if evidence.main.trim().is_empty() || evidence.main.trim().eq_ignore_ascii_case("loading…") {
+    if !main_available(&evidence.main) {
         return result(
             Decision::Unknown,
             "main content or rendered outcome unavailable",
@@ -205,63 +223,71 @@ pub fn soft_404(source: &Source<'_>) -> Analysis {
 pub fn compare(source: &Source<'_>, peer: Option<&Source<'_>>) -> Analysis {
     let a = match extract(source) {
         Ok(v) => v,
-        Err(e) => return result(Decision::Unknown, e, None, None),
+        Err(e) => {
+            let mut out = result(Decision::Unknown, e, None, None);
+            out.unavailable_side = Some(Side::Source);
+            return out;
+        }
     };
     let Some(peer) = peer else {
-        return result(
+        let mut out = result(
             Decision::Unknown,
             "comparison peer unavailable",
             Some(a),
             None,
         );
+        out.unavailable_side = Some(Side::Peer);
+        return out;
     };
     let b = match extract(peer) {
         Ok(v) => v,
-        Err(e) => return result(Decision::Unknown, e, Some(a), None),
+        Err(e) => {
+            let mut out = result(Decision::Unknown, e, Some(a), None);
+            out.unavailable_side = Some(Side::Peer);
+            return out;
+        }
     };
-    if source.status != Some(200)
-        || peer.status != Some(200)
-        || a.main.is_empty()
-        || b.main.is_empty()
-    {
-        return result(
+    let unavailable_side = if source.status != Some(200) || !main_available(&a.main) {
+        Some(Side::Source)
+    } else if peer.status != Some(200) || !main_available(&b.main) {
+        Some(Side::Peer)
+    } else {
+        None
+    };
+    let (decision, reason, score) = if unavailable_side.is_some() {
+        (
             Decision::Unknown,
             "comparison requires complete 200 main content",
-            Some(a),
             None,
-        );
-    }
-    let score = similarity(&a.main, &b.main);
-    if a.source_sha256 == b.source_sha256 {
-        return result(
-            Decision::Candidate,
-            "identical source bytes",
-            Some(a),
-            Some(score),
-        );
-    }
-    // Explicit SKU markers indicate a plausible product variant, not proof of value.
-    if tokens(&a.main).contains("sku") && tokens(&b.main).contains("sku") {
-        return result(
-            Decision::NoCandidate,
-            "explicit SKU variant",
-            Some(a),
-            Some(score),
-        );
-    }
-    if score >= 0.8 {
-        result(
-            Decision::Candidate,
-            "similar main text",
-            Some(a),
-            Some(score),
         )
     } else {
-        result(
-            Decision::NoCandidate,
-            "main text below similarity threshold",
-            Some(a),
-            Some(score),
-        )
-    }
+        let score = similarity(&a.main, &b.main);
+        let (decision, reason) = if a.source_sha256 == b.source_sha256 {
+            (Decision::Candidate, "identical source bytes")
+        } else if tokens(&a.main).len() < 3 || tokens(&b.main).len() < 3 {
+            (
+                Decision::Unknown,
+                "insufficient distinct tokens for similarity",
+            )
+        } else if tokens(&a.main).contains("sku") && tokens(&b.main).contains("sku") {
+            (Decision::NoCandidate, "explicit SKU variant")
+        } else if score >= 0.8 {
+            (Decision::Candidate, "similar main text")
+        } else {
+            (
+                Decision::NoCandidate,
+                "main text below similarity threshold",
+            )
+        };
+        let score = if decision == Decision::Unknown {
+            None
+        } else {
+            Some(score)
+        };
+        (decision, reason, score)
+    };
+    let mut out = result(decision, reason, Some(a), score);
+    out.peer_evidence = Some(b);
+    out.unavailable_side = unavailable_side;
+    out
 }
