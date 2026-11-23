@@ -28,3 +28,6 @@ pub mod policy_wire_prototype;
 
 /// Experimental offline link graph analysis.
 pub mod graph_evidence;
+
+/// Experimental offline static resource observations.
+pub mod resource_evidence;
