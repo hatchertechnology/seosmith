@@ -107,7 +107,15 @@ pub fn evaluate(bot: &str, state: ContentState, sources: &[DirectiveSource]) -> 
         applicable,
         restrictions,
         conflicts,
-        index: decide(noindex),
+        index: if !noindex
+            && tokens
+                .iter()
+                .any(|token| token.starts_with("unavailable_after:"))
+        {
+            Decision::Unknown
+        } else {
+            decide(noindex)
+        },
         follow: decide(nofollow),
     }
 }
@@ -241,8 +249,7 @@ pub fn evaluate_capture(
                     ) {
                         // Parameter is part of a directive, not an agent prefix.
                     } else if key == "unavailable_after" {
-                        // Dates can contain commas; do not infer absence from an ambiguous parse.
-                        complete = false;
+                        // This is a directive, not a bot prefix.
                     } else if !key.is_empty()
                         && key
                             .chars()
@@ -253,6 +260,17 @@ pub fn evaluate_capture(
                     } else {
                         complete = false;
                     }
+                }
+                // Expiry interpretation is unsupported. Apply the uncertainty only
+                // to the bots covered by the directive, after stripping its scope.
+                if value
+                    .split_once(':')
+                    .is_some_and(|(name, _)| name.trim().eq_ignore_ascii_case("unavailable_after"))
+                    && agent
+                        .as_deref()
+                        .is_none_or(|name| name.eq_ignore_ascii_case(bot))
+                {
+                    complete = false;
                 }
                 if !value.is_empty() {
                     sources.push(DirectiveSource {

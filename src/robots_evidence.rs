@@ -121,10 +121,13 @@ pub fn evaluate(body: &str, bot: &str, url: &Url) -> RobotsDecision {
     } else {
         (None, None, "no_matching_rule")
     };
+    // The parser treats CRLF as one boundary, and bare CR and LF as
+    // boundaries too. Use the same line numbering for source attribution.
+    let normalized_lines = body.replace("\r\n", "\n").replace('\r', "\n");
     let raw_line = line
         .and_then(|n| usize::try_from(n).ok())
         .and_then(|n| n.checked_sub(1))
-        .and_then(|n| body.lines().nth(n))
+        .and_then(|n| normalized_lines.split('\n').nth(n))
         .filter(|s| s.len() <= 16_384)
         .map(str::to_owned);
     let provenance = if line.is_some() && raw_line.is_none() {
