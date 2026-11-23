@@ -120,6 +120,11 @@ fn retained_html_references_and_bounds_do_not_infer_rendering() {
         refs.occurrences[2].declared_type.as_deref(),
         Some("image/webp")
     );
+    assert_eq!(refs.occurrences[1].as_attribute.as_deref(), Some("style"));
+    assert_eq!(
+        refs.occurrences[1].crossorigin.as_deref(),
+        Some("anonymous")
+    );
     assert_eq!(refs.occurrences[3].loading.as_deref(), Some("lazy"));
     assert_eq!(refs.occurrences[3].width.as_deref(), Some("320"));
     let bounded = references("source", &format!("<img src='{}'>", "x".repeat(2049)));
