@@ -185,7 +185,11 @@ pub fn resource_byte_groups(
 pub struct ResourceReference {
     pub element: String,
     pub raw_src: Option<String>,
+    /// Raw relation tokens, retained without classifying the link.
+    pub raw_rel: Option<String>,
     pub raw_srcset: Option<String>,
+    pub media: Option<String>,
+    pub declared_type: Option<String>,
     pub sizes: Option<String>,
     pub loading: Option<String>,
     pub fetchpriority: Option<String>,
@@ -219,7 +223,10 @@ pub fn references(source_url: &str, html: &str) -> ResourceReferences {
         let names = [
             "src",
             "href",
+            "rel",
             "srcset",
+            "media",
+            "type",
             "sizes",
             "loading",
             "fetchpriority",
@@ -241,7 +248,10 @@ pub fn references(source_url: &str, html: &str) -> ResourceReferences {
         occurrences.push(ResourceReference {
             element: el.value().name().into(),
             raw_src: attr("src").or_else(|| attr("href")),
+            raw_rel: attr("rel"),
             raw_srcset: attr("srcset"),
+            media: attr("media"),
+            declared_type: attr("type"),
             sizes: attr("sizes"),
             loading: attr("loading"),
             fetchpriority: attr("fetchpriority"),

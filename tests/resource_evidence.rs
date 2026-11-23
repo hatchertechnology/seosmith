@@ -102,15 +102,38 @@ fn retained_html_references_and_bounds_do_not_infer_rendering() {
     );
     assert!(refs.complete);
     assert_eq!(refs.source_url, "https://example.test/page");
+    assert_eq!(refs.occurrences[0].raw_src, refs.occurrences[1].raw_src);
+    assert_eq!(refs.occurrences[0].raw_rel.as_deref(), Some("canonical"));
     assert_eq!(
-        refs.occurrences[0].raw_srcset.as_deref(),
+        refs.occurrences[1].raw_rel.as_deref(),
+        Some("stylesheet alternate")
+    );
+    assert_eq!(
+        refs.occurrences[2].raw_srcset.as_deref(),
         Some("small.webp 1x, large.webp 2x")
     );
-    assert_eq!(refs.occurrences[1].loading.as_deref(), Some("lazy"));
-    assert_eq!(refs.occurrences[1].width.as_deref(), Some("320"));
+    assert_eq!(
+        refs.occurrences[2].media.as_deref(),
+        Some("(min-width: 600px)")
+    );
+    assert_eq!(
+        refs.occurrences[2].declared_type.as_deref(),
+        Some("image/webp")
+    );
+    assert_eq!(refs.occurrences[3].loading.as_deref(), Some("lazy"));
+    assert_eq!(refs.occurrences[3].width.as_deref(), Some("320"));
     let bounded = references("source", &format!("<img src='{}'>", "x".repeat(2049)));
     assert!(!bounded.complete);
     assert_eq!(bounded.occurrences[0].raw_src.as_ref().unwrap().len(), 2048);
+    let bounded_rel = references(
+        "source",
+        &format!("<link href='/x' rel='{}'>", "r".repeat(2049)),
+    );
+    assert!(!bounded_rel.complete);
+    assert_eq!(
+        bounded_rel.occurrences[0].raw_rel.as_ref().unwrap().len(),
+        2048
+    );
     let bounded = references("source", &"<img>".repeat(2001));
     assert!(!bounded.complete);
     assert_eq!(bounded.occurrences.len(), 2000);
