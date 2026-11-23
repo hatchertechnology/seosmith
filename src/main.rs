@@ -8,7 +8,7 @@ use seosmith::{
     model::CrawlRequest,
     store::Store,
 };
-use std::{fs::OpenOptions, time::Duration};
+use std::{fs::OpenOptions, io::Read, time::Duration};
 use tokio::sync::watch;
 #[derive(Parser)]
 #[command(version, about)]
@@ -39,6 +39,10 @@ enum Command {
         request: std::path::PathBuf,
     },
     Rules,
+    /// Validate a saved report locally without submitting or delivering a job.
+    ValidateStructured {
+        report: std::path::PathBuf,
+    },
 }
 fn secret(name: &str) -> Result<String> {
     let value = if let Ok(path) = std::env::var(format!("{name}_FILE")) {
@@ -80,7 +84,6 @@ async fn main() -> Result<()> {
         .advisory_policy
         .as_ref()
         .map(|path| -> Result<_> {
-            use std::io::Read;
             let mut bytes = Vec::new();
             std::fs::File::open(path)?
                 .take(65_537)
@@ -95,6 +98,43 @@ async fn main() -> Result<()> {
         !(policy.is_some() && matches!(cli.command, Command::Serve { .. })),
         "S14 policy reports cannot be delivered until H04 and receiver support are ready"
     );
+    if let Command::ValidateStructured { ref report } = cli.command {
+        ensure!(
+            policy.is_none() && !cli.evidence_contract_v2,
+            "validation cannot be combined with experimental report contracts"
+        );
+        let mut input = Vec::new();
+        std::fs::File::open(report)?
+            .take(16 * 1024 * 1024 + 1)
+            .read_to_end(&mut input)?;
+        ensure!(input.len() <= 16 * 1024 * 1024, "report exceeds 16 MiB");
+        let source: serde_json::Value = serde_json::from_slice(&input)?;
+        ensure!(
+            source
+                .get("schema_version")
+                .and_then(serde_json::Value::as_u64)
+                == Some(u64::from(seosmith::model::SCHEMA_VERSION)),
+            "unsupported report schema version"
+        );
+        if let Some(pages) = source.get("pages").and_then(serde_json::Value::as_array) {
+            for (i, page) in pages.iter().enumerate() {
+                ensure!(
+                    page.get("structured_data")
+                        .is_some_and(serde_json::Value::is_array),
+                    "page {i} lacks a structured_data collection; source coverage is unavailable"
+                );
+            }
+        }
+        let report: seosmith::model::Report = serde_json::from_value(source)?;
+        let observations: Vec<_> = report.pages.iter().enumerate().map(|(page_index, page)| serde_json::json!({"page_index": page_index, "url": page.url, "observations": seosmith::structured_validation::validate_crawl(page, &report.pages)})).collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &serde_json::json!({"profile_version": seosmith::structured_validation::PROFILE_VERSION, "structured_validation": observations})
+            )?
+        );
+        return Ok(());
+    }
     if let Command::Operations { operation } = cli.command {
         if policy.is_some() {
             eprintln!(
@@ -149,7 +189,7 @@ async fn main() -> Result<()> {
     store.recover().await?;
     match cli.command {
         Command::Operations { .. } => unreachable!(),
-        Command::Rules => {}
+        Command::Rules | Command::ValidateStructured { .. } => {}
         Command::Crawl { request } => {
             let r: CrawlRequest = serde_json::from_slice(&tokio::fs::read(request).await?)?;
 
