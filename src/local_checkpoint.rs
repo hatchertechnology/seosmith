@@ -104,7 +104,9 @@ pub(crate) fn capture(url: &Url, page: &Page, response: Option<&Response>) -> Va
 }
 pub(crate) fn budget_omission(url: &str) -> Value {
     let mut value = json!({"version": 1, "collectors": [unavailable("html_occurrences", "run_byte_limit"), unavailable("graph", "run_byte_limit"), unavailable("resource", "run_byte_limit")], "omissions": ["http_occurrences_raw_headers_unavailable", "robots_provenance_not_captured", "sitemap_not_captured", "content_detector_not_integrated"]});
-    set_url_identity(&mut value, url);
+    value["url"] = Value::Null;
+    value["url_omission"] = json!("run_byte_limit");
+    value["url_sha256"] = json!(crate::model::digest(url.as_bytes()));
     value
 }
 
@@ -115,9 +117,13 @@ mod tests {
     fn long_url_budget_marker_is_bounded_and_bound_to_full_identity() {
         let url = format!("https://example.test/{}", "x".repeat(100_000));
         let marker = budget_omission(&url);
-        assert!(url_identity_matches(&marker, &url));
-        assert!(!url_identity_matches(&marker, &(url.clone() + "x")));
-        assert_eq!(marker["url_omission"], "url_copy_byte_limit");
+        assert_eq!(marker["url_sha256"], crate::model::digest(url.as_bytes()));
+        assert_eq!(marker["url_omission"], "run_byte_limit");
+        let short = budget_omission("https://example.test/");
+        assert_eq!(
+            serde_json::to_vec(&marker).unwrap().len(),
+            serde_json::to_vec(&short).unwrap().len()
+        );
         assert!(serde_json::to_vec(&marker).unwrap().len() < 2048);
     }
 }

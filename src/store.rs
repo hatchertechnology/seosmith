@@ -5,6 +5,8 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
 };
 use std::{path::Path, time::Duration};
+type FrontierCheckpoint = (Option<String>, Option<String>, i64, bool, bool);
+
 #[derive(Clone)]
 pub struct Store(pub SqlitePool);
 
@@ -44,6 +46,7 @@ impl Store {
             delivery_state TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
             next_attempt INTEGER NOT NULL DEFAULT 0, discovery_truncated INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL DEFAULT (unixepoch()));
             CREATE TABLE IF NOT EXISTS local_page_evidence (job_id TEXT NOT NULL REFERENCES jobs(id), url TEXT NOT NULL, evidence TEXT NOT NULL, PRIMARY KEY(job_id,url));
+            CREATE TABLE IF NOT EXISTS local_evidence_usage (job_id TEXT PRIMARY KEY REFERENCES jobs(id), evidence_bytes INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS frontier (job_id TEXT NOT NULL REFERENCES jobs(id), url TEXT NOT NULL,
             depth INTEGER NOT NULL, in_sitemap INTEGER NOT NULL, page TEXT, PRIMARY KEY(job_id,url));")
             .execute(&pool).await?;
@@ -299,8 +302,9 @@ impl Store {
             state == Some(("local_running".into(), Some("local".into()))),
             "job is not local running"
         );
-        let existing: Option<(Option<String>, Option<String>)> = sqlx::query_as("SELECT f.page,e.evidence FROM frontier f LEFT JOIN local_page_evidence e ON e.job_id=f.job_id AND e.url=f.url WHERE f.job_id=? AND f.url=?").bind(id).bind(&page.url).fetch_optional(&mut *tx).await?;
-        let (old_page, old_evidence) = existing.context("page is not in frontier")?;
+        let existing: Option<FrontierCheckpoint> = sqlx::query_as("SELECT f.page,e.evidence,f.depth,f.in_sitemap,f.resource FROM frontier f LEFT JOIN local_page_evidence e ON e.job_id=f.job_id AND e.url=f.url WHERE f.job_id=? AND f.url=?").bind(id).bind(&page.url).fetch_optional(&mut *tx).await?;
+        let (old_page, old_evidence, depth, in_sitemap, resource) =
+            existing.context("page is not in frontier")?;
         if old_page.is_some() || old_evidence.is_some() {
             ensure!(
                 old_page.as_deref() == Some(page_bytes.as_str())
@@ -318,9 +322,35 @@ impl Store {
             tx.commit().await?;
             return Ok(());
         }
-        let used: i64 = sqlx::query_scalar("SELECT coalesce(sum(length(CAST(evidence AS BLOB))),0) FROM local_page_evidence WHERE job_id=?").bind(id).fetch_one(&mut *tx).await?;
+        ensure!(
+            i64::try_from(page.depth)? == depth
+                && page.in_sitemap == in_sitemap
+                && page.is_resource == resource,
+            "page metadata differs from frontier"
+        );
+        let used: Option<i64> =
+            sqlx::query_scalar("SELECT evidence_bytes FROM local_evidence_usage WHERE job_id=?")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let used = if let Some(used) = used {
+            used
+        } else {
+            // Older stores have no counter. Initialize it once without rewriting evidence.
+            let used: i64 = sqlx::query_scalar("SELECT coalesce(sum(length(CAST(evidence AS BLOB))),0) FROM local_page_evidence WHERE job_id=?").bind(id).fetch_one(&mut *tx).await?;
+            sqlx::query("INSERT INTO local_evidence_usage(job_id,evidence_bytes) VALUES(?,?)")
+                .bind(id)
+                .bind(used)
+                .execute(&mut *tx)
+                .await?;
+            used
+        };
         // Reserve room for one bounded omission record per permitted page/resource.
-        if used + i64::try_from(evidence_bytes.len())? > 16 * 1024 * 1024 {
+        if used
+            .checked_add(i64::try_from(evidence_bytes.len())?)
+            .context("evidence byte count overflow")?
+            > 16 * 1024 * 1024
+        {
             evidence_bytes = serde_json::to_string(
                 &serde_json::json!({"input_hash": input_hash, "capture": crate::local_checkpoint::budget_omission(&page.url)}),
             )?;
@@ -335,6 +365,14 @@ impl Store {
             .bind(id)
             .bind(&page.url)
             .bind(&evidence_bytes)
+            .execute(&mut *tx)
+            .await?;
+        let total = used
+            .checked_add(i64::try_from(evidence_bytes.len())?)
+            .context("evidence byte count overflow")?;
+        sqlx::query("UPDATE local_evidence_usage SET evidence_bytes=? WHERE job_id=?")
+            .bind(total)
+            .bind(id)
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
@@ -386,12 +424,13 @@ impl Store {
         Ok(())
     }
     pub async fn finish_local_only(&self, id: &str) -> Result<()> {
-        sqlx::query(
-            "UPDATE jobs SET state='local_only',error=NULL WHERE id=? AND state='local_running'",
+        let updated = sqlx::query(
+            "UPDATE jobs SET state='local_only',error=NULL WHERE id=? AND state='local_running' AND execution_mode='local'",
         )
         .bind(id)
         .execute(&self.0)
-        .await?;
+        .await?.rows_affected();
+        ensure!(updated == 1, "local job was not running at finalization");
         Ok(())
     }
     pub async fn fail(&self, id: &str) -> Result<()> {
@@ -519,6 +558,28 @@ mod local_checkpoint_tests {
     }
 
     #[tokio::test]
+    async fn finalization_and_cancel_have_observable_winner() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(dir.path().join("finish.sqlite").to_str().unwrap()).await?;
+        let report: Report =
+            serde_json::from_str(include_str!("../fixtures/contracts/legacy.json"))?;
+        let mut request = report.request;
+        request.request_id = uuid::Uuid::new_v4();
+        let id = request.request_id.to_string();
+        store.submit_local(&request).await?;
+        store.claim_local(&id).await?.unwrap();
+        let (finish, cancel) = tokio::join!(store.finish_local_only(&id), store.cancel(&id));
+        let cancelled = cancel?;
+        assert_ne!(finish.is_ok(), cancelled);
+        assert_eq!(
+            store.view(&id).await?.unwrap().state,
+            if cancelled { "cancelled" } else { "local_only" }
+        );
+        assert!(store.finish_local_only(&id).await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn run_budget_records_omissions_and_replays() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let store = Store::open(dir.path().join("budget.sqlite").to_str().unwrap()).await?;
@@ -541,7 +602,25 @@ mod local_checkpoint_tests {
         };
         let evidence = local_checkpoint::capture(&request.url, &page, None);
         store.checkpoint_local(&id, &page, &evidence).await?;
+        let before: i64 =
+            sqlx::query_scalar("SELECT evidence_bytes FROM local_evidence_usage WHERE job_id=?")
+                .bind(&id)
+                .fetch_one(&store.0)
+                .await?;
         store.checkpoint_local(&id, &page, &evidence).await?;
+        let after: i64 =
+            sqlx::query_scalar("SELECT evidence_bytes FROM local_evidence_usage WHERE job_id=?")
+                .bind(&id)
+                .fetch_one(&store.0)
+                .await?;
+        assert_eq!(before, after);
+        let actual: i64 = sqlx::query_scalar(
+            "SELECT sum(length(CAST(evidence AS BLOB))) FROM local_page_evidence WHERE job_id=?",
+        )
+        .bind(&id)
+        .fetch_one(&store.0)
+        .await?;
+        assert_eq!(after, actual);
         let stored: String =
             sqlx::query_scalar("SELECT evidence FROM local_page_evidence WHERE job_id=? AND url=?")
                 .bind(&id)
@@ -553,6 +632,30 @@ mod local_checkpoint_tests {
             stored["capture"]["collectors"][0]["reason"],
             "run_byte_limit"
         );
+        let next_url = request.url.join("/second")?;
+        store.discover(&id, next_url.as_str(), 1, false, 10).await?;
+        let next_page = crate::model::Page {
+            url: next_url.to_string(),
+            depth: 1,
+            ..Default::default()
+        };
+        let next_evidence = local_checkpoint::capture(&next_url, &next_page, None);
+        store
+            .checkpoint_local(&id, &next_page, &next_evidence)
+            .await?;
+        let counter: i64 =
+            sqlx::query_scalar("SELECT evidence_bytes FROM local_evidence_usage WHERE job_id=?")
+                .bind(&id)
+                .fetch_one(&store.0)
+                .await?;
+        let actual: i64 = sqlx::query_scalar(
+            "SELECT sum(length(CAST(evidence AS BLOB))) FROM local_page_evidence WHERE job_id=?",
+        )
+        .bind(&id)
+        .fetch_one(&store.0)
+        .await?;
+        assert!(counter > after);
+        assert_eq!(counter, actual);
         let mut changed = evidence.clone();
         changed["version"] = 2.into();
         assert!(store.checkpoint_local(&id, &page, &changed).await.is_err());
@@ -578,9 +681,37 @@ mod local_checkpoint_tests {
         sqlx::query("CREATE TRIGGER reject_evidence BEFORE INSERT ON local_page_evidence BEGIN SELECT RAISE(ABORT, 'test'); END").execute(&store.0).await?;
         assert!(store.checkpoint_local(&id, &page, &evidence).await.is_err());
         assert!(store.pages(&id).await?.is_empty());
+        let usage: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM local_evidence_usage WHERE job_id=?")
+                .bind(&id)
+                .fetch_one(&store.0)
+                .await?;
+        assert_eq!(usage, 0);
         sqlx::query("DROP TRIGGER reject_evidence")
             .execute(&store.0)
             .await?;
+        for mismatch in [
+            crate::model::Page {
+                depth: 1,
+                ..page.clone()
+            },
+            crate::model::Page {
+                in_sitemap: true,
+                ..page.clone()
+            },
+            crate::model::Page {
+                is_resource: true,
+                ..page.clone()
+            },
+        ] {
+            assert!(
+                store
+                    .checkpoint_local(&id, &mismatch, &evidence)
+                    .await
+                    .is_err()
+            );
+        }
+        assert!(store.pages(&id).await?.is_empty());
         store.checkpoint_local(&id, &page, &evidence).await?;
         store.checkpoint_local(&id, &page, &evidence).await?;
         let mut changed = evidence.clone();
