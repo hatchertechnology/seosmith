@@ -9,7 +9,7 @@ const MAX_VALUE_BYTES: usize = 4096;
 // Reserve room for the collector envelope within the proposed 1 MiB page cap.
 const MAX_OBSERVATION_BYTES: usize = 512 * 1024;
 
-pub const PROFILE_VERSION: &str = "google-subset-2026-11-21.3";
+pub const PROFILE_VERSION: &str = "google-subset-2026-11-21.4";
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Observation {
@@ -97,8 +97,7 @@ fn name(s: &str) -> &str {
 fn types(v: &Value) -> Vec<&str> {
     v.get("@type")
         .or_else(|| v.get("types"))
-        .map(values)
-        .unwrap_or_default()
+        .map_or_else(Vec::new, values)
         .into_iter()
         .filter_map(Value::as_str)
         .map(name)
@@ -140,9 +139,10 @@ fn collect_ids<'a>(v: &'a Value, path: &str, base: &Url, ids: &mut IdIndex<'a>) 
 }
 fn unique_reference<'a>(
     v: &Value,
-    base: &Url,
+    base: Option<&Url>,
     ids: &'a IdIndex<'a>,
 ) -> Option<(&'a Value, &'a str)> {
+    let base = base?;
     let id = v.get("@id")?.as_str()?;
     let target = base.join(id).ok()?;
     if target.origin() != base.origin()
@@ -169,7 +169,13 @@ fn present(v: &Value) -> bool {
         _ => true,
     }
 }
-fn check_item(v: &Value, path: &str, base: &Url, ids: &IdIndex<'_>, out: &mut Vec<Observation>) {
+fn check_item(
+    v: &Value,
+    path: &str,
+    base: Option<&Url>,
+    ids: &IdIndex<'_>,
+    out: &mut Vec<Observation>,
+) {
     // Foreign and custom JSON-LD contexts may redefine every compact term.
     // Do not interpret that subtree as schema.org without expansion.
     if unsupported_context(v) {
@@ -242,13 +248,21 @@ fn check_item(v: &Value, path: &str, base: &Url, ids: &IdIndex<'_>, out: &mut Ve
         }
         for field in ["name", "headline", "description", "telephone"] {
             if let Some(val) = p.get(field) {
-                for x in values(val) {
+                for (i, x) in values(val).iter().enumerate() {
                     if !x.is_string() && !is_reference(x) {
                         add(
                             out,
                             "vocabulary",
                             "unexpected_value_type",
-                            format!("{prefix}/{}", escape(field)),
+                            format!(
+                                "{prefix}/{}{}",
+                                escape(field),
+                                if val.is_array() {
+                                    format!("/{i}")
+                                } else {
+                                    String::new()
+                                }
+                            ),
                             Some(x),
                             "Expected text or a reference; full vocabulary validation is unavailable",
                         );
@@ -286,6 +300,9 @@ fn check_item(v: &Value, path: &str, base: &Url, ids: &IdIndex<'_>, out: &mut Ve
                 } else {
                     (*author, source_path)
                 };
+                if unsupported_context(author) {
+                    continue;
+                }
                 if is_reference(author) {
                     add(
                         out,
@@ -370,6 +387,9 @@ fn check_item(v: &Value, path: &str, base: &Url, ids: &IdIndex<'_>, out: &mut Ve
                 } else {
                     (*offer, offer_path)
                 };
+                if unsupported_context(offer) {
+                    continue;
+                }
                 if is_reference(offer) {
                     add(
                         out,
@@ -469,6 +489,10 @@ fn check_item(v: &Value, path: &str, base: &Url, ids: &IdIndex<'_>, out: &mut Ve
                                 } else {
                                     (*specification, path)
                                 };
+                                if unsupported_context(specification) {
+                                    unknown = true;
+                                    continue;
+                                }
                                 if is_reference(specification) {
                                     unknown = true;
                                     add(
@@ -482,6 +506,27 @@ fn check_item(v: &Value, path: &str, base: &Url, ids: &IdIndex<'_>, out: &mut Ve
                                 } else if props(specification).get("price").is_some_and(present) {
                                     has_price = true;
                                 }
+                            }
+                        }
+                        if !op.get("priceCurrency").is_some_and(present) {
+                            if op.get("priceSpecification").is_some_and(present) {
+                                add(
+                                    out,
+                                    "coverage",
+                                    "offer_currency_unknown",
+                                    format!("{opath}/priceSpecification"),
+                                    None,
+                                    "Currency may be supplied by a price specification; full currency alternatives are not assessed",
+                                );
+                            } else {
+                                add(
+                                    out,
+                                    "provider_eligibility",
+                                    "missing_offer_currency",
+                                    format!("{opath}/priceCurrency"),
+                                    None,
+                                    "Offer currency was not observed",
+                                );
                             }
                         }
                         if !has_price && !unknown {
@@ -546,6 +591,9 @@ fn check_item(v: &Value, path: &str, base: &Url, ids: &IdIndex<'_>, out: &mut Ve
                 } else {
                     (*entry, location)
                 };
+                if unsupported_context(entry) {
+                    continue;
+                }
                 if is_reference(entry) {
                     add(
                         out,
@@ -579,6 +627,9 @@ fn check_item(v: &Value, path: &str, base: &Url, ids: &IdIndex<'_>, out: &mut Ve
                         String::new()
                     }
                 );
+                if unsupported_context(item) {
+                    continue;
+                }
                 if let Some(position) = props(item).get("position") {
                     for (j, value) in values(position).iter().enumerate() {
                         let valid = value.as_u64().is_some_and(|n| n > 0)
@@ -612,12 +663,53 @@ fn check_item(v: &Value, path: &str, base: &Url, ids: &IdIndex<'_>, out: &mut Ve
                 }
                 if item.is_object() && !is_reference(item) {
                     for field in ["position", "name"] {
+                        let breadcrumb_item = props(item).get("item");
+                        let mut item_name = false;
+                        let mut item_unknown = false;
+                        if field == "name" {
+                            if let Some(entries) = breadcrumb_item {
+                                for entry in values(entries) {
+                                    let target = if is_reference(entry) {
+                                        unique_reference(entry, base, ids).map(|(target, _)| target)
+                                    } else {
+                                        Some(entry)
+                                    };
+                                    match target {
+                                        Some(target) if !unsupported_context(target) => {
+                                            item_name |=
+                                                props(target).get("name").is_some_and(present);
+                                            if !target.is_object() {
+                                                item_unknown = true;
+                                            }
+                                        }
+                                        _ => item_unknown = true,
+                                    }
+                                }
+                            }
+                            if !item_name
+                                && item_unknown
+                                && !props(item).get("name").is_some_and(present)
+                            {
+                                add(
+                                    out,
+                                    "coverage",
+                                    "breadcrumb_item_name_unknown",
+                                    format!(
+                                        "{item_path}{}/item",
+                                        if item.get("properties").is_some() {
+                                            "/properties"
+                                        } else {
+                                            ""
+                                        }
+                                    ),
+                                    None,
+                                    "Breadcrumb item name could not be determined without expansion",
+                                );
+                            }
+                        }
                         if !(props(item).get(field).is_some_and(present)
-                            || field == "name"
-                                && props(item)
-                                    .get("item")
-                                    .and_then(|v| v.get("name"))
-                                    .is_some_and(present))
+                            || item_name
+                            || item_unknown)
                         {
                             add(
                                 out,
@@ -662,7 +754,8 @@ fn check_item(v: &Value, path: &str, base: &Url, ids: &IdIndex<'_>, out: &mut Ve
         Value::Object(m) => {
             if is_reference(v) {
                 let id = v["@id"].as_str().unwrap_or_default();
-                if let Ok(u) = base.join(id)
+                if let Some(base) = base
+                    && let Ok(u) = base.join(id)
                     && u.origin() == base.origin()
                     && u.path() == base.path()
                     && u.query() == base.query()
@@ -693,13 +786,23 @@ fn check_item(v: &Value, path: &str, base: &Url, ids: &IdIndex<'_>, out: &mut Ve
 /// Validate retained source observations only. No network requests or report mutation occur.
 pub fn validate(page: &Page, observations: &[StructuredData]) -> Vec<Observation> {
     let mut out = Vec::new();
-    let Ok(base) = Url::parse(&page.url) else {
-        return out;
-    };
+    let base = Url::parse(&page.url)
+        .ok()
+        .filter(|u| matches!(u.scheme(), "http" | "https") && u.host().is_some());
+    if base.is_none() {
+        add(
+            &mut out,
+            "coverage",
+            "base_url_unavailable",
+            String::new(),
+            None,
+            "Page URL is unavailable for local reference and resource resolution",
+        );
+    }
     let mut ids = HashMap::new();
     for (i, block) in observations.iter().enumerate() {
-        if let Some(v) = &block.data {
-            collect_ids(v, &format!("/{i}/data"), &base, &mut ids);
+        if let (Some(v), Some(base)) = (&block.data, base.as_ref()) {
+            collect_ids(v, &format!("/{i}/data"), base, &mut ids);
         }
     }
     for (i, block) in observations.iter().enumerate() {
@@ -725,7 +828,7 @@ pub fn validate(page: &Page, observations: &[StructuredData]) -> Vec<Observation
                     "JSON-LD contexts and aliases are not expanded; vocabulary and eligibility conclusions are incomplete",
                 );
             }
-            check_item(v, &format!("{path}/data"), &base, &ids, &mut out);
+            check_item(v, &format!("{path}/data"), base.as_ref(), &ids, &mut out);
         }
     }
     // Headings are a partial source proxy, not proof of rendered visibility.
@@ -795,6 +898,9 @@ pub fn referenced_resource(
 }
 
 fn heading_candidates(v: &Value, path: &str, headings: &[String], out: &mut Vec<Observation>) {
+    if unsupported_context(v) {
+        return;
+    }
     if let Some(headline) = props(v).get("headline") {
         for (i, item) in values(headline).iter().enumerate() {
             if let Some(text) = item.as_str() {
@@ -829,7 +935,21 @@ fn heading_candidates(v: &Value, path: &str, headings: &[String], out: &mut Vec<
     match v {
         Value::Object(m) => {
             for (key, child) in m {
-                heading_candidates(child, &format!("{path}/{}", escape(key)), headings, out);
+                let child_path = format!("{path}/{}", escape(key));
+                if key == "properties"
+                    && let Some(properties) = child.as_object()
+                {
+                    for (property, value) in properties {
+                        heading_candidates(
+                            value,
+                            &format!("{child_path}/{}", escape(property)),
+                            headings,
+                            out,
+                        );
+                    }
+                } else {
+                    heading_candidates(child, &child_path, headings, out);
+                }
             }
         }
         Value::Array(a) => {
@@ -871,6 +991,9 @@ fn resource_observations(
     pages: &[Page],
     out: &mut Vec<Observation>,
 ) {
+    if unsupported_context(v) {
+        return;
+    }
     match v {
         Value::Object(map) => {
             for (key, child) in map {

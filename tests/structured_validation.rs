@@ -451,3 +451,164 @@ fn local_sidecar_distinguishes_observed_partial_and_unavailable() {
         Some("source_unavailable")
     );
 }
+
+#[test]
+fn invalid_base_preserves_independent_observations() {
+    let mut p = page();
+    p.url = "invalid url".into();
+    p.extraction_truncated = true;
+    let observations = validate(
+        &p,
+        &[StructuredData {
+            format: "json_ld".into(),
+            data: Some(json!({"@type":"Product", "name":["Good",42]})),
+            error: Some("bad syntax".into()),
+        }],
+    );
+    for code in [
+        "base_url_unavailable",
+        "invalid_source",
+        "extraction_truncated",
+    ] {
+        assert!(observations.iter().any(|o| o.code == code), "{code}");
+    }
+    assert!(
+        observations
+            .iter()
+            .any(|o| o.code == "unexpected_value_type"
+                && o.path == "/0/data/name/1"
+                && o.value == Some(json!(42)))
+    );
+}
+
+#[test]
+fn nested_custom_contexts_are_not_interpreted_by_any_traversal() {
+    let mut p = page();
+    p.headings = vec![(1, "Visible".into())];
+    p.structured_data = vec![block(
+        json!({"@type":"Product", "name":"Good", "offers":{"@context":{"price":"other"}, "@type":"Offer", "headline":"Hidden", "image":"/x"}}),
+    )];
+    let observations = seosmith::structured_validation::validate_crawl(&p, &[p.clone()]);
+    assert!(observations.iter().any(|o| o.code == "unsupported_context"));
+    for code in [
+        "missing_offer_price",
+        "headline_heading_mismatch_candidate",
+        "referenced_resource_status",
+    ] {
+        assert!(!observations.iter().any(|o| o.code == code), "{code}");
+    }
+    let data = block(
+        json!({"@type":"Product", "name":"Good", "offers":{"@type":"Offer", "priceSpecification":{"@context":{"price":"other"}, "price":1}}}),
+    );
+    assert!(
+        !validate(&p, &[data])
+            .iter()
+            .any(|o| o.code == "missing_offer_price")
+    );
+}
+
+#[test]
+fn saved_report_cli_rejects_unknown_schema_and_missing_collection() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("report.json");
+    let mut report: serde_json::Value =
+        serde_json::from_str(include_str!("../fixtures/contracts/legacy.json")).unwrap();
+    for invalid_schema in [true, false] {
+        let mut input = report.clone();
+        if invalid_schema {
+            input["schema_version"] = json!(999);
+        } else {
+            input["pages"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("structured_data");
+        }
+        std::fs::write(&path, serde_json::to_vec(&input).unwrap()).unwrap();
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_seosmith"))
+            .args(["validate-structured", path.to_str().unwrap()])
+            .env_remove("SEOSMITH_ADVISORY_POLICY")
+            .env_remove("SEOSMITH_EVIDENCE_CONTRACT_V2")
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(if invalid_schema {
+                "unsupported report schema"
+            } else {
+                "lacks a structured_data collection"
+            })
+        );
+    }
+    report["pages"][0]["structured_data"] = json!([]);
+    std::fs::write(&path, serde_json::to_vec(&report).unwrap()).unwrap();
+    assert!(
+        std::process::Command::new(env!("CARGO_BIN_EXE_seosmith"))
+            .args(["validate-structured", path.to_str().unwrap()])
+            .env_remove("SEOSMITH_ADVISORY_POLICY")
+            .env_remove("SEOSMITH_EVIDENCE_CONTRACT_V2")
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+#[test]
+fn microdata_heading_candidate_is_not_duplicated() {
+    let mut p = page();
+    p.headings = vec![(1, "Visible".into())];
+    let result = validate(
+        &p,
+        &[block(
+            json!({"types":["https://schema.org/Article"],"properties":{"headline":["Different"]}}),
+        )],
+    );
+    assert_eq!(
+        result
+            .iter()
+            .filter(|o| o.code == "headline_heading_mismatch_candidate"
+                && o.path == "/0/data/properties/headline/0")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn breadcrumb_item_references_preserve_name_evidence_and_unknowns() {
+    let data = block(
+        json!({"@graph":[{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"item":{"@id":"#page"}},{"@type":"ListItem","position":2,"item":{"@id":"#missing"}}]},{"@id":"#page","@type":"WebPage","name":"Home"}]}),
+    );
+    let result = validate(&page(), &[data]);
+    assert!(
+        !result
+            .iter()
+            .any(|o| o.code == "missing_breadcrumb_property" && o.path.ends_with("/name"))
+    );
+    assert!(
+        result
+            .iter()
+            .any(|o| o.code == "breadcrumb_item_name_unknown" && o.path.ends_with("/1/item"))
+    );
+}
+
+#[test]
+fn offer_currency_is_checked_without_assuming_price_specification() {
+    let data = block(
+        json!({"@type":"Product","name":"X","offers":[{"@type":"Offer","price":5},{"@type":"Offer","priceSpecification":{"price":5,"priceCurrency":"USD"}}]}),
+    );
+    let result = validate(&page(), &[data]);
+    assert!(
+        result
+            .iter()
+            .any(|o| o.code == "missing_offer_currency"
+                && o.path == "/0/data/offers/0/priceCurrency")
+    );
+    assert!(
+        result.iter().any(|o| o.code == "offer_currency_unknown"
+            && o.path == "/0/data/offers/1/priceSpecification")
+    );
+    assert!(
+        !result
+            .iter()
+            .any(|o| o.code == "missing_offer_currency" && o.path.contains("/offers/1/"))
+    );
+}

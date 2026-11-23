@@ -108,7 +108,24 @@ async fn main() -> Result<()> {
             .take(16 * 1024 * 1024 + 1)
             .read_to_end(&mut input)?;
         ensure!(input.len() <= 16 * 1024 * 1024, "report exceeds 16 MiB");
-        let report: seosmith::model::Report = serde_json::from_slice(&input)?;
+        let source: serde_json::Value = serde_json::from_slice(&input)?;
+        ensure!(
+            source
+                .get("schema_version")
+                .and_then(serde_json::Value::as_u64)
+                == Some(u64::from(seosmith::model::SCHEMA_VERSION)),
+            "unsupported report schema version"
+        );
+        if let Some(pages) = source.get("pages").and_then(serde_json::Value::as_array) {
+            for (i, page) in pages.iter().enumerate() {
+                ensure!(
+                    page.get("structured_data")
+                        .is_some_and(serde_json::Value::is_array),
+                    "page {i} lacks a structured_data collection; source coverage is unavailable"
+                );
+            }
+        }
+        let report: seosmith::model::Report = serde_json::from_value(source)?;
         let observations: Vec<_> = report.pages.iter().enumerate().map(|(page_index, page)| serde_json::json!({"page_index": page_index, "url": page.url, "observations": seosmith::structured_validation::validate_crawl(page, &report.pages)})).collect();
         println!(
             "{}",
