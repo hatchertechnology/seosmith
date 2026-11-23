@@ -165,6 +165,7 @@ pub struct GraphNode {
     pub reachability: &'static str,
 }
 /// Navigation distances use only observed followable links, never discovery depth.
+/// The seed must exactly match a fragment-free page URL.
 pub fn graph(
     seed: &str,
     pages: &[LocalPageEvidence],
@@ -278,7 +279,14 @@ pub struct CanonicalVariantLink {
 pub fn canonical_variant_links(
     local: &[LocalPageEvidence],
     pages: &[crate::model::Page],
-) -> Vec<CanonicalVariantLink> {
+) -> Result<Vec<CanonicalVariantLink>, DuplicatePageUrl> {
+    unique_pages(local)?;
+    let mut seen = BTreeSet::new();
+    for page in pages {
+        if !seen.insert(page.url.as_str()) {
+            return Err(DuplicatePageUrl(page.url.clone()));
+        }
+    }
     let canonical: BTreeMap<_, _> = pages
         .iter()
         .filter(|p| p.html())
@@ -289,7 +297,7 @@ pub fn canonical_variant_links(
                 .map(|c| (p.url.as_str(), c.as_str()))
         })
         .collect();
-    local
+    Ok(local
         .iter()
         .flat_map(|source| {
             source
@@ -307,7 +315,7 @@ pub fn canonical_variant_links(
                         })
                 })
         })
-        .collect()
+        .collect())
 }
 
 #[derive(Debug)]

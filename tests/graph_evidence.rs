@@ -84,7 +84,7 @@ fn canonical_variant_links_preserve_occurrence_and_do_not_validate_declaration()
         canonical: Some("https://outside.test/canonical".into()),
         ..Default::default()
     };
-    let result = canonical_variant_links(&local, &[variant]);
+    let result = canonical_variant_links(&local, &[variant]).unwrap();
     assert_eq!(result.len(), 2);
     assert_eq!(result[1].link_ordinal, 1);
     assert_eq!(
@@ -263,4 +263,50 @@ fn omitted_links_and_invalid_base_mark_extraction_incomplete() {
             "unknown"
         );
     }
+}
+
+#[test]
+fn canonical_variants_reject_duplicate_observations_in_either_order() {
+    use seosmith::{graph_evidence::canonical_variant_links, model::Page};
+    let source = page("/", "<a href='/variant'>link</a>");
+    let duplicate_source = page("/", "<a href='/other'>other</a>");
+    let a = Page {
+        url: "https://example.test/variant".into(),
+        content_type: "text/html".into(),
+        canonical: Some("https://example.test/a".into()),
+        ..Default::default()
+    };
+    let b = Page {
+        canonical: Some("https://example.test/b".into()),
+        ..a.clone()
+    };
+    for models in [[a.clone(), b.clone()], [b, a]] {
+        assert_eq!(
+            canonical_variant_links(std::slice::from_ref(&source), &models).unwrap_err(),
+            DuplicatePageUrl("https://example.test/variant".into())
+        );
+    }
+    for local in [
+        [source.clone(), duplicate_source.clone()],
+        [duplicate_source, source],
+    ] {
+        assert_eq!(
+            canonical_variant_links(&local, &[]).unwrap_err(),
+            DuplicatePageUrl("https://example.test/".into())
+        );
+    }
+}
+
+#[test]
+fn graph_requires_a_fragment_free_seed() {
+    let pages = [page("/", "<a href='/a'>link</a>"), page("/a", "")];
+    let with_fragment = graph_test("https://example.test/#fragment", &pages, true).unwrap();
+    assert!(
+        with_fragment
+            .iter()
+            .all(|node| node.reachability == "unknown")
+    );
+    let normalized = graph_test("https://example.test/", &pages, true).unwrap();
+    assert_eq!(normalized[0].navigation_distance, Some(0));
+    assert_eq!(normalized[1].navigation_distance, Some(1));
 }
