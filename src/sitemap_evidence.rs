@@ -301,6 +301,8 @@ mod scope_tests {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EntryPath {
     pub documents: Vec<String>,
+    /// Ordinal of the index entry for each consecutive document pair.
+    pub index_entry_ordinals: Vec<usize>,
     pub entry_ordinal: usize,
     pub location: String,
 }
@@ -338,9 +340,9 @@ pub fn entry_origins(
     let target = target.to_string();
     let mut paths = Vec::new();
     let mut complete = true;
-    let mut queue = std::collections::VecDeque::from([(root.clone(), vec![root])]);
+    let mut queue = std::collections::VecDeque::from([(root.clone(), vec![root], Vec::new())]);
     let mut visits = 0usize;
-    while let Some((document, path)) = queue.pop_front() {
+    while let Some((document, path, index_ordinals)) = queue.pop_front() {
         if visits >= limit {
             complete = false;
             break;
@@ -390,10 +392,13 @@ pub fn entry_origins(
                     complete = false;
                     continue;
                 }
-                queue.push_back((location, next));
+                let mut next_ordinals = index_ordinals.clone();
+                next_ordinals.push(entry.ordinal);
+                queue.push_back((location, next, next_ordinals));
             } else if location == target {
                 paths.push(EntryPath {
                     documents: path.clone(),
+                    index_entry_ordinals: index_ordinals.clone(),
                     entry_ordinal: entry.ordinal,
                     location,
                 });
@@ -433,6 +438,39 @@ mod origin_tests {
         assert!(!result.complete);
         docs.get_mut(root).unwrap().source = "https://example.com/other.xml".into();
         assert!(!entry_origins(root, target, &docs, &scope, 10).complete);
+    }
+    #[test]
+    fn repeated_and_nested_index_entries_retain_each_hop_ordinal() {
+        let scope = Url::parse("https://example.com/").unwrap();
+        let root = "https://example.com/index.xml";
+        let child = "https://example.com/child.xml";
+        let leaf = "https://example.com/leaf.xml";
+        let target = "https://example.com/a";
+        let index = parse(root, format!("<sitemapindex><sitemap><loc>{child}</loc></sitemap><sitemap><loc>{child}</loc></sitemap></sitemapindex>").as_bytes(), 2000, 10);
+        let middle = parse(
+            child,
+            format!("<sitemapindex><sitemap><loc>{leaf}</loc></sitemap></sitemapindex>").as_bytes(),
+            2000,
+            10,
+        );
+        let last = parse(
+            leaf,
+            format!("<urlset><url><loc>{target}</loc></url></urlset>").as_bytes(),
+            2000,
+            10,
+        );
+        let docs = std::collections::BTreeMap::from([
+            (root.into(), index),
+            (child.into(), middle),
+            (leaf.into(), last),
+        ]);
+        let result = entry_origins(root, target, &docs, &scope, 10);
+        assert!(result.complete);
+        assert_eq!(result.paths.len(), 2);
+        assert_eq!(result.paths[0].documents, vec![root, child, leaf]);
+        assert_eq!(result.paths[0].index_entry_ordinals, vec![0, 0]);
+        assert_eq!(result.paths[1].index_entry_ordinals, vec![1, 0]);
+        assert_eq!(result.paths[0].entry_ordinal, 0);
     }
     #[test]
     fn multiple_index_paths_and_missing_documents_are_explicit() {

@@ -19,7 +19,7 @@ pub struct Node {
     pub url: String,
     pub state: TargetState,
     pub canonical: Option<String>,
-    pub alternates: Vec<(String, String)>,
+    pub alternates: Vec<Declaration>,
     /// False when the full set of alternates could not be extracted.
     pub alternates_complete: bool,
 }
@@ -126,7 +126,7 @@ pub fn reciprocal(
     if node.state != TargetState::Available {
         return Reciprocity::Unknown;
     }
-    if node.alternates.iter().any(|(_, url)| url == source) {
+    if valid_alternates(node).any(|(_, _, target)| target == source) {
         Reciprocity::Present
     } else if node.alternates_complete {
         Reciprocity::Missing
@@ -294,6 +294,10 @@ pub fn declarations(
                     })
                 } else {
                     o.raw_language.is_some()
+                        && o.raw_rel.as_deref().is_some_and(|r| {
+                            r.split_whitespace()
+                                .any(|v| v.eq_ignore_ascii_case("alternate"))
+                        })
                 }
         })
         .map(|o| {
@@ -356,6 +360,15 @@ mod declaration_tests {
     }
 }
 
+fn valid_alternates(node: &Node) -> impl Iterator<Item = (&Declaration, &str, &str)> {
+    node.alternates.iter().filter_map(|d| {
+        if d.state != DeclarationState::Valid {
+            return None;
+        }
+        Some((d, d.language.as_deref()?, d.target.as_deref()?))
+    })
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AlternateEdge {
     pub path: Vec<String>,
@@ -363,6 +376,7 @@ pub struct AlternateEdge {
     pub language: String,
     pub target: String,
     pub reciprocal: Reciprocity,
+    pub declaration: Declaration,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AlternateCluster {
@@ -406,13 +420,13 @@ pub fn alternate_cluster(
         if node.state != TargetState::Available {
             continue;
         }
-        for (_, target) in &node.alternates {
+        for (_, _, target) in valid_alternates(node) {
             if indexed >= limit.saturating_mul(20).min(100_000) {
                 complete = false;
                 break 'index;
             }
             reverse
-                .entry(target.clone())
+                .entry(target.to_owned())
                 .or_default()
                 .push(source.clone());
             indexed += 1;
@@ -461,7 +475,7 @@ pub fn alternate_cluster(
                 }
             }
         }
-        for (language, target) in &node.alternates {
+        for (declaration, language, target) in valid_alternates(node) {
             if edges.len() >= limit.saturating_mul(20).min(100_000) {
                 complete = false;
                 break;
@@ -474,19 +488,20 @@ pub fn alternate_cluster(
                 complete = false;
             }
             let mut edge_path = path.clone();
-            edge_path.push(target.clone());
+            edge_path.push(target.to_owned());
             edges.push(AlternateEdge {
                 path: edge_path.clone(),
                 source: url.clone(),
-                language: language.clone(),
-                target: target.clone(),
+                language: language.to_owned(),
+                target: target.to_owned(),
                 reciprocal: reciprocity.clone(),
+                declaration: declaration.clone(),
             });
-            if reciprocity != Reciprocity::OutsideScope && queued.insert(target.clone()) {
+            if reciprocity != Reciprocity::OutsideScope && queued.insert(target.to_owned()) {
                 if queued.len() > limit || edge_path.len() > 128 {
                     complete = false;
                 } else {
-                    queue.push_back((target.clone(), edge_path));
+                    queue.push_back((target.to_owned(), edge_path));
                 }
             }
         }
@@ -495,6 +510,18 @@ pub fn alternate_cluster(
         members: seen.into_iter().collect(),
         edges,
         complete,
+    }
+}
+#[cfg(test)]
+fn test_alternate(language: &str, target: &str) -> Declaration {
+    Declaration {
+        source: "html_head_link".into(),
+        ordinal: 0,
+        entry_index: None,
+        raw: Some(target.into()),
+        language: Some(language.into()),
+        state: DeclarationState::Valid,
+        target: Some(target.into()),
     }
 }
 #[cfg(test)]
@@ -513,8 +540,8 @@ mod cluster_tests {
                     state: TargetState::Available,
                     canonical: None,
                     alternates: vec![
-                        ("fr".into(), b.into()),
-                        ("de".into(), "https://outside.example/".into()),
+                        test_alternate("fr", b),
+                        test_alternate("de", "https://outside.example/"),
                     ],
                     alternates_complete: true,
                 },
@@ -525,7 +552,7 @@ mod cluster_tests {
                     url: b.into(),
                     state: TargetState::Available,
                     canonical: None,
-                    alternates: vec![("en".into(), a.into())],
+                    alternates: vec![test_alternate("en", a)],
                     alternates_complete: true,
                 },
             ),
@@ -876,10 +903,7 @@ pub fn node_from_capture(
         && alternate_declarations
             .iter()
             .all(|d| d.state == DeclarationState::Valid);
-    let alternates = alternate_declarations
-        .into_iter()
-        .filter_map(|d| Some((d.language?, d.target?)))
-        .collect();
+    let alternates = alternate_declarations;
     Some(Node {
         url: capture.url.clone(),
         state,
@@ -891,6 +915,71 @@ pub fn node_from_capture(
 #[cfg(test)]
 mod capture_node_tests {
     use super::*;
+    #[test]
+    fn mixed_declarations_keep_locators_but_only_valid_alternates_form_edges() {
+        let base = Url::parse("https://example.com/a").unwrap();
+        let mut capture =
+            crate::collection_evidence::PageCapture::unavailable(base.as_str(), "available");
+        capture.html = Some(crate::collection_evidence::html_occurrences(
+            "<html><head><link rel='stylesheet' hreflang='fr' href='/style.css'><link rel='alternate' hreflang='fr' href='/b'></head><body><link rel='alternate' hreflang='de' href='/bad'></body></html>",
+            true,
+        ));
+        capture.http = Some(crate::collection_evidence::http_occurrences(&[
+            (
+                "link",
+                "</b>; rel=alternate; hreflang=fr, </b>; rel=alternate; hreflang=fr",
+            ),
+            ("link", "</b>; rel=alternate; hreflang=fr"),
+        ]));
+        let node = node_from_capture(&capture, &base, &base).unwrap();
+        assert_eq!(node.alternates.len(), 5);
+        assert!(!node.alternates_complete);
+        assert_eq!(
+            node.alternates
+                .iter()
+                .filter(|d| d.state == DeclarationState::OutsideHead)
+                .count(),
+            1
+        );
+        assert!(
+            node.alternates
+                .iter()
+                .all(|d| d.target.as_deref() != Some("https://example.com/style.css"))
+        );
+        let nodes = BTreeMap::from([(node.url.clone(), node)]);
+        let cluster = alternate_cluster(base.as_str(), &nodes, &base, 20, true);
+        assert_eq!(cluster.edges.len(), 4);
+        assert!(
+            cluster
+                .edges
+                .iter()
+                .all(|edge| edge.target == "https://example.com/b"
+                    && edge.declaration.state == DeclarationState::Valid)
+        );
+        let locators: Vec<_> = cluster
+            .edges
+            .iter()
+            .map(|e| {
+                (
+                    e.declaration.source.as_str(),
+                    e.declaration.ordinal,
+                    e.declaration.entry_index,
+                )
+            })
+            .collect();
+        assert!(
+            locators
+                .iter()
+                .any(|(source, _, index)| *source == "html_head_link" && index.is_none())
+        );
+        assert!(locators.contains(&("http_link", 0, Some(0))));
+        assert!(locators.contains(&("http_link", 0, Some(1))));
+        assert!(locators.contains(&("http_link", 1, Some(0))));
+        assert_eq!(
+            reciprocal("https://example.com/bad", base.as_str(), &nodes, &base),
+            Reciprocity::Unknown
+        );
+    }
     #[test]
     fn incomplete_or_conflicting_canonical_cannot_be_a_terminal_node() {
         let base = Url::parse("https://example.com/a").unwrap();
@@ -941,18 +1030,18 @@ pub fn assess_alternates(node: &Node) -> AlternateAssessment {
     let complete = node.state == TargetState::Available && node.alternates_complete;
     let mut issues = Vec::new();
     let mut by_language = BTreeMap::<String, BTreeSet<String>>::new();
-    for (language, target) in &node.alternates {
+    for (_, language, target) in valid_alternates(node) {
         let normalized = language.to_ascii_lowercase();
         if normalized != "x-default" && language.parse::<language_tags::LanguageTag>().is_err() {
             issues.push(AlternateIssue::InvalidLanguage {
-                language: language.clone(),
-                target: target.clone(),
+                language: language.to_owned(),
+                target: target.to_owned(),
             });
         }
         by_language
             .entry(normalized)
             .or_default()
-            .insert(target.clone());
+            .insert(target.to_owned());
     }
     for (language, targets) in by_language {
         if targets.len() > 1 {
@@ -963,11 +1052,8 @@ pub fn assess_alternates(node: &Node) -> AlternateAssessment {
         }
     }
     if complete
-        && !node.alternates.is_empty()
-        && !node
-            .alternates
-            .iter()
-            .any(|(_, target)| target == &node.url)
+        && valid_alternates(node).next().is_some()
+        && !valid_alternates(node).any(|(_, _, target)| target == node.url)
     {
         issues.push(AlternateIssue::MissingSelf);
     }
@@ -983,8 +1069,8 @@ mod alternate_assessment_tests {
             state: TargetState::Available,
             canonical: None,
             alternates: vec![
-                ("en".into(), "https://example.com/b".into()),
-                ("EN".into(), "https://example.com/c".into()),
+                test_alternate("en", "https://example.com/b"),
+                test_alternate("EN", "https://example.com/c"),
             ],
             alternates_complete: false,
         };
@@ -1000,7 +1086,7 @@ mod alternate_assessment_tests {
                 .iter()
                 .any(|i| matches!(i, AlternateIssue::ConflictingLanguage { .. }))
         );
-        n.alternates = vec![("en".into(), n.url.clone())];
+        n.alternates = vec![test_alternate("en", &n.url)];
         assert_eq!(assess_alternates(&n).issues.len(), 0);
     }
 }
