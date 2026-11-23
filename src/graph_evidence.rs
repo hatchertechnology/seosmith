@@ -39,18 +39,29 @@ pub struct LocalPageEvidence {
 /// Extract link evidence from supplied HTML.
 pub fn extract(url: &Url, html: &str, _status: u16) -> LocalPageEvidence {
     let doc = Html::parse_document(html);
-    let base = doc
-        .select(&selector("base[href]"))
-        .next()
-        .and_then(|e| url.join(e.value().attr("href")?).ok())
-        .filter(|u| {
-            matches!(u.scheme(), "http" | "https")
-                && u.username().is_empty()
-                && u.password().is_none()
-        })
-        .unwrap_or_else(|| url.clone());
-    let mut links = Vec::new();
     let mut complete = true;
+    let base = if let Some(element) = doc.select(&selector("base[href]")).next() {
+        match element
+            .value()
+            .attr("href")
+            .and_then(|href| url.join(href).ok())
+        {
+            Some(base)
+                if matches!(base.scheme(), "http" | "https")
+                    && base.username().is_empty()
+                    && base.password().is_none() =>
+            {
+                base
+            }
+            _ => {
+                complete = false;
+                url.clone()
+            }
+        }
+    } else {
+        url.clone()
+    };
+    let mut links = Vec::new();
     for el in doc.select(&selector("a[href],area[href]")) {
         if links.len() == 2000 {
             complete = false;
@@ -61,12 +72,14 @@ pub fn extract(url: &Url, html: &str, _status: u16) -> LocalPageEvidence {
             complete = false;
         }
         let Ok(target) = base.join(raw.trim()) else {
+            complete = false;
             continue;
         };
         if !matches!(target.scheme(), "http" | "https")
             || !target.username().is_empty()
             || target.password().is_some()
         {
+            complete = false;
             continue;
         }
         let rel = el
@@ -155,9 +168,12 @@ pub struct GraphNode {
 pub fn graph(
     seed: &str,
     pages: &[LocalPageEvidence],
-    crawl_complete: bool,
+    coverage: &GraphCoverageInput,
 ) -> Result<Vec<GraphNode>, DuplicatePageUrl> {
     let by_url = unique_pages(pages)?;
+    let coverage_complete = graph_coverage(coverage).complete
+        && coverage.observed_pages == pages.len()
+        && coverage.truncated_pages == pages.iter().filter(|p| !p.extraction_complete).count();
     let mut incoming: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
     for page in pages {
         for link in &page.links {
@@ -195,7 +211,7 @@ pub fn graph(
                 navigation_distance: distance,
                 reachability: if distance.is_some() {
                     "reachable"
-                } else if crawl_complete
+                } else if coverage_complete
                     && by_url.contains_key(seed)
                     && pages.iter().all(|p| p.extraction_complete)
                 {

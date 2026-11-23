@@ -1,5 +1,26 @@
-use seosmith::graph_evidence::{extract, graph};
+use seosmith::graph_evidence::{
+    DuplicatePageUrl, GraphCoverageInput, GraphNode, LocalPageEvidence, extract, graph,
+};
 use url::Url;
+fn graph_test(
+    seed: &str,
+    pages: &[LocalPageEvidence],
+    complete: bool,
+) -> Result<Vec<GraphNode>, DuplicatePageUrl> {
+    graph(
+        seed,
+        pages,
+        &GraphCoverageInput {
+            discovery_complete: Some(complete),
+            expected_pages: Some(pages.len()),
+            observed_pages: pages.len(),
+            unavailable_pages: 0,
+            truncated_pages: pages.iter().filter(|p| !p.extraction_complete).count(),
+            omitted_records: Some(0),
+            comparisons_complete: Some(true),
+        },
+    )
+}
 fn page(path: &str, html: &str) -> seosmith::graph_evidence::LocalPageEvidence {
     extract(
         &Url::parse(&format!("https://example.test{path}")).unwrap(),
@@ -19,7 +40,7 @@ fn graph_uses_navigation_not_discovery_and_preserves_fragments() {
     assert_eq!(home.links[0].fetch_url, "https://example.test/a");
     assert_eq!(home.links[0].context, "nav");
     assert!(a.ids.contains("part"));
-    let nodes = graph("https://example.test/", &[home, a, sitemap_only], true).unwrap();
+    let nodes = graph_test("https://example.test/", &[home, a, sitemap_only], true).unwrap();
     assert_eq!(nodes[1].navigation_distance, Some(1));
     assert_eq!(nodes[1].unique_inlinks, 1);
     assert_eq!(nodes[2].navigation_distance, None);
@@ -27,7 +48,7 @@ fn graph_uses_navigation_not_discovery_and_preserves_fragments() {
 }
 #[test]
 fn incomplete_crawl_does_not_claim_unreachable() {
-    let nodes = graph(
+    let nodes = graph_test(
         "https://example.test/",
         &[page("/", ""), page("/other", "")],
         false,
@@ -111,11 +132,11 @@ fn graph_coverage_requires_known_reconciled_sources_and_no_omissions() {
 fn missing_seed_nofollow_and_truncation_remain_conservative() {
     let other = page("/other", "");
     assert_eq!(
-        graph("https://example.test/", &[other], true).unwrap()[0].reachability,
+        graph_test("https://example.test/", &[other], true).unwrap()[0].reachability,
         "unknown"
     );
     let home = page("/", "<a rel=nofollow href='/other'>No follow</a>");
-    let nodes = graph("https://example.test/", &[home, page("/other", "")], true).unwrap();
+    let nodes = graph_test("https://example.test/", &[home, page("/other", "")], true).unwrap();
     assert_eq!(nodes[1].unique_inlinks, 1);
     assert_eq!(nodes[1].navigation_distance, None);
     let html = format!("<a href='/{}'>long</a>", "x".repeat(2050));
@@ -170,7 +191,7 @@ fn duplicate_page_urls_are_rejected_in_either_order() {
         [empty.clone(), linked.clone(), target.clone()],
     ] {
         assert_eq!(
-            graph("https://example.test/", &pages, true).unwrap_err(),
+            graph_test("https://example.test/", &pages, true).unwrap_err(),
             DuplicatePageUrl("https://example.test/".into())
         );
         assert_eq!(
@@ -187,6 +208,59 @@ fn duplicate_page_urls_are_rejected_in_either_order() {
         assert_eq!(
             fragment_checks(&pages).unwrap_err(),
             DuplicatePageUrl("https://example.test/a".into())
+        );
+    }
+}
+
+#[test]
+fn negative_reachability_requires_reconciled_coverage() {
+    let pages = [
+        page("/", "<a href='/a'>a</a>"),
+        page("/a", ""),
+        page("/unlinked", ""),
+    ];
+    let mut coverage = GraphCoverageInput {
+        discovery_complete: Some(true),
+        expected_pages: Some(99),
+        observed_pages: 3,
+        unavailable_pages: 0,
+        truncated_pages: 0,
+        omitted_records: Some(0),
+        comparisons_complete: Some(true),
+    };
+    let result = graph("https://example.test/", &pages, &coverage).unwrap();
+    assert_eq!(result[1].reachability, "reachable");
+    assert_eq!(result[2].reachability, "unknown");
+    coverage.expected_pages = Some(2);
+    coverage.observed_pages = 2;
+    assert_eq!(
+        graph("https://example.test/", &pages, &coverage).unwrap()[2].reachability,
+        "unknown"
+    );
+    coverage.expected_pages = Some(3);
+    coverage.observed_pages = 3;
+    assert_eq!(
+        graph("https://example.test/", &pages, &coverage).unwrap()[2].reachability,
+        "not_observed_reachable"
+    );
+}
+
+#[test]
+fn omitted_links_and_invalid_base_mark_extraction_incomplete() {
+    for html in [
+        "<a href='mailto:a@example.test'>mail</a>",
+        "<a href='javascript:void(0)'>js</a>",
+        "<a href='https://u:p@example.test/'>credentials</a>",
+        "<a href='http://['>invalid</a>",
+        "<base href='http://['><a href='/a'>a</a>",
+        "<base href='https://u:p@example.test/'><a href='/a'>a</a>",
+    ] {
+        let home = page("/", html);
+        assert!(!home.extraction_complete, "{html}");
+        let pages = [home, page("/unlinked", "")];
+        assert_eq!(
+            graph_test("https://example.test/", &pages, true).unwrap()[1].reachability,
+            "unknown"
         );
     }
 }
