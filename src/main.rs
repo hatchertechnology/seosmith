@@ -205,7 +205,11 @@ async fn main() -> Result<()> {
                 job.request_id == r.request_id,
                 "database contains another queued job; use serve to drain it"
             );
-            let mut report = crawler::crawl(&store, &job).await?;
+            let mut report = if policy.is_some() {
+                crawler::crawl_local(&store, &job).await?
+            } else {
+                crawler::crawl(&store, &job).await?
+            };
             if let Some(policy) = &policy {
                 let result = seosmith::policy::apply_with_evidence(&mut report, policy);
                 if result.is_ok() {

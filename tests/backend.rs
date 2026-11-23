@@ -608,3 +608,47 @@ async fn rejected_reports_do_not_exhaust_queue_or_expire() {
         .unwrap();
     assert!(store.submit(&request()).await.is_err());
 }
+
+#[tokio::test]
+async fn local_crawl_persists_typed_evidence_across_reopen_without_delivery() {
+    let (dir, store) = db().await;
+    let r = request();
+    let id = r.request_id.to_string();
+    store.submit_local(&r).await.unwrap();
+    store.claim_local(&id).await.unwrap().unwrap();
+    let fixture = Fixture {
+        calls: Arc::default(),
+    };
+    let report = crawler::crawl_local_with(&store, &r, &fixture)
+        .await
+        .unwrap();
+    assert_eq!(report.pages.len(), 4);
+    store.finish_local_only(&id).await.unwrap();
+    drop(store);
+    let store = Store::open(dir.path().join("test.sqlite").to_str().unwrap())
+        .await
+        .unwrap();
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT url,evidence FROM local_page_evidence WHERE job_id=? ORDER BY url")
+            .bind(&id)
+            .fetch_all(&store.0)
+            .await
+            .unwrap();
+    assert_eq!(rows.len(), 4);
+    for (url, value) in rows {
+        let value: serde_json::Value = serde_json::from_str(&value).unwrap();
+        assert_eq!(value["capture"]["url"], url);
+        assert_eq!(value["capture"]["collectors"].as_array().unwrap().len(), 3);
+        if url.ends_with("/private") {
+            assert_eq!(
+                value["capture"]["collectors"][0]["reason"],
+                "blocked_by_robots"
+            );
+        } else if url.ends_with('/') {
+            assert_eq!(value["capture"]["collectors"][0]["state"], "observed");
+            assert_eq!(value["capture"]["collectors"][1]["data"]["url"], url);
+        }
+    }
+    assert!(store.pending().await.unwrap().is_none());
+    assert!(store.report(&id).await.unwrap().is_none());
+}
