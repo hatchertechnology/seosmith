@@ -5,9 +5,11 @@ pub mod crawler;
 pub mod delivery;
 pub mod fetch;
 pub mod index_evidence;
+pub mod integrity_evidence;
 pub mod model;
 pub mod parse;
 pub mod robots_evidence;
+pub mod sitemap_evidence;
 pub mod store;
 
 pub mod extract;
