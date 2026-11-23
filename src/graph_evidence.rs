@@ -111,7 +111,14 @@ pub fn extract(url: &Url, html: &str, _status: u16) -> LocalPageEvidence {
     let ids = doc
         .select(&selector("[id],a[name]"))
         .take(10000)
-        .flat_map(|e| [e.value().attr("id"), e.value().attr("name")])
+        .flat_map(|e| {
+            [
+                e.value().attr("id"),
+                (e.value().name() == "a")
+                    .then(|| e.value().attr("name"))
+                    .flatten(),
+            ]
+        })
         .flatten()
         .map(str::to_owned)
         .collect();
@@ -122,6 +129,21 @@ pub fn extract(url: &Url, html: &str, _status: u16) -> LocalPageEvidence {
         extraction_complete: complete,
     }
 }
+/// Duplicate URL observations require caller reconciliation before analysis.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DuplicatePageUrl(pub String);
+
+fn unique_pages(
+    pages: &[LocalPageEvidence],
+) -> Result<BTreeMap<&str, &LocalPageEvidence>, DuplicatePageUrl> {
+    let mut by_url = BTreeMap::new();
+    for page in pages {
+        if by_url.insert(page.url.as_str(), page).is_some() {
+            return Err(DuplicatePageUrl(page.url.clone()));
+        }
+    }
+    Ok(by_url)
+}
 #[derive(Debug, Serialize)]
 pub struct GraphNode {
     pub url: String,
@@ -130,8 +152,12 @@ pub struct GraphNode {
     pub reachability: &'static str,
 }
 /// Navigation distances use only observed followable links, never discovery depth.
-pub fn graph(seed: &str, pages: &[LocalPageEvidence], crawl_complete: bool) -> Vec<GraphNode> {
-    let by_url: BTreeMap<_, _> = pages.iter().map(|p| (p.url.as_str(), p)).collect();
+pub fn graph(
+    seed: &str,
+    pages: &[LocalPageEvidence],
+    crawl_complete: bool,
+) -> Result<Vec<GraphNode>, DuplicatePageUrl> {
+    let by_url = unique_pages(pages)?;
     let mut incoming: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
     for page in pages {
         for link in &page.links {
@@ -159,7 +185,7 @@ pub fn graph(seed: &str, pages: &[LocalPageEvidence], crawl_complete: bool) -> V
             }
         }
     }
-    pages
+    Ok(pages
         .iter()
         .map(|p| {
             let distance = distances.get(p.url.as_str()).copied();
@@ -179,9 +205,8 @@ pub fn graph(seed: &str, pages: &[LocalPageEvidence], crawl_complete: bool) -> V
                 },
             }
         })
-        .collect()
+        .collect())
 }
-/// Jaccard similarity of bounded unique tokens; candidates require human review.
 #[derive(Debug, Serialize)]
 pub struct FragmentCheck {
     pub source: String,
@@ -190,8 +215,10 @@ pub struct FragmentCheck {
     pub state: &'static str,
 }
 /// Encoded fragments remain unknown until a matching browser-compatible decoder is used.
-pub fn fragment_checks(pages: &[LocalPageEvidence]) -> Vec<FragmentCheck> {
-    let by_url: BTreeMap<_, _> = pages.iter().map(|p| (p.url.as_str(), p)).collect();
+pub fn fragment_checks(
+    pages: &[LocalPageEvidence],
+) -> Result<Vec<FragmentCheck>, DuplicatePageUrl> {
+    let by_url = unique_pages(pages)?;
     let mut checks = Vec::new();
     for p in pages {
         for link in &p.links {
@@ -203,10 +230,12 @@ pub fn fragment_checks(pages: &[LocalPageEvidence]) -> Vec<FragmentCheck> {
                 } else if let Some(target) = by_url.get(link.fetch_url.as_str()) {
                     if target.ids.contains(fragment) {
                         "present"
-                    } else if target.extraction_complete {
-                        "absent"
-                    } else {
+                    } else if !target.extraction_complete {
                         "unknown_truncated"
+                    } else if fragment.eq_ignore_ascii_case("top") {
+                        "top"
+                    } else {
+                        "absent"
                     }
                 } else {
                     "unknown_target"
@@ -220,9 +249,8 @@ pub fn fragment_checks(pages: &[LocalPageEvidence]) -> Vec<FragmentCheck> {
             }
         }
     }
-    checks
+    Ok(checks)
 }
-/// Propagate static resource dependencies back to HTML pages, with cycles bounded by visited URLs.
 #[derive(Debug, Serialize)]
 pub struct CanonicalVariantLink {
     pub source: String,
