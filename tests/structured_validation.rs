@@ -717,6 +717,92 @@ fn price_specification_currency_reference_reports_definition_occurrence() {
     assert!(!result.iter().any(|o| o.code == "missing_offer_currency"));
 }
 
+/// A `priceSpecification` completed from a separate Offer definition reports the
+/// definition's property occurrence, not a position on the inline Offer, for an
+/// expanded object, an array and extracted microdata.
+#[test]
+fn inherited_price_specification_reports_definition_occurrence() {
+    // The reviewed shape: a typed Offer completed from an untyped definition
+    // that holds the expanded specification.
+    let inherited = validate(
+        &page(),
+        &[block(json!({"@context":"https://schema.org","@graph":[
+            {"@type":"Product","name":"Widget","offers":{"@type":"Offer","@id":"#offer"}},
+            {"@id":"#offer","priceSpecification":{"@type":"UnitPriceSpecification","price":5,"priceCurrency":"EUR"}}
+        ]}))],
+    );
+    assert!(
+        inherited
+            .iter()
+            .any(|o| o.code == "offer_currency_from_price_specification"
+                && o.path == "/0/data/@graph/1/priceSpecification/priceCurrency"
+                && o.value == Some(json!("EUR")))
+    );
+    assert!(!inherited.iter().any(|o| {
+        o.path
+            .starts_with("/0/data/@graph/0/offers/priceSpecification")
+    }));
+
+    // The inherited property can itself be an array of specifications.
+    let array = validate(
+        &page(),
+        &[block(json!({"@graph":[
+            {"@type":"Product","name":"Widget","offers":{"@type":"Offer","@id":"#offer"}},
+            {"@id":"#offer","priceSpecification":[
+                {"@type":"UnitPriceSpecification","price":5,"priceCurrency":"GBP"},
+                {"@type":"UnitPriceSpecification","price":6,"priceCurrency":"GBP"}
+            ]}
+        ]}))],
+    );
+    assert!(
+        array
+            .iter()
+            .any(|o| o.code == "offer_currency_from_price_specification"
+                && o.path == "/0/data/@graph/1/priceSpecification/0/priceCurrency"
+                && o.value == Some(json!("GBP")))
+    );
+
+    // Extracted microdata keeps the definition's property container too.
+    let microdata = validate(
+        &page(),
+        &[
+            StructuredData {
+                format: "microdata".into(),
+                data: Some(json!({
+                    "types":["https://schema.org/Product"],
+                    "properties":{
+                        "name":["Widget"],
+                        "offers":[{
+                            "types":["https://schema.org/Offer"],
+                            "id":"#offer",
+                            "properties":{"price":[5]}
+                        }]
+                    }
+                })),
+                error: None,
+            },
+            StructuredData {
+                format: "microdata".into(),
+                data: Some(json!({
+                    "id":"#offer",
+                    "properties":{"priceSpecification":[{
+                        "types":["https://schema.org/UnitPriceSpecification"],
+                        "properties":{"price":[5],"priceCurrency":["CAD"]}
+                    }]}
+                })),
+                error: None,
+            },
+        ],
+    );
+    assert!(
+        microdata
+            .iter()
+            .any(|o| o.code == "offer_currency_from_price_specification"
+                && o.path == "/1/data/properties/priceSpecification/0/properties/priceCurrency/0"
+                && o.value == Some(json!("CAD")))
+    );
+}
+
 fn bound_pages() -> Vec<Page> {
     let report: seosmith::model::Report =
         serde_json::from_str(include_str!("../fixtures/s04/bounds/output-bound.json")).unwrap();
@@ -771,20 +857,20 @@ fn aggregate_report_output_bound_is_exact_and_distinguishes_omission() {
     let pages = bound_pages();
     assert_eq!(pages.len(), 4);
 
-    // A limit below the smallest envelope is explicit, not a silently oversized
-    // report.
-    match report_wrapper_with_limit(&pages, 1) {
-        Err(ReportOutputError::TooSmall { limit, minimum }) => {
-            assert_eq!(limit, 1);
-            assert!(minimum > 1);
-        }
-        other => panic!("expected explicit too-small error, got {other:?}"),
-    }
-
     // First-page boundary: the first examined page does not fit even alone, so
     // it is not force-retained. The marker distinguishes examined/omitted from
     // never-examined trailing pages.
     let first = smallest_limit_for_retained(&pages, 0);
+
+    // A limit below the smallest envelope is explicit, not a silently oversized
+    // report. The reported minimum is the valid fixed point of that envelope.
+    match report_wrapper_with_limit(&pages, 1) {
+        Err(ReportOutputError::TooSmall { limit, minimum }) => {
+            assert_eq!(limit, 1);
+            assert_eq!(minimum, first);
+        }
+        other => panic!("expected explicit too-small error, got {other:?}"),
+    }
     let bounded = report_wrapper_with_limit(&pages, first).unwrap();
     assert_eq!(bounded.serialized.len(), first);
     assert_eq!(
@@ -1275,6 +1361,160 @@ fn checked_in_s04_fixtures_run_through_cli_without_mutation() {
         assert_eq!(std::fs::read(&path).unwrap(), fixture);
         assert!(!database.exists());
     }
+}
+
+/// Resolve an RFC 6901 pointer relative to a page's `structured_data` in the
+/// original saved source.
+fn saved_source_value<'a>(
+    source: &'a serde_json::Value,
+    pointer: &str,
+) -> Option<&'a serde_json::Value> {
+    let mut current = source;
+    for token in pointer.strip_prefix('/')?.split('/') {
+        let token = token.replace("~1", "/").replace("~0", "~");
+        current = match current {
+            serde_json::Value::Array(items) => items.get(token.parse::<usize>().ok()?)?,
+            serde_json::Value::Object(fields) => fields.get(token.as_str())?,
+            _ => return None,
+        };
+    }
+    Some(current)
+}
+
+/// Price-specification currency pointers from the real CLI resolve into the
+/// original saved source for both direct and Offer-definition-inherited values,
+/// including an inherited array and extracted microdata.
+#[test]
+fn price_specification_currency_pointers_resolve_in_original_saved_source() {
+    struct CurrencyCase {
+        blocks: Vec<serde_json::Value>,
+        expected: Vec<(&'static str, &'static str)>,
+    }
+    let json_ld = |data: serde_json::Value| json!({"format":"json_ld","data":data,"error":null});
+    let microdata =
+        |data: serde_json::Value| json!({"format":"microdata","data":data,"error":null});
+    let pages = [
+        CurrencyCase {
+            blocks: vec![json_ld(
+                json!({"@context":"https://schema.org","@type":"Product","name":"Direct","offers":{"@type":"Offer","priceSpecification":{"@type":"UnitPriceSpecification","price":5,"priceCurrency":"USD"}}}),
+            )],
+            expected: vec![("/0/data/offers/priceSpecification/priceCurrency", "USD")],
+        },
+        CurrencyCase {
+            blocks: vec![json_ld(json!({"@context":"https://schema.org","@graph":[
+                {"@type":"Product","name":"Inherited","offers":{"@type":"Offer","@id":"#offer"}},
+                {"@id":"#offer","priceSpecification":{"@type":"UnitPriceSpecification","price":5,"priceCurrency":"EUR"}}
+            ]}))],
+            expected: vec![("/0/data/@graph/1/priceSpecification/priceCurrency", "EUR")],
+        },
+        CurrencyCase {
+            blocks: vec![json_ld(json!({"@graph":[
+                {"@type":"Product","name":"Array","offers":{"@type":"Offer","@id":"#offer"}},
+                {"@id":"#offer","priceSpecification":[
+                    {"@type":"UnitPriceSpecification","price":5,"priceCurrency":"GBP"},
+                    {"@type":"UnitPriceSpecification","price":6,"priceCurrency":"GBP"}
+                ]}
+            ]}))],
+            expected: vec![("/0/data/@graph/1/priceSpecification/0/priceCurrency", "GBP")],
+        },
+        CurrencyCase {
+            blocks: vec![
+                microdata(
+                    json!({"types":["https://schema.org/Product"],"properties":{"name":["Micro"],"offers":[{"types":["https://schema.org/Offer"],"id":"#offer","properties":{"price":[5]}}]}}),
+                ),
+                microdata(
+                    json!({"id":"#offer","properties":{"priceSpecification":[{"types":["https://schema.org/UnitPriceSpecification"],"properties":{"price":[5],"priceCurrency":["CAD"]}}]}}),
+                ),
+            ],
+            expected: vec![(
+                "/1/data/properties/priceSpecification/0/properties/priceCurrency/0",
+                "CAD",
+            )],
+        },
+    ];
+    let report = json!({
+        "schema_version": 1,
+        "engine_version": "0.2.0",
+        "ruleset_version": "2026-11-01.1",
+        "request": {
+            "request_id": "00000000-0000-4000-8000-000000000059",
+            "website_id": "00000000-0000-4000-8000-000000000004",
+            "binding_generation": 1,
+            "url": "https://example.com/",
+            "max_pages": 10,
+            "max_duration_seconds": 30,
+            "delay_ms": 1000,
+            "check_external_links": false,
+            "max_resources": 0
+        },
+        "started_at": "2026-11-24T00:00:00Z",
+        "finished_at": "2026-11-24T00:00:01Z",
+        "outcome": "completed",
+        "stop_reason": "frontier_exhausted",
+        "coverage_complete": true,
+        "pages": pages
+            .iter()
+            .enumerate()
+            .map(|(index, case)| json!({
+                "url": format!("https://example.com/currency-{index}"),
+                "status": 200,
+                "content_type": "text/html",
+                "structured_data": case.blocks,
+            }))
+            .collect::<Vec<_>>(),
+        "findings": [],
+    });
+    let fixture = serde_json::to_vec(&report).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("report.json");
+    let database = dir.path().join("absent.sqlite");
+    std::fs::write(&path, &fixture).unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_seosmith"))
+        .args([
+            "--database",
+            database.to_str().unwrap(),
+            "validate-structured",
+            path.to_str().unwrap(),
+        ])
+        .env_remove("SEOSMITH_ADVISORY_POLICY")
+        .env_remove("SEOSMITH_EVIDENCE_CONTRACT_V2")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let sidecar: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let results = sidecar["structured_validation"].as_array().unwrap();
+    assert_eq!(results.len(), pages.len());
+    for (index, case) in pages.iter().enumerate() {
+        let source_page = &report["pages"][index];
+        let source = &source_page["structured_data"];
+        let observations = results[index]["observations"].as_array().unwrap();
+        let observed: Vec<(String, serde_json::Value)> = observations
+            .iter()
+            .filter(|o| o["code"] == "offer_currency_from_price_specification")
+            .map(|o| (o["path"].as_str().unwrap().to_string(), o["value"].clone()))
+            .collect();
+        assert_eq!(
+            observed,
+            case.expected
+                .iter()
+                .map(|(pointer, value)| ((*pointer).to_string(), json!(value)))
+                .collect::<Vec<_>>(),
+            "page {index} currency pointers"
+        );
+        for (pointer, value) in &observed {
+            assert_eq!(
+                saved_source_value(source, pointer),
+                Some(&json!(value)),
+                "page {index} pointer {pointer} must resolve in the saved source"
+            );
+        }
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), fixture);
+    assert!(!database.exists());
 }
 
 /// A node carrying a local `@id` is completed from one separate retained

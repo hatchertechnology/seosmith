@@ -602,10 +602,16 @@ fn check_item(
                         // each with the property's actual occurrence pointer.
                         let mut specification_currencies: Vec<(String, String, Value)> = Vec::new();
                         let mut invalid_specification_currencies = 0usize;
+                        // The property may be completed from a separate Offer
+                        // definition; its actual occurrence is the definition's
+                        // property, not a position on the inline Offer.
+                        let specification_container = op
+                            .merged_path("priceSpecification")
+                            .unwrap_or_else(|| format!("{opath}/priceSpecification"));
                         if let Some(specifications) = op.get("priceSpecification") {
                             for (i, specification) in values(specifications).iter().enumerate() {
                                 let path = format!(
-                                    "{opath}/priceSpecification{}",
+                                    "{specification_container}{}",
                                     if specifications.is_array() {
                                         format!("/{i}")
                                     } else {
@@ -706,7 +712,7 @@ fn check_item(
                                     out,
                                     "coverage",
                                     "offer_currency_ambiguous",
-                                    format!("{opath}/priceSpecification"),
+                                    specification_container.clone(),
                                     None,
                                     "Multiple distinct currency codes were retained in price specifications; no single currency can be established",
                                 );
@@ -726,7 +732,7 @@ fn check_item(
                                     out,
                                     "coverage",
                                     "offer_currency_unknown",
-                                    format!("{opath}/priceSpecification"),
+                                    specification_container.clone(),
                                     None,
                                     "A price specification could not be expanded; currency alternatives remain unknown",
                                 );
