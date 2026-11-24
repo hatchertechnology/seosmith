@@ -1,5 +1,6 @@
 mod resource_impact_cli;
 mod saved_graph;
+mod saved_index_integrity;
 mod saved_pair;
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
@@ -78,6 +79,10 @@ enum Command {
         /// Peer content type for --peer-html.
         #[arg(long)]
         peer_content_type: Option<String>,
+    },
+    /// Explain saved effective indexing and canonical, hreflang and sitemap evidence.
+    SavedIndexIntegrity {
+        request_id: uuid::Uuid,
     },
     Rules,
     /// Validate a saved report locally without submitting or delivering a job.
@@ -233,6 +238,15 @@ async fn main() -> Result<()> {
         .await?;
         return Ok(());
     }
+    if let Command::SavedIndexIntegrity { request_id } = cli.command {
+        ensure!(
+            policy.is_none() && !cli.evidence_contract_v2,
+            "saved index integrity does not accept report options"
+        );
+        saved_index_integrity::run(std::path::Path::new(&cli.database), &request_id.to_string())
+            .await?;
+        return Ok(());
+    }
     if let Command::Operations { operation } = cli.command {
         if policy.is_some() {
             eprintln!(
@@ -291,7 +305,8 @@ async fn main() -> Result<()> {
         | Command::ValidateStructured { .. }
         | Command::SavedGraph { .. }
         | Command::ResourceImpact { .. }
-        | Command::SavedPair { .. } => {}
+        | Command::SavedPair { .. }
+        | Command::SavedIndexIntegrity { .. } => {}
         Command::Crawl { request } => {
             let r: CrawlRequest = serde_json::from_slice(&tokio::fs::read(request).await?)?;
 
