@@ -1,3 +1,4 @@
+mod saved_graph;
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
 use seosmith::{
@@ -37,6 +38,10 @@ enum Command {
     Crawl {
         #[arg(long)]
         request: std::path::PathBuf,
+    },
+    /// Analyze retained checkpoints of a terminal local-only job, without writes.
+    SavedGraph {
+        request_id: uuid::Uuid,
     },
     Rules,
     /// Validate a saved report locally without submitting or delivering a job.
@@ -142,6 +147,14 @@ async fn main() -> Result<()> {
         );
         return Ok(());
     }
+    if let Command::SavedGraph { request_id } = cli.command {
+        ensure!(
+            policy.is_none() && !cli.evidence_contract_v2,
+            "saved graph does not accept report options"
+        );
+        saved_graph::run(std::path::Path::new(&cli.database), &request_id.to_string()).await?;
+        return Ok(());
+    }
     if let Command::Operations { operation } = cli.command {
         if policy.is_some() {
             eprintln!(
@@ -196,7 +209,7 @@ async fn main() -> Result<()> {
     store.recover().await?;
     match cli.command {
         Command::Operations { .. } => unreachable!(),
-        Command::Rules | Command::ValidateStructured { .. } => {}
+        Command::Rules | Command::ValidateStructured { .. } | Command::SavedGraph { .. } => {}
         Command::Crawl { request } => {
             let r: CrawlRequest = serde_json::from_slice(&tokio::fs::read(request).await?)?;
 
