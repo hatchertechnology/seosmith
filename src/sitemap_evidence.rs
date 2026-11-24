@@ -70,12 +70,18 @@ pub fn parse(source: &str, bytes: &[u8], max_bytes: usize, max_entries: usize) -
     let mut lastmod = String::new();
     let mut loc_count = 0usize;
     let mut lastmod_count = 0usize;
+    let mut unrepresented_location = false;
     loop {
         match reader.read_event() {
             Ok(Event::Start(e)) => {
                 depth += 1;
                 let name = e.local_name();
                 let name = name.as_ref();
+                // A value-only comparison cannot locate a nested occurrence,
+                // even when it duplicates a retained direct location.
+                if name == "loc" && entry_depth != Some(depth - 1) {
+                    unrepresented_location = true;
+                }
                 if depth == 1 {
                     root_count += 1;
                     root = matches!(name, "urlset" | "sitemapindex");
@@ -204,6 +210,9 @@ pub fn parse(source: &str, bytes: &[u8], max_bytes: usize, max_entries: usize) -
             }
             _ => {}
         }
+    }
+    if unrepresented_location && result.error.is_none() {
+        result.error = Some("consumed_provenance_unavailable".into());
     }
     if result.error.is_some() {
         result.omitted_entries = None;
@@ -727,6 +736,28 @@ pub struct LocalSource {
     pub document: Option<Sitemap>,
 }
 impl LocalRun {
+    /// Compare with the actual discovery parser without changing its output.
+    pub fn reconcile_consumed(&mut self, index: Option<usize>, is_index: bool, urls: &[String]) {
+        let Some(doc) = index
+            .and_then(|i| self.sources.get_mut(i))
+            .and_then(|source| source.document.as_mut())
+        else {
+            return;
+        };
+        let retained = doc.entries.iter().filter_map(|entry| {
+            entry
+                .location
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        });
+        if doc.index != is_index || !retained.eq(urls.iter().map(String::as_str)) {
+            if doc.error.is_none() {
+                doc.error = Some("consumed_provenance_unavailable".into());
+            }
+            doc.omitted_entries = None;
+        }
+    }
     pub fn new(roots: &[Url]) -> Self {
         let mut run = Self {
             version: 1,
@@ -833,6 +864,37 @@ impl LocalRun {
 #[cfg(test)]
 mod local_run_tests {
     use super::*;
+    #[test]
+    fn direct_entries_are_complete_but_nested_duplicate_is_ambiguous() {
+        let source = "https://example.com/map.xml";
+        let direct = parse(source, b"<urlset><url><loc>https://example.com/a</loc></url><url><loc>https://example.com/a</loc></url></urlset>", 1000, 10);
+        assert_eq!(direct.error, None);
+        assert_eq!(direct.omitted_entries, Some(0));
+        assert_eq!(
+            direct.entries.iter().map(|e| e.ordinal).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        let nested = parse(source, b"<urlset><url><loc>https://example.com/a</loc><image:image><image:loc>https://example.com/a</image:loc></image:image></url><url></url></urlset>", 1000, 10);
+        assert_eq!(
+            nested.error.as_deref(),
+            Some("consumed_provenance_unavailable")
+        );
+        assert_eq!(nested.omitted_entries, None);
+        assert_eq!(nested.entries[1].error.as_deref(), Some("missing_location"));
+    }
+    #[test]
+    fn mismatch_preserves_existing_diagnostics_and_ordinals() {
+        let url = Url::parse("https://example.com/map.xml").unwrap();
+        let mut run = LocalRun::new(std::slice::from_ref(&url));
+        let body = b"<urlset><url><loc>https://example.com/a</loc></url><url><loc>bad</loc></url><url><loc>https://example.com/b</loc></url><url>";
+        let index = run.source(&url, "fetched", Some(200), Some(body));
+        run.reconcile_consumed(index, false, &["https://example.com/other".into()]);
+        let doc = run.sources[0].document.as_ref().unwrap();
+        assert_eq!(doc.error.as_deref(), Some("invalid_document"));
+        assert_eq!(doc.omitted_entries, None);
+        assert_eq!(doc.entries[1].error.as_deref(), Some("invalid_location"));
+        assert_eq!(doc.entries[2].ordinal, 2);
+    }
     #[test]
     fn capture_limits_keep_unknown_omissions_and_errors() {
         let url = Url::parse("https://example.com/map.xml").unwrap();

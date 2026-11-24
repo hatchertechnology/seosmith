@@ -181,6 +181,9 @@ async fn discover_sitemaps(
         match response {
             Ok(resp) if resp.status == 200 => match sitemap_locations(&resp.body) {
                 Ok((index, urls)) => {
+                    if let Some(run) = capture.as_deref_mut() {
+                        run.reconcile_consumed(pending, index, &urls);
+                    }
                     for url in urls {
                         if let Some(target) = normalize(&u, &url).filter(|u| r.in_scope(u)) {
                             if index {
