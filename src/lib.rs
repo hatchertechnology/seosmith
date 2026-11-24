@@ -1,5 +1,3 @@
-extern crate self as seosmith;
-
 pub mod api;
 pub mod audit;
 pub mod collection_evidence;

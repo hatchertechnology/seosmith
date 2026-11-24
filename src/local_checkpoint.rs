@@ -135,10 +135,6 @@ pub(crate) fn capture(url: &Url, page: &Page, response: Option<&Response>) -> Va
         )
     };
     let mut value = json!({"version": 1, "collectors": [html, graph, resource], "omissions": ["http_occurrences_raw_headers_unavailable", "robots_provenance_not_captured", "sitemap_not_captured"]});
-    value["collectors"]
-        .as_array_mut()
-        .unwrap()
-        .push(serde_json::to_value(soft_404(page, response)).unwrap());
     set_url_identity(&mut value, url.as_str());
     value
 }
@@ -151,7 +147,6 @@ pub(crate) fn capture_robots(
     source: &str,
 ) -> Value {
     let mut value = capture(url, page, response);
-    let detector = value["collectors"].as_array_mut().unwrap().pop().unwrap();
     let decisions: Vec<_> = [
         "Seosmith",
         "Googlebot",
@@ -253,7 +248,10 @@ pub(crate) fn capture_robots(
         .as_array_mut()
         .unwrap()
         .push(serde_json::to_value(indexing).unwrap());
-    value["collectors"].as_array_mut().unwrap().push(detector);
+    value["collectors"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::to_value(soft_404(page, response)).unwrap());
     value["omissions"]
         .as_array_mut()
         .unwrap()
