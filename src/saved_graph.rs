@@ -40,7 +40,18 @@ pub async fn run(path: &Path, id: &str) -> Result<()> {
         .connect_with(opts)
         .await
         .context("open existing database read-only")?;
-    let job = sqlx::query("SELECT CASE WHEN length(CAST(request AS BLOB)) <= 65536 THEN request END AS request,state,execution_mode FROM jobs WHERE id=?")
+    let columns = sqlx::query("PRAGMA table_info(jobs)")
+        .fetch_all(&pool)
+        .await?;
+    let has_finalization = columns
+        .iter()
+        .any(|row| row.get::<String, _>("name") == "local_finalization");
+    let job_query = if has_finalization {
+        "SELECT CASE WHEN length(CAST(request AS BLOB)) <= 65536 THEN request END AS request,state,execution_mode,local_finalization FROM jobs WHERE id=?"
+    } else {
+        "SELECT CASE WHEN length(CAST(request AS BLOB)) <= 65536 THEN request END AS request,state,execution_mode,NULL AS local_finalization FROM jobs WHERE id=?"
+    };
+    let job = sqlx::query(job_query)
         .bind(id)
         .fetch_optional(&pool)
         .await
@@ -52,6 +63,12 @@ pub async fn run(path: &Path, id: &str) -> Result<()> {
         state == "local_only" && mode.as_deref() == Some("local"),
         "job is not terminal local-only (legacy, active, or unsupported)"
     );
+    let finalization: Option<String> = job.try_get("local_finalization")?;
+    let completion = match finalization.as_deref() {
+        Some("completed") => "completed",
+        Some("interrupted") => "interrupted",
+        _ => "unknown",
+    };
     let request: Option<String> = job.try_get("request")?;
     let request = request.context("saved request absent or exceeds 64 KiB")?;
     let request: Value = serde_json::from_str(&request).context("unsupported saved request")?;
@@ -198,7 +215,7 @@ pub async fn run(path: &Path, id: &str) -> Result<()> {
     let fragments = graph_evidence::fragment_checks(&pages)
         .map_err(|_| anyhow::anyhow!("duplicate page URLs"))?;
     let output = serde_json::to_vec(
-        &json!({"seed":seed,"terminal_state":"local_only", "input_state":if row_count == 0 {"absent"} else {"present"}, "completion":"unknown: recovery also closes interrupted jobs", "coverage":graph_evidence::graph_coverage(&coverage), "row_limit_reached":row_limit, "omitted":omitted, "nodes":nodes, "fragments":fragments}),
+        &json!({"seed":seed,"terminal_state":"local_only", "input_state":if row_count == 0 {"absent"} else {"present"}, "completion":completion, "coverage":graph_evidence::graph_coverage(&coverage), "row_limit_reached":row_limit, "omitted":omitted, "nodes":nodes, "fragments":fragments}),
     )?;
     ensure!(
         output.len() <= MAX_OUTPUT,

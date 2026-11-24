@@ -507,6 +507,7 @@ async fn saved_graph_reads_real_crawl_without_mutating_store() -> anyhow::Result
     assert_eq!(before, std::fs::read(&db)?);
     assert!(!db.with_extension("sqlite-wal").exists());
     let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(result["completion"], "completed");
     assert_eq!(result["coverage"]["complete"], false);
     let nodes = result["nodes"].as_array().unwrap();
     assert_eq!(
@@ -538,6 +539,112 @@ async fn saved_graph_reads_real_crawl_without_mutating_store() -> anyhow::Result
             .any(|r| r == "extraction_truncated")
     );
     assert_eq!(result["fragments"][0]["state"], "absent");
+    // A pre-migration terminal snapshot remains unknown without being modified.
+    let legacy = dir.path().join("legacy.sqlite");
+    std::fs::copy(&db, &legacy)?;
+    let pool = SqlitePool::connect_with(SqliteConnectOptions::new().filename(&legacy)).await?;
+    sqlx::query("ALTER TABLE jobs DROP COLUMN local_finalization")
+        .execute(&pool)
+        .await?;
+    pool.close().await;
+    let legacy_before = std::fs::read(&legacy)?;
+    let legacy_output = Command::new(env!("CARGO_BIN_EXE_seosmith"))
+        .env_clear()
+        .args([
+            "--database",
+            legacy.to_str().unwrap(),
+            "saved-graph",
+            &request.request_id.to_string(),
+        ])
+        .output()?;
+    assert!(
+        legacy_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&legacy_output.stderr)
+    );
+    let legacy_result: serde_json::Value = serde_json::from_slice(&legacy_output.stdout)?;
+    assert_eq!(legacy_result["completion"], "unknown");
+    assert_eq!(legacy_before, std::fs::read(&legacy)?);
+    let migrate = Command::new(env!("CARGO_BIN_EXE_seosmith"))
+        .env_clear()
+        .args([
+            "--database",
+            legacy.to_str().unwrap(),
+            "crawl",
+            "--request",
+            dir.path().join("missing.json").to_str().unwrap(),
+        ])
+        .output()?;
+    assert!(!migrate.status.success());
+    let pool = SqlitePool::connect_with(
+        SqliteConnectOptions::new()
+            .filename(&legacy)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Delete),
+    )
+    .await?;
+    pool.close().await;
+    let migrated = Command::new(env!("CARGO_BIN_EXE_seosmith"))
+        .env_clear()
+        .args([
+            "--database",
+            legacy.to_str().unwrap(),
+            "saved-graph",
+            &request.request_id.to_string(),
+        ])
+        .output()?;
+    assert!(
+        migrated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&migrated.stderr)
+    );
+    let migrated_result: serde_json::Value = serde_json::from_slice(&migrated.stdout)?;
+    assert_eq!(migrated_result["completion"], "unknown");
+
+    // Reopening through the real CLI recovers a previously running local job.
+    let interrupted = dir.path().join("interrupted.sqlite");
+    std::fs::copy(&db, &interrupted)?;
+    let pool = SqlitePool::connect_with(SqliteConnectOptions::new().filename(&interrupted)).await?;
+    sqlx::query("UPDATE jobs SET state='local_running',local_finalization=NULL WHERE id=?")
+        .bind(request.request_id.to_string())
+        .execute(&pool)
+        .await?;
+    pool.close().await;
+    let reopen = Command::new(env!("CARGO_BIN_EXE_seosmith"))
+        .env_clear()
+        .args([
+            "--database",
+            interrupted.to_str().unwrap(),
+            "crawl",
+            "--request",
+            dir.path().join("missing.json").to_str().unwrap(),
+        ])
+        .output()?;
+    assert!(!reopen.status.success());
+    let pool = SqlitePool::connect_with(
+        SqliteConnectOptions::new()
+            .filename(&interrupted)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Delete),
+    )
+    .await?;
+    pool.close().await;
+    let interrupted_output = Command::new(env!("CARGO_BIN_EXE_seosmith"))
+        .env_clear()
+        .args([
+            "--database",
+            interrupted.to_str().unwrap(),
+            "saved-graph",
+            &request.request_id.to_string(),
+        ])
+        .output()?;
+    assert!(
+        interrupted_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&interrupted_output.stderr)
+    );
+    let interrupted_result: serde_json::Value = serde_json::from_slice(&interrupted_output.stdout)?;
+    assert_eq!(interrupted_result["completion"], "interrupted");
+    assert_eq!(interrupted_result["coverage"]["complete"], false);
+
     let journal = dir.path().join("graph.sqlite-journal");
     std::fs::write(&journal, b"hot")?;
     let rejected = Command::new(env!("CARGO_BIN_EXE_seosmith"))

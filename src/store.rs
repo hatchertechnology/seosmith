@@ -79,6 +79,14 @@ impl Store {
                 .execute(&mut *tx)
                 .await?;
         }
+        if !job_columns
+            .iter()
+            .any(|r| r.get::<String, _>("name") == "local_finalization")
+        {
+            sqlx::query("ALTER TABLE jobs ADD COLUMN local_finalization TEXT")
+                .execute(&mut *tx)
+                .await?;
+        }
         tx.commit().await?;
         Ok(())
     }
@@ -91,7 +99,7 @@ impl Store {
         .execute(&self.0)
         .await?;
         sqlx::query(
-            "UPDATE jobs SET state='local_only' WHERE state IN ('local_queued','local_running')",
+            "UPDATE jobs SET state='local_only',local_finalization=CASE WHEN execution_mode='local' THEN 'interrupted' ELSE NULL END WHERE state IN ('local_queued','local_running')",
         )
         .execute(&self.0)
         .await?;
@@ -468,7 +476,7 @@ impl Store {
     }
     pub async fn finish_local_only(&self, id: &str) -> Result<()> {
         let updated = sqlx::query(
-            "UPDATE jobs SET state='local_only',error=NULL WHERE id=? AND state='local_running' AND execution_mode='local'",
+            "UPDATE jobs SET state='local_only',error=NULL,local_finalization='completed' WHERE id=? AND state='local_running' AND execution_mode='local'",
         )
         .bind(id)
         .execute(&self.0)
@@ -664,6 +672,49 @@ mod local_checkpoint_tests {
             if cancelled { "cancelled" } else { "local_only" }
         );
         assert!(store.finish_local_only(&id).await.is_err());
+        store.recover().await?;
+        let origin: Option<String> =
+            sqlx::query_scalar("SELECT local_finalization FROM jobs WHERE id=?")
+                .bind(&id)
+                .fetch_one(&store.0)
+                .await?;
+        assert_eq!(
+            origin.as_deref(),
+            if cancelled { None } else { Some("completed") }
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn finalization_and_recovery_have_one_origin() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(dir.path().join("race.sqlite").to_str().unwrap()).await?;
+        let report: Report =
+            serde_json::from_str(include_str!("../fixtures/contracts/legacy.json"))?;
+        let id = report.request.request_id.to_string();
+        store.submit_local(&report.request).await?;
+        store.claim_local(&id).await?.unwrap();
+        let (finish, recovery) = tokio::join!(store.finish_local_only(&id), store.recover());
+        recovery?;
+        let origin: String = sqlx::query_scalar("SELECT local_finalization FROM jobs WHERE id=?")
+            .bind(&id)
+            .fetch_one(&store.0)
+            .await?;
+        assert_eq!(
+            origin,
+            if finish.is_ok() {
+                "completed"
+            } else {
+                "interrupted"
+            }
+        );
+        store.recover().await?;
+        assert!(store.finish_local_only(&id).await.is_err());
+        let after: String = sqlx::query_scalar("SELECT local_finalization FROM jobs WHERE id=?")
+            .bind(&id)
+            .fetch_one(&store.0)
+            .await?;
+        assert_eq!(after, origin);
         Ok(())
     }
 
