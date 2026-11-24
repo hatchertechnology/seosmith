@@ -55,6 +55,7 @@ impl Transport for Site {
             status: 200,
             headers: BTreeMap::from([("content-type".into(), kind.into())]),
             body: body.as_bytes().to_vec(),
+            local_http_occurrences: None,
             ttfb_ms: 0,
         })
     }

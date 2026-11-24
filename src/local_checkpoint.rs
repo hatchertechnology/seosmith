@@ -136,6 +136,66 @@ pub(crate) fn capture_robots(
         d
     })
     .collect();
+    let state = if page.blocked_by_robots {
+        "robots_blocked"
+    } else if response.is_none() {
+        "fetch_failed"
+    } else if page.html() {
+        "available"
+    } else {
+        "content_unavailable"
+    };
+    let html = value["collectors"][0]["data"]
+        .as_object()
+        .and_then(|_| serde_json::from_value(value["collectors"][0]["data"].clone()).ok());
+    let http = response.and_then(|r| r.local_http_occurrences.clone());
+    let http_observation = match &http {
+        Some(http) => observed("http_occurrences", http, !http.complete || http.omitted > 0),
+        None => unavailable(
+            "http_occurrences",
+            if page.blocked_by_robots {
+                "blocked_by_robots"
+            } else if response.is_some() {
+                "raw_headers_unavailable"
+            } else {
+                "response_unavailable"
+            },
+        ),
+    };
+    let http = http_observation
+        .data
+        .clone()
+        .and_then(|v| serde_json::from_value(v).ok());
+    let capture = collection_evidence::PageCapture {
+        version: "s02-s03-local-1".into(),
+        url: url.as_str().into(),
+        state: state.into(),
+        robots: decisions.clone(),
+        robots_source: source.into(),
+        http,
+        html,
+    };
+    let effective: Vec<_> = [
+        "Seosmith",
+        "Googlebot",
+        "Bingbot",
+        "GPTBot",
+        "OAI-SearchBot",
+    ]
+    .iter()
+    .map(|bot| {
+        crate::index_evidence::effective_indexing(
+            bot,
+            &capture,
+            &crate::index_evidence::Intent::Unspecified,
+        )
+    })
+    .collect();
+    let indexing = observed(
+        "effective_indexing",
+        &json!({"state": state, "desired_policy": "unknown", "decisions": effective}),
+        false,
+    );
     value["collectors"].as_array_mut().unwrap().push(
         serde_json::to_value(observed(
             "robots",
@@ -144,6 +204,18 @@ pub(crate) fn capture_robots(
         ))
         .unwrap(),
     );
+    value["collectors"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::to_value(http_observation).unwrap());
+    value["collectors"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::to_value(indexing).unwrap());
+    value["omissions"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|v| v != "http_occurrences_raw_headers_unavailable");
     value["omissions"]
         .as_array_mut()
         .unwrap()
@@ -151,7 +223,7 @@ pub(crate) fn capture_robots(
     value
 }
 pub(crate) fn budget_omission(url: &str) -> Value {
-    let mut value = json!({"version": 1, "collectors": [unavailable("html_occurrences", "run_byte_limit"), unavailable("graph", "run_byte_limit"), unavailable("resource", "run_byte_limit"), unavailable("robots", "run_byte_limit")], "omissions": ["http_occurrences_raw_headers_unavailable", "robots_provenance_not_captured", "sitemap_not_captured", "content_detector_not_integrated"]});
+    let mut value = json!({"version": 1, "collectors": [unavailable("html_occurrences", "run_byte_limit"), unavailable("graph", "run_byte_limit"), unavailable("resource", "run_byte_limit"), unavailable("robots", "run_byte_limit"), unavailable("http_occurrences", "run_byte_limit"), unavailable("effective_indexing", "run_byte_limit")], "omissions": ["http_occurrences_raw_headers_unavailable", "robots_provenance_not_captured", "sitemap_not_captured", "content_detector_not_integrated"]});
     value["url"] = Value::Null;
     value["url_omission"] = json!("run_byte_limit");
     value["url_sha256"] = json!(crate::model::digest(url.as_bytes()));
@@ -161,6 +233,44 @@ pub(crate) fn budget_omission(url: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn indexing_preserves_unknown_when_headers_are_missing_invalid_or_limited() {
+        use reqwest::header::{HeaderMap, HeaderValue};
+        let url = Url::parse("https://example.test/").unwrap();
+        let mut page = Page::default();
+        page.content_type = "text/html".into();
+        let mut response = Response {
+            status: 200,
+            headers: Default::default(),
+            local_http_occurrences: None,
+            body: b"<html></html>".to_vec(),
+            ttfb_ms: 0,
+        };
+        for mode in 0..3 {
+            if mode > 0 {
+                let mut headers = HeaderMap::new();
+                let value = if mode == 1 {
+                    HeaderValue::from_bytes(&[0xff]).unwrap()
+                } else {
+                    HeaderValue::from_str(&"x".repeat(16_385)).unwrap()
+                };
+                headers.append("x-robots-tag", value);
+                let (ordinary, evidence) = crate::fetch::extract_headers(&headers);
+                response.headers = ordinary;
+                response.local_http_occurrences = Some(evidence);
+            }
+            let value = capture_robots(&url, &page, Some(&response), "", "not_found");
+            assert_eq!(
+                value["collectors"][5]["data"]["decisions"][1]["directives"]["index"],
+                "Unknown"
+            );
+            if mode == 0 {
+                assert_eq!(value["collectors"][4]["reason"], "raw_headers_unavailable");
+            } else {
+                assert_eq!(value["collectors"][4]["state"], "partial");
+            }
+        }
+    }
     #[test]
     fn robots_provenance_is_bounded_without_changing_decision() {
         let path = format!("/{}", "a".repeat(1100));

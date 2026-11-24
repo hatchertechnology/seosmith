@@ -1,8 +1,9 @@
 //! Local-only indexing evidence. This module is not part of any delivered report.
+use serde::Serialize;
 use std::collections::BTreeSet;
 
 /// A directive exactly as collected, before bot applicability is evaluated.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct DirectiveSource {
     pub source: Source,
     /// `None` means generic; a named source applies only to that bot.
@@ -10,31 +11,31 @@ pub struct DirectiveSource {
     pub value: String,
     pub locator: Option<OccurrenceLocator>,
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct OccurrenceLocator {
     pub source: String,
     pub ordinal: usize,
     pub part: Option<usize>,
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum Source {
     HtmlMeta,
     HttpHeader,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum ContentState {
     Available,
     Blocked,
     FetchFailed,
     Truncated,
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum Decision {
     Restricted,
     Allowed,
     Unknown,
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct IndexEvaluation {
     pub bot: String,
     pub content_state: ContentState,
@@ -172,13 +173,13 @@ mod tests {
 }
 
 /// Desired indexing is supplied by an explicit, independently scoped policy.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum Intent {
     Index,
     Exclude,
     Unspecified,
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum IntentResult {
     Conforms,
     Conflicts,
@@ -398,13 +399,13 @@ mod unavailable_tests {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum CrawlPermission {
     Allowed,
     Denied,
     Unknown,
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct EffectiveIndexing {
     pub bot: String,
     pub crawl: CrawlPermission,

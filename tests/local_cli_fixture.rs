@@ -73,7 +73,7 @@ async fn policy_cli_fixtures_upgrade_and_reopen_without_delivery_changes() -> an
         ),
         (
             "https://fixture.invalid/",
-            serde_json::json!({"status":200,"headers":{"content-type":"text/html"},"body":format!("<html><head><meta name='robots' content='index'><link rel='canonical' href='/'></head><body><a href='/next'>{}</a><a href='/private'>Private</a></body></html>", "n".repeat(300))}),
+            serde_json::json!({"status":200,"header_fields":[["content-type","text/html"],["x-robots-tag","Googlebot: noindex"],["x-robots-tag","GPTBot: noindex"]],"body":format!("<html><head><meta name='robots' content='index'><link rel='canonical' href='/'></head><body><a href='/next'>{}</a><a href='/private'>Private</a></body></html>", "n".repeat(300))}),
         ),
         (
             "https://fixture.invalid/next",
@@ -119,11 +119,37 @@ async fn policy_cli_fixtures_upgrade_and_reopen_without_delivery_changes() -> an
             assert_eq!(robots["decisions"][0]["matched_line"], 2);
             assert_eq!(robots["decisions"][0]["raw_line"], "Disallow: /private");
             assert_eq!(robots["decisions"][1]["allowed"], true);
+            let indexing = &value["capture"]["collectors"][5]["data"];
+            assert_eq!(indexing["state"], "robots_blocked");
+            assert_eq!(indexing["decisions"][1]["directives"]["index"], "Unknown");
+            assert_eq!(indexing["decisions"][1]["intent"], "Unknown");
             assert_eq!(
                 value["capture"]["collectors"][0]["reason"],
                 "blocked_by_robots"
             );
         } else if url.ends_with('/') {
+            let fields = &value["capture"]["collectors"][4]["data"]["occurrences"];
+            assert_eq!(fields.as_array().unwrap().len(), 2);
+            assert_eq!(fields[1]["ordinal"], 1);
+            let indexing = &value["capture"]["collectors"][5]["data"];
+            assert_eq!(
+                indexing["decisions"][1]["directives"]["index"],
+                "Restricted"
+            );
+            assert_eq!(indexing["decisions"][1]["intent"], "Unknown");
+            assert_eq!(
+                indexing["decisions"][3]["directives"]["index"],
+                "Restricted"
+            );
+            assert_eq!(indexing["decisions"][2]["directives"]["index"], "Allowed");
+            assert_eq!(
+                indexing["decisions"][1]["directives"]["conflicts"][0],
+                "index/noindex"
+            );
+            assert_eq!(
+                indexing["decisions"][1]["directives"]["applicable"][0]["locator"]["ordinal"],
+                0
+            );
             assert_eq!(value["capture"]["collectors"][0]["state"], "observed");
             assert_eq!(
                 value["capture"]["collectors"][0]["data"]["occurrences"]

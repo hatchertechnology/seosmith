@@ -18,6 +18,7 @@ fn labeled_metadata_fixtures_match_parser_and_audit() {
             status: 200,
             headers: BTreeMap::from([("content-type".into(), "text/html".into())]),
             body: fs::read(root.join(html)).unwrap(),
+            local_http_occurrences: None,
             ttfb_ms: 0,
         };
         let page = parse::parse(&url, 0, false, &response);
