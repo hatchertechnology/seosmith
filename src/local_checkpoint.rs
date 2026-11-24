@@ -238,6 +238,7 @@ mod tests {
         use reqwest::header::{HeaderMap, HeaderValue};
         let url = Url::parse("https://example.test/").unwrap();
         let page = Page {
+            status: Some(200),
             content_type: "text/html".into(),
             ..Page::default()
         };
@@ -248,6 +249,14 @@ mod tests {
             body: b"<html></html>".to_vec(),
             ttfb_ms: 0,
         };
+        let (_, complete) = crate::fetch::extract_headers(&HeaderMap::new());
+        response.local_http_occurrences = Some(complete);
+        let control = capture_robots(&url, &page, Some(&response), "", "not_found");
+        assert_eq!(
+            control["collectors"][5]["data"]["decisions"][1]["directives"]["index"],
+            "Allowed"
+        );
+        response.local_http_occurrences = None;
         for mode in 0..3 {
             if mode > 0 {
                 let mut headers = HeaderMap::new();
