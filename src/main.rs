@@ -109,13 +109,20 @@ async fn main() -> Result<()> {
             .read_to_end(&mut input)?;
         ensure!(input.len() <= 16 * 1024 * 1024, "report exceeds 16 MiB");
         let source: serde_json::Value = serde_json::from_slice(&input)?;
-        ensure!(
-            source
-                .get("schema_version")
-                .and_then(serde_json::Value::as_u64)
-                == Some(u64::from(seosmith::model::SCHEMA_VERSION)),
-            "unsupported report schema version"
-        );
+        match source
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+        {
+            Some(1) => {}
+            Some(2) => ensure!(
+                source
+                    .pointer("/evidence_contract/version")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(1),
+                "unsupported or missing evidence contract version"
+            ),
+            _ => anyhow::bail!("unsupported report schema version"),
+        }
         if let Some(pages) = source.get("pages").and_then(serde_json::Value::as_array) {
             for (i, page) in pages.iter().enumerate() {
                 ensure!(

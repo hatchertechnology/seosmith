@@ -612,3 +612,141 @@ fn offer_currency_is_checked_without_assuming_price_specification() {
             .any(|o| o.code == "missing_offer_currency" && o.path.contains("/offers/1/"))
     );
 }
+
+#[test]
+fn saved_v2_reports_validate_retained_pages_and_preserve_input() {
+    for fixture in [
+        include_bytes!("../fixtures/contracts/v2-complete.json").as_slice(),
+        include_bytes!("../fixtures/contracts/v2-partial.json").as_slice(),
+        include_bytes!("../fixtures/contracts/v2-truncated.json").as_slice(),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("report.json");
+        let database = dir.path().join("absent.sqlite");
+        std::fs::write(&path, fixture).unwrap();
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_seosmith"))
+            .args([
+                "--database",
+                database.to_str().unwrap(),
+                "validate-structured",
+                path.to_str().unwrap(),
+            ])
+            .env_remove("SEOSMITH_ADVISORY_POLICY")
+            .env_remove("SEOSMITH_EVIDENCE_CONTRACT_V2")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let source: serde_json::Value = serde_json::from_slice(fixture).unwrap();
+        let sidecar: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let pages = source["pages"].as_array().unwrap();
+        let results = sidecar["structured_validation"].as_array().unwrap();
+        assert_eq!(results.len(), pages.len());
+        for (i, (page, result)) in pages.iter().zip(results).enumerate() {
+            assert_eq!(result["page_index"], i);
+            assert_eq!(result["url"], page["url"]);
+            if page["status"].is_null()
+                || page["blocked_by_robots"] == true
+                || page["is_resource"] == true
+            {
+                assert!(
+                    result["observations"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|o| o["code"] == "page_unavailable")
+                );
+            }
+        }
+        assert_eq!(std::fs::read(path).unwrap(), fixture);
+        assert!(!database.exists());
+    }
+}
+
+#[test]
+fn saved_v2_rejects_unknown_contract_and_missing_collection() {
+    let original: serde_json::Value =
+        serde_json::from_slice(include_bytes!("../fixtures/contracts/v2-complete.json")).unwrap();
+    for case in 0..4 {
+        let mut report = original.clone();
+        match case {
+            0 => report["evidence_contract"]["version"] = json!(2),
+            1 => {
+                report.as_object_mut().unwrap().remove("evidence_contract");
+            }
+            2 => {
+                report["pages"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("structured_data");
+            }
+            _ => {
+                report["evidence_contract"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("coverage");
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("report.json");
+        std::fs::write(&path, serde_json::to_vec(&report).unwrap()).unwrap();
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_seosmith"))
+            .args(["validate-structured", path.to_str().unwrap()])
+            .env_remove("SEOSMITH_ADVISORY_POLICY")
+            .env_remove("SEOSMITH_EVIDENCE_CONTRACT_V2")
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "case {case}");
+    }
+}
+
+#[test]
+fn saved_v2_uses_page_evidence_even_when_contract_is_truncated() {
+    let mut report: serde_json::Value =
+        serde_json::from_slice(include_bytes!("../fixtures/contracts/v2-truncated.json")).unwrap();
+    report["pages"][0]["status"] = json!(200);
+    report["pages"][0]["content_type"] = json!("text/html");
+    report["pages"][0]["extraction_truncated"] = json!(true);
+    report["pages"][0]["structured_data"] =
+        json!([{"format":"json_ld", "data":{"@type":"Product", "name":"Widget"}, "error":null}]);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("report.json");
+    std::fs::write(&path, serde_json::to_vec(&report).unwrap()).unwrap();
+    let run = || {
+        std::process::Command::new(env!("CARGO_BIN_EXE_seosmith"))
+            .args(["validate-structured", path.to_str().unwrap()])
+            .env_remove("SEOSMITH_ADVISORY_POLICY")
+            .env_remove("SEOSMITH_EVIDENCE_CONTRACT_V2")
+            .output()
+            .unwrap()
+    };
+    let v2 = run();
+    assert!(
+        v2.status.success(),
+        "{}",
+        String::from_utf8_lossy(&v2.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&v2.stdout).unwrap();
+    let observations = result["structured_validation"][0]["observations"]
+        .as_array()
+        .unwrap();
+    assert!(
+        observations
+            .iter()
+            .any(|o| o["code"] == "missing_product_evidence")
+    );
+    assert!(
+        observations
+            .iter()
+            .any(|o| o["code"] == "extraction_truncated")
+    );
+    report["schema_version"] = json!(1);
+    report.as_object_mut().unwrap().remove("evidence_contract");
+    std::fs::write(&path, serde_json::to_vec(&report).unwrap()).unwrap();
+    let v1 = run();
+    assert!(v1.status.success());
+    assert_eq!(v1.stdout, v2.stdout);
+}
