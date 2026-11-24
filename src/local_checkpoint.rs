@@ -338,7 +338,7 @@ mod tests {
         );
         let response = Response {
             status: 200,
-            headers: Default::default(),
+            headers: std::collections::BTreeMap::new(),
             local_http_occurrences: None,
             body: format!("<img src='{}'>", "x".repeat(2049)).into_bytes(),
             ttfb_ms: 0,
