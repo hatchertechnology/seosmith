@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "engine_version": "0.2.0",
+  "ruleset_version": "2026-11-01.1",
+  "request": {
+    "request_id": "00000000-0000-4000-8000-000000000059",
+    "website_id": "00000000-0000-4000-8000-000000000004",
+    "binding_generation": 1,
+    "url": "https://example.com/",
+    "max_pages": 10,
+    "max_duration_seconds": 30,
+    "delay_ms": 1000,
+    "check_external_links": false,
+    "max_resources": 0
+  },
+  "started_at": "2026-11-24T00:00:00Z",
+  "finished_at": "2026-11-24T00:00:01Z",
+  "outcome": "completed",
+  "stop_reason": "frontier_exhausted",
+  "coverage_complete": true,
+  "pages": [
+    {
+      "url": "https://example.com/bounds-0",
+      "status": 200,
+      "content_type": "text/html",
+      "structured_data": [
+        {
+          "format": "json_ld",
+          "data": {
+            "@context": "https://schema.org",
+            "@type": "Product",
+            "name": "Bounds 0"
+          },
+          "error": null
+        }
+      ]
+    },
+    {
+      "url": "https://example.com/bounds-1",
+      "status": 200,
+      "content_type": "text/html",
+      "structured_data": [
+        {
+          "format": "json_ld",
+          "data": {
+            "@context": "https://schema.org",
+            "@type": "Product",
+            "name": "Bounds 1"
+          },
+          "error": null
+        }
+      ]
+    },
+    {
+      "url": "https://example.com/bounds-2",
+      "status": 200,
+      "content_type": "text/html",
+      "structured_data": [
+        {
+          "format": "json_ld",
+          "data": {
+            "@context": "https://schema.org",
+            "@type": "Product",
+            "name": "Bounds 2"
+          },
+          "error": null
+        }
+      ]
+    },
+    {
+      "url": "https://example.com/bounds-last-pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp",
+      "status": 200,
+      "content_type": "text/html",
+      "structured_data": [
+        {
+          "format": "json_ld",
+          "data": {
+            "@context": "https://schema.org",
+            "@type": "Product",
+            "name": "Bounds last"
+          },
+          "error": null
+        }
+      ]
+    }
+  ],
+  "findings": []
+}

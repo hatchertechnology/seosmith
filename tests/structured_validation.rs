@@ -591,9 +591,9 @@ fn breadcrumb_item_references_preserve_name_evidence_and_unknowns() {
 }
 
 #[test]
-fn offer_currency_is_checked_without_assuming_price_specification() {
+fn offer_currency_uses_retained_price_specification_currency() {
     let data = block(
-        json!({"@type":"Product","name":"X","offers":[{"@type":"Offer","price":5},{"@type":"Offer","priceSpecification":{"price":5,"priceCurrency":"USD"}}]}),
+        json!({"@type":"Product","name":"X","offers":[{"@type":"Offer","price":5},{"@type":"Offer","priceSpecification":{"@type":"UnitPriceSpecification","price":5,"priceCurrency":"USD"}}]}),
     );
     let result = validate(&page(), &[data]);
     assert!(
@@ -603,13 +603,431 @@ fn offer_currency_is_checked_without_assuming_price_specification() {
                 && o.path == "/0/data/offers/0/priceCurrency")
     );
     assert!(
-        result.iter().any(|o| o.code == "offer_currency_unknown"
-            && o.path == "/0/data/offers/1/priceSpecification")
+        result
+            .iter()
+            .any(|o| o.code == "offer_currency_from_price_specification"
+                && o.path == "/0/data/offers/1/priceSpecification/priceCurrency"
+                && o.value == Some(json!("USD")))
     );
     assert!(
         !result
             .iter()
             .any(|o| o.code == "missing_offer_currency" && o.path.contains("/offers/1/"))
+    );
+    assert!(
+        !result
+            .iter()
+            .any(|o| o.code == "offer_currency_unknown" && o.path.contains("/offers/1/"))
+    );
+}
+
+/// Retained `priceSpecification.priceCurrency` is evidence, and missing,
+/// ambiguous, invalid and still-unknown currency evidence stay distinct with
+/// exact item/property provenance.
+#[test]
+fn price_specification_currency_evidence_is_precise_and_distinct() {
+    let result = validate(
+        &page(),
+        &[block(json!({"@type":"Product","name":"X","offers":[
+            {"@type":"Offer","priceSpecification":{"@type":"UnitPriceSpecification","price":1,"priceCurrency":"USD"}},
+            {"@type":"Offer","priceSpecification":[{"@type":"UnitPriceSpecification","price":2,"priceCurrency":"USD"},{"@type":"UnitPriceSpecification","price":2,"priceCurrency":"EUR"}]},
+            {"@type":"Offer","priceSpecification":{"@type":"UnitPriceSpecification","price":3,"priceCurrency":"usd"}},
+            {"@type":"Offer","priceSpecification":{"@type":"UnitPriceSpecification","price":4}},
+            {"@type":"Offer","priceSpecification":{"@id":"#unretained"}}
+        ]}))],
+    );
+    // One valid retained currency is observed at its exact property pointer.
+    assert!(
+        result
+            .iter()
+            .any(|o| o.code == "offer_currency_from_price_specification"
+                && o.path == "/0/data/offers/0/priceSpecification/priceCurrency"
+                && o.value == Some(json!("USD")))
+    );
+    assert!(
+        !result
+            .iter()
+            .any(|o| o.path.starts_with("/0/data/offers/0/")
+                && matches!(
+                    o.code,
+                    "missing_offer_currency"
+                        | "offer_currency_unknown"
+                        | "offer_currency_ambiguous"
+                ))
+    );
+    // Two distinct retained currencies are ambiguous, not a clean currency.
+    assert!(
+        result.iter().any(|o| o.code == "offer_currency_ambiguous"
+            && o.path == "/0/data/offers/1/priceSpecification")
+    );
+    assert!(
+        !result
+            .iter()
+            .any(|o| o.code == "offer_currency_from_price_specification"
+                && o.path.contains("/offers/1/"))
+    );
+    // An invalid retained code is reported at the specification property.
+    assert!(result.iter().any(|o| o.code == "invalid_offer_value"
+        && o.path == "/0/data/offers/2/priceSpecification/priceCurrency"
+        && o.value == Some(json!("usd"))));
+    assert!(
+        !result
+            .iter()
+            .any(|o| o.path.contains("/offers/2/") && o.code == "missing_offer_currency")
+    );
+    // An expanded specification without a currency is genuinely missing.
+    assert!(
+        result
+            .iter()
+            .any(|o| o.code == "missing_offer_currency"
+                && o.path == "/0/data/offers/3/priceCurrency")
+    );
+    // An unresolved reference remains unknown rather than clean or missing.
+    assert!(
+        result.iter().any(|o| o.code == "offer_currency_unknown"
+            && o.path == "/0/data/offers/4/priceSpecification")
+    );
+    assert!(
+        result
+            .iter()
+            .any(|o| o.code == "price_specification_not_expanded"
+                && o.path == "/0/data/offers/4/priceSpecification")
+    );
+}
+
+/// A currency completed from a resolved price specification definition keeps
+/// the definition's actual occurrence pointer.
+#[test]
+fn price_specification_currency_reference_reports_definition_occurrence() {
+    let result = validate(
+        &page(),
+        &[block(json!({"@graph":[
+            {"@type":"Product","name":"X","offers":{"@type":"Offer","priceSpecification":{"@id":"#price"}}},
+            {"@id":"#price","@type":"UnitPriceSpecification","price":12,"priceCurrency":"GBP"}
+        ]}))],
+    );
+    assert!(
+        result
+            .iter()
+            .any(|o| o.code == "offer_currency_from_price_specification"
+                && o.path == "/0/data/@graph/1/priceCurrency"
+                && o.value == Some(json!("GBP")))
+    );
+    assert!(!result.iter().any(|o| o.code == "offer_currency_unknown"));
+    assert!(!result.iter().any(|o| o.code == "missing_offer_currency"));
+}
+
+/// A `priceSpecification` completed from a separate Offer definition reports the
+/// definition's property occurrence, not a position on the inline Offer, for an
+/// expanded object, an array and extracted microdata.
+#[test]
+fn inherited_price_specification_reports_definition_occurrence() {
+    // The reviewed shape: a typed Offer completed from an untyped definition
+    // that holds the expanded specification.
+    let inherited = validate(
+        &page(),
+        &[block(json!({"@context":"https://schema.org","@graph":[
+            {"@type":"Product","name":"Widget","offers":{"@type":"Offer","@id":"#offer"}},
+            {"@id":"#offer","priceSpecification":{"@type":"UnitPriceSpecification","price":5,"priceCurrency":"EUR"}}
+        ]}))],
+    );
+    assert!(
+        inherited
+            .iter()
+            .any(|o| o.code == "offer_currency_from_price_specification"
+                && o.path == "/0/data/@graph/1/priceSpecification/priceCurrency"
+                && o.value == Some(json!("EUR")))
+    );
+    assert!(!inherited.iter().any(|o| {
+        o.path
+            .starts_with("/0/data/@graph/0/offers/priceSpecification")
+    }));
+
+    // The inherited property can itself be an array of specifications.
+    let array = validate(
+        &page(),
+        &[block(json!({"@graph":[
+            {"@type":"Product","name":"Widget","offers":{"@type":"Offer","@id":"#offer"}},
+            {"@id":"#offer","priceSpecification":[
+                {"@type":"UnitPriceSpecification","price":5,"priceCurrency":"GBP"},
+                {"@type":"UnitPriceSpecification","price":6,"priceCurrency":"GBP"}
+            ]}
+        ]}))],
+    );
+    assert!(
+        array
+            .iter()
+            .any(|o| o.code == "offer_currency_from_price_specification"
+                && o.path == "/0/data/@graph/1/priceSpecification/0/priceCurrency"
+                && o.value == Some(json!("GBP")))
+    );
+
+    // Extracted microdata keeps the definition's property container too.
+    let microdata = validate(
+        &page(),
+        &[
+            StructuredData {
+                format: "microdata".into(),
+                data: Some(json!({
+                    "types":["https://schema.org/Product"],
+                    "properties":{
+                        "name":["Widget"],
+                        "offers":[{
+                            "types":["https://schema.org/Offer"],
+                            "id":"#offer",
+                            "properties":{"price":[5]}
+                        }]
+                    }
+                })),
+                error: None,
+            },
+            StructuredData {
+                format: "microdata".into(),
+                data: Some(json!({
+                    "id":"#offer",
+                    "properties":{"priceSpecification":[{
+                        "types":["https://schema.org/UnitPriceSpecification"],
+                        "properties":{"price":[5],"priceCurrency":["CAD"]}
+                    }]}
+                })),
+                error: None,
+            },
+        ],
+    );
+    assert!(
+        microdata
+            .iter()
+            .any(|o| o.code == "offer_currency_from_price_specification"
+                && o.path == "/1/data/properties/priceSpecification/0/properties/priceCurrency/0"
+                && o.value == Some(json!("CAD")))
+    );
+}
+
+fn bound_pages() -> Vec<Page> {
+    let report: seosmith::model::Report =
+        serde_json::from_str(include_str!("../fixtures/s04/bounds/output-bound.json")).unwrap();
+    report.pages
+}
+
+fn retained_pages(wrapper: &seosmith::structured_validation::ReportWrapper, total: usize) -> usize {
+    wrapper
+        .value
+        .get("output_coverage")
+        .and_then(|marker| marker.get("retained_pages"))
+        .and_then(serde_json::Value::as_u64)
+        .map_or(total, |retained| usize::try_from(retained).unwrap_or(total))
+}
+
+/// Smallest byte limit whose wrapper retains at least `desired` pages. At a
+/// boundary where the marker is required this is the exact final byte count of
+/// that wrapper, so a matching CLI stdout proves the accounting is not an
+/// estimate.
+fn smallest_limit_for_retained(pages: &[Page], desired: usize) -> usize {
+    use seosmith::structured_validation::report_wrapper_with_limit;
+    assert!(desired <= pages.len());
+    let mut high = 1usize;
+    loop {
+        if report_wrapper_with_limit(pages, high)
+            .is_ok_and(|wrapper| retained_pages(&wrapper, pages.len()) >= desired)
+        {
+            break;
+        }
+        high = high.saturating_mul(2);
+        assert!(high > 0, "no fitting limit found");
+    }
+    let mut low = 0usize;
+    while low < high {
+        let mid = low + (high - low) / 2;
+        let fits = report_wrapper_with_limit(pages, mid)
+            .is_ok_and(|wrapper| retained_pages(&wrapper, pages.len()) >= desired);
+        if fits {
+            high = mid;
+        } else {
+            low = mid + 1;
+        }
+    }
+    low
+}
+
+#[test]
+fn aggregate_report_output_bound_is_exact_and_distinguishes_omission() {
+    use seosmith::structured_validation::{
+        ReportOutputError, report_wrapper, report_wrapper_with_limit,
+    };
+    let pages = bound_pages();
+    assert_eq!(pages.len(), 4);
+
+    // First-page boundary: the first examined page does not fit even alone, so
+    // it is not force-retained. The marker distinguishes examined/omitted from
+    // never-examined trailing pages.
+    let first = smallest_limit_for_retained(&pages, 0);
+
+    // A limit below the smallest envelope is explicit, not a silently oversized
+    // report. The reported minimum is the valid fixed point of that envelope.
+    match report_wrapper_with_limit(&pages, 1) {
+        Err(ReportOutputError::TooSmall { limit, minimum }) => {
+            assert_eq!(limit, 1);
+            assert_eq!(minimum, first);
+        }
+        other => panic!("expected explicit too-small error, got {other:?}"),
+    }
+    let bounded = report_wrapper_with_limit(&pages, first).unwrap();
+    assert_eq!(bounded.serialized.len(), first);
+    assert_eq!(
+        bounded.value["structured_validation"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    let marker = &bounded.value["output_coverage"];
+    assert_eq!(marker["state"], "truncated");
+    assert_eq!(marker["total_pages"], 4);
+    assert_eq!(marker["examined_pages"], 1);
+    assert_eq!(marker["retained_pages"], 0);
+    assert_eq!(marker["omitted_pages"], 1);
+    assert_eq!(marker["unexamined_pages"], 3);
+    assert_eq!(marker["limit_bytes"], first);
+
+    // Last-page boundary: all pages were examined, but the last examined page
+    // is omitted rather than claimed as never examined.
+    let last = smallest_limit_for_retained(&pages, 3);
+    let bounded = report_wrapper_with_limit(&pages, last).unwrap();
+    assert_eq!(bounded.serialized.len(), last);
+    assert_eq!(
+        bounded.value["structured_validation"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    let marker = &bounded.value["output_coverage"];
+    assert_eq!(marker["state"], "truncated");
+    assert_eq!(marker["total_pages"], 4);
+    assert_eq!(marker["examined_pages"], 4);
+    assert_eq!(marker["retained_pages"], 3);
+    assert_eq!(marker["omitted_pages"], 1);
+    assert_eq!(marker["unexamined_pages"], 0);
+
+    // Exact cap: all pages fit in the historical no-marker shape; one byte less
+    // cannot, so the marker appears and the actual bytes stay within the limit.
+    let cap = smallest_limit_for_retained(&pages, 4);
+    let complete = report_wrapper_with_limit(&pages, cap).unwrap();
+    assert_eq!(complete.serialized.len(), cap);
+    assert_eq!(
+        complete.value["structured_validation"]
+            .as_array()
+            .unwrap()
+            .len(),
+        4
+    );
+    assert!(complete.value.get("output_coverage").is_none());
+    let below = report_wrapper_with_limit(&pages, cap - 1).unwrap();
+    assert!(below.serialized.len() < cap);
+    assert!(below.value.get("output_coverage").is_some());
+    assert_eq!(below.value["output_coverage"]["limit_bytes"], cap - 1);
+
+    // The production wrapper keeps the ordinary byte shape.
+    let production = report_wrapper(&pages).unwrap();
+    assert_eq!(production.serialized, complete.serialized);
+}
+
+#[test]
+fn ordinary_report_wrapper_bytes_match_historical_pretty_shape() {
+    use seosmith::structured_validation::{PROFILE_VERSION, report_wrapper, validate_crawl};
+    let pages = bound_pages();
+    let entries: Vec<_> = pages
+        .iter()
+        .enumerate()
+        .map(|(page_index, page)| {
+            json!({
+                "page_index": page_index,
+                "url": page.url,
+                "observations": validate_crawl(page, &pages),
+            })
+        })
+        .collect();
+    let expected = json!({
+        "profile_version": PROFILE_VERSION,
+        "structured_validation": entries,
+    });
+    let mut expected_bytes = serde_json::to_vec_pretty(&expected).unwrap();
+    expected_bytes.push(b'\n');
+    let actual = report_wrapper(&pages).unwrap();
+    assert_eq!(actual.serialized, expected_bytes);
+    assert!(actual.value.get("output_coverage").is_none());
+}
+
+fn run_bounded_cli(fixture: &[u8], limit: usize) -> std::process::Output {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("report.json");
+    let database = dir.path().join("absent.sqlite");
+    std::fs::write(&path, fixture).unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_seosmith"))
+        .args([
+            "--database",
+            database.to_str().unwrap(),
+            "validate-structured",
+            path.to_str().unwrap(),
+        ])
+        .env("SEOSMITH_STRUCTURED_OUTPUT_LIMIT_BYTES", limit.to_string())
+        .env_remove("SEOSMITH_ADVISORY_POLICY")
+        .env_remove("SEOSMITH_EVIDENCE_CONTRACT_V2")
+        .output()
+        .unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), fixture);
+    assert!(!database.exists());
+    output
+}
+
+#[test]
+fn aggregate_output_bound_cli_uses_exact_bytes_and_omission_counters() {
+    use seosmith::structured_validation::report_wrapper_with_limit;
+    let fixture = include_bytes!("../fixtures/s04/bounds/output-bound.json");
+    let pages = bound_pages();
+    let first = smallest_limit_for_retained(&pages, 0);
+    let last = smallest_limit_for_retained(&pages, 3);
+    let cap = smallest_limit_for_retained(&pages, 4);
+    for (limit, retained, examined, omitted, unexamined, marked) in [
+        (first, 0, 1, 1, 3, true),
+        (last, 3, 4, 1, 0, true),
+        (cap, 4, 4, 0, 0, false),
+    ] {
+        let output = run_bounded_cli(fixture, limit);
+        assert!(
+            output.status.success(),
+            "limit {limit}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout.len(), limit);
+        let parsed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let entries = parsed["structured_validation"].as_array().unwrap();
+        assert_eq!(entries.len(), retained);
+        if marked {
+            let marker = &parsed["output_coverage"];
+            assert_eq!(marker["state"], "truncated");
+            assert_eq!(marker["total_pages"], 4);
+            assert_eq!(marker["examined_pages"], examined);
+            assert_eq!(marker["retained_pages"], retained);
+            assert_eq!(marker["omitted_pages"], omitted);
+            assert_eq!(marker["unexamined_pages"], unexamined);
+            assert_eq!(marker["limit_bytes"], limit);
+        } else {
+            assert!(parsed.get("output_coverage").is_none());
+        }
+        let expected = report_wrapper_with_limit(&pages, limit).unwrap();
+        assert_eq!(output.stdout, expected.serialized);
+    }
+
+    // A limit below the smallest envelope fails explicitly through the CLI
+    // instead of printing an oversized or misleading report.
+    let too_small = run_bounded_cli(fixture, 1);
+    assert!(!too_small.status.success());
+    assert_eq!(too_small.stdout.len(), 0);
+    assert!(
+        String::from_utf8_lossy(&too_small.stderr).contains("smaller than the minimum"),
+        "{}",
+        String::from_utf8_lossy(&too_small.stderr)
     );
 }
 
@@ -790,6 +1208,10 @@ fn checked_in_positive_fixture_is_clean_and_path_scoped() {
         && o.path == "/0/data/image"
         && o.explanation.contains("state=observed")
         && o.explanation.contains("status=200")));
+    // The retained price-specification currency is evidence, not unknown.
+    assert!(observations.iter().any(|o| o.category == "coverage"
+        && o.code == "offer_currency_from_price_specification"
+        && o.path == "/0/data/offers/priceSpecification/priceCurrency"));
     // Pages that were never fetched stay unavailable rather than validated-empty.
     for index in [4, 5] {
         let unavailable = validate_crawl(&report.pages[index], &report.pages);
@@ -869,6 +1291,32 @@ fn checked_in_negative_fixture_separates_observation_categories() {
     let blocked = validate_crawl(&report.pages[7], &report.pages);
     assert_eq!(blocked.len(), 1);
     assert_eq!(blocked[0].code, "page_unavailable");
+    // Retained price-specification currency evidence is distinguished:
+    // invalid, ambiguous, missing and unresolved remain separate.
+    assert!(has(
+        8,
+        "vocabulary",
+        "invalid_offer_value",
+        "/0/data/offers/0/priceSpecification/priceCurrency"
+    ));
+    assert!(has(
+        8,
+        "coverage",
+        "offer_currency_ambiguous",
+        "/0/data/offers/1/priceSpecification"
+    ));
+    assert!(has(
+        8,
+        "provider_eligibility",
+        "missing_offer_currency",
+        "/0/data/offers/2/priceCurrency"
+    ));
+    assert!(has(
+        8,
+        "coverage",
+        "offer_currency_unknown",
+        "/0/data/offers/3/priceSpecification"
+    ));
 }
 
 /// Both checked-in fixtures run through the normal saved-report entry point
@@ -909,9 +1357,164 @@ fn checked_in_s04_fixtures_run_through_cli_without_mutation() {
             sidecar["structured_validation"].as_array().unwrap().len(),
             source["pages"].as_array().unwrap().len()
         );
+        assert!(sidecar.get("output_coverage").is_none());
         assert_eq!(std::fs::read(&path).unwrap(), fixture);
         assert!(!database.exists());
     }
+}
+
+/// Resolve an RFC 6901 pointer relative to a page's `structured_data` in the
+/// original saved source.
+fn saved_source_value<'a>(
+    source: &'a serde_json::Value,
+    pointer: &str,
+) -> Option<&'a serde_json::Value> {
+    let mut current = source;
+    for token in pointer.strip_prefix('/')?.split('/') {
+        let token = token.replace("~1", "/").replace("~0", "~");
+        current = match current {
+            serde_json::Value::Array(items) => items.get(token.parse::<usize>().ok()?)?,
+            serde_json::Value::Object(fields) => fields.get(token.as_str())?,
+            _ => return None,
+        };
+    }
+    Some(current)
+}
+
+/// Price-specification currency pointers from the real CLI resolve into the
+/// original saved source for both direct and Offer-definition-inherited values,
+/// including an inherited array and extracted microdata.
+#[test]
+fn price_specification_currency_pointers_resolve_in_original_saved_source() {
+    struct CurrencyCase {
+        blocks: Vec<serde_json::Value>,
+        expected: Vec<(&'static str, &'static str)>,
+    }
+    let json_ld = |data: serde_json::Value| json!({"format":"json_ld","data":data,"error":null});
+    let microdata =
+        |data: serde_json::Value| json!({"format":"microdata","data":data,"error":null});
+    let pages = [
+        CurrencyCase {
+            blocks: vec![json_ld(
+                json!({"@context":"https://schema.org","@type":"Product","name":"Direct","offers":{"@type":"Offer","priceSpecification":{"@type":"UnitPriceSpecification","price":5,"priceCurrency":"USD"}}}),
+            )],
+            expected: vec![("/0/data/offers/priceSpecification/priceCurrency", "USD")],
+        },
+        CurrencyCase {
+            blocks: vec![json_ld(json!({"@context":"https://schema.org","@graph":[
+                {"@type":"Product","name":"Inherited","offers":{"@type":"Offer","@id":"#offer"}},
+                {"@id":"#offer","priceSpecification":{"@type":"UnitPriceSpecification","price":5,"priceCurrency":"EUR"}}
+            ]}))],
+            expected: vec![("/0/data/@graph/1/priceSpecification/priceCurrency", "EUR")],
+        },
+        CurrencyCase {
+            blocks: vec![json_ld(json!({"@graph":[
+                {"@type":"Product","name":"Array","offers":{"@type":"Offer","@id":"#offer"}},
+                {"@id":"#offer","priceSpecification":[
+                    {"@type":"UnitPriceSpecification","price":5,"priceCurrency":"GBP"},
+                    {"@type":"UnitPriceSpecification","price":6,"priceCurrency":"GBP"}
+                ]}
+            ]}))],
+            expected: vec![("/0/data/@graph/1/priceSpecification/0/priceCurrency", "GBP")],
+        },
+        CurrencyCase {
+            blocks: vec![
+                microdata(
+                    json!({"types":["https://schema.org/Product"],"properties":{"name":["Micro"],"offers":[{"types":["https://schema.org/Offer"],"id":"#offer","properties":{"price":[5]}}]}}),
+                ),
+                microdata(
+                    json!({"id":"#offer","properties":{"priceSpecification":[{"types":["https://schema.org/UnitPriceSpecification"],"properties":{"price":[5],"priceCurrency":["CAD"]}}]}}),
+                ),
+            ],
+            expected: vec![(
+                "/1/data/properties/priceSpecification/0/properties/priceCurrency/0",
+                "CAD",
+            )],
+        },
+    ];
+    let report = json!({
+        "schema_version": 1,
+        "engine_version": "0.2.0",
+        "ruleset_version": "2026-11-01.1",
+        "request": {
+            "request_id": "00000000-0000-4000-8000-000000000059",
+            "website_id": "00000000-0000-4000-8000-000000000004",
+            "binding_generation": 1,
+            "url": "https://example.com/",
+            "max_pages": 10,
+            "max_duration_seconds": 30,
+            "delay_ms": 1000,
+            "check_external_links": false,
+            "max_resources": 0
+        },
+        "started_at": "2026-11-24T00:00:00Z",
+        "finished_at": "2026-11-24T00:00:01Z",
+        "outcome": "completed",
+        "stop_reason": "frontier_exhausted",
+        "coverage_complete": true,
+        "pages": pages
+            .iter()
+            .enumerate()
+            .map(|(index, case)| json!({
+                "url": format!("https://example.com/currency-{index}"),
+                "status": 200,
+                "content_type": "text/html",
+                "structured_data": case.blocks,
+            }))
+            .collect::<Vec<_>>(),
+        "findings": [],
+    });
+    let fixture = serde_json::to_vec(&report).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("report.json");
+    let database = dir.path().join("absent.sqlite");
+    std::fs::write(&path, &fixture).unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_seosmith"))
+        .args([
+            "--database",
+            database.to_str().unwrap(),
+            "validate-structured",
+            path.to_str().unwrap(),
+        ])
+        .env_remove("SEOSMITH_ADVISORY_POLICY")
+        .env_remove("SEOSMITH_EVIDENCE_CONTRACT_V2")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let sidecar: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let results = sidecar["structured_validation"].as_array().unwrap();
+    assert_eq!(results.len(), pages.len());
+    for (index, case) in pages.iter().enumerate() {
+        let source_page = &report["pages"][index];
+        let source = &source_page["structured_data"];
+        let observations = results[index]["observations"].as_array().unwrap();
+        let observed: Vec<(String, serde_json::Value)> = observations
+            .iter()
+            .filter(|o| o["code"] == "offer_currency_from_price_specification")
+            .map(|o| (o["path"].as_str().unwrap().to_string(), o["value"].clone()))
+            .collect();
+        assert_eq!(
+            observed,
+            case.expected
+                .iter()
+                .map(|(pointer, value)| ((*pointer).to_string(), json!(value)))
+                .collect::<Vec<_>>(),
+            "page {index} currency pointers"
+        );
+        for (pointer, value) in &observed {
+            assert_eq!(
+                saved_source_value(source, pointer),
+                Some(&json!(value)),
+                "page {index} pointer {pointer} must resolve in the saved source"
+            );
+        }
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), fixture);
+    assert!(!database.exists());
 }
 
 /// A node carrying a local `@id` is completed from one separate retained

@@ -14,7 +14,11 @@ use seosmith::{
     model::CrawlRequest,
     store::Store,
 };
-use std::{fs::OpenOptions, io::Read, time::Duration};
+use std::{
+    fs::OpenOptions,
+    io::{Read, Write},
+    time::Duration,
+};
 use tokio::sync::watch;
 #[derive(Parser)]
 #[command(version, about)]
@@ -186,13 +190,15 @@ async fn main() -> Result<()> {
             }
         }
         let report: seosmith::model::Report = serde_json::from_value(source)?;
-        let observations: Vec<_> = report.pages.iter().enumerate().map(|(page_index, page)| serde_json::json!({"page_index": page_index, "url": page.url, "observations": seosmith::structured_validation::validate_crawl(page, &report.pages)})).collect();
-        println!(
-            "{}",
-            serde_json::to_string_pretty(
-                &serde_json::json!({"profile_version": seosmith::structured_validation::PROFILE_VERSION, "structured_validation": observations})
-            )?
-        );
+        let limit = std::env::var("SEOSMITH_STRUCTURED_OUTPUT_LIMIT_BYTES")
+            .ok()
+            .map(|value| value.parse::<usize>())
+            .transpose()
+            .context("invalid SEOSMITH_STRUCTURED_OUTPUT_LIMIT_BYTES")?
+            .unwrap_or(seosmith::structured_validation::MAX_REPORT_OUTPUT_BYTES);
+        let output =
+            seosmith::structured_validation::report_wrapper_with_limit(&report.pages, limit)?;
+        std::io::stdout().write_all(&output.serialized)?;
         return Ok(());
     }
     #[cfg(feature = "policy-wire-prototype")]
