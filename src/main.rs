@@ -1,6 +1,8 @@
+mod resource_impact_cli;
 #[cfg(feature = "policy-wire-prototype")]
 mod saved_export;
 mod saved_graph;
+mod saved_index_integrity;
 mod saved_pair;
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
@@ -46,6 +48,10 @@ enum Command {
     SavedGraph {
         request_id: uuid::Uuid,
     },
+    /// Analyze saved local resource delivery and affected pages without writes.
+    ResourceImpact {
+        request_id: uuid::Uuid,
+    },
     /// Compare two saved page assessments or two caller-supplied retained HTML files.
     SavedPair {
         /// Terminal local-only job ID for saved-checkpoint comparison.
@@ -75,6 +81,10 @@ enum Command {
         /// Peer content type for --peer-html.
         #[arg(long)]
         peer_content_type: Option<String>,
+    },
+    /// Explain saved effective indexing and canonical, hreflang and sitemap evidence.
+    SavedIndexIntegrity {
+        request_id: uuid::Uuid,
     },
     Rules,
     /// Validate a saved report locally without submitting or delivering a job.
@@ -207,6 +217,15 @@ async fn main() -> Result<()> {
         saved_graph::run(std::path::Path::new(&cli.database), &request_id.to_string()).await?;
         return Ok(());
     }
+    if let Command::ResourceImpact { request_id } = cli.command {
+        ensure!(
+            policy.is_none() && !cli.evidence_contract_v2,
+            "resource impact does not accept report options"
+        );
+        resource_impact_cli::run(std::path::Path::new(&cli.database), &request_id.to_string())
+            .await?;
+        return Ok(());
+    }
     if let Command::SavedPair {
         request_id,
         source,
@@ -238,6 +257,15 @@ async fn main() -> Result<()> {
             },
         )
         .await?;
+        return Ok(());
+    }
+    if let Command::SavedIndexIntegrity { request_id } = cli.command {
+        ensure!(
+            policy.is_none() && !cli.evidence_contract_v2,
+            "saved index integrity does not accept report options"
+        );
+        saved_index_integrity::run(std::path::Path::new(&cli.database), &request_id.to_string())
+            .await?;
         return Ok(());
     }
     if let Command::Operations { operation } = cli.command {
@@ -297,7 +325,9 @@ async fn main() -> Result<()> {
         Command::Rules
         | Command::ValidateStructured { .. }
         | Command::SavedGraph { .. }
-        | Command::SavedPair { .. } => {}
+        | Command::ResourceImpact { .. }
+        | Command::SavedPair { .. }
+        | Command::SavedIndexIntegrity { .. } => {}
         #[cfg(feature = "policy-wire-prototype")]
         Command::SavedExport { .. } => {}
         Command::Crawl { request } => {

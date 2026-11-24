@@ -34,6 +34,9 @@ pub mod graph_evidence;
 /// Experimental offline static resource observations.
 pub mod resource_evidence;
 
+/// Bounded saved-checkpoint resource delivery and affected-page analysis.
+pub mod resource_impact;
+
 mod local_checkpoint;
 
 /// Experimental versioned content detector.
