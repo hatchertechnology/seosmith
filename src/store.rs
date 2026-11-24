@@ -45,6 +45,7 @@ impl Store {
             started_at TEXT, report TEXT, report_hash TEXT, error TEXT,
             delivery_state TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
             next_attempt INTEGER NOT NULL DEFAULT 0, discovery_truncated INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL DEFAULT (unixepoch()));
+            CREATE TABLE IF NOT EXISTS local_sitemap_run (job_id TEXT PRIMARY KEY REFERENCES jobs(id), evidence TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS local_robots_run (job_id TEXT PRIMARY KEY REFERENCES jobs(id), evidence TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS local_page_evidence (job_id TEXT NOT NULL REFERENCES jobs(id), url TEXT NOT NULL, evidence TEXT NOT NULL, PRIMARY KEY(job_id,url));
             CREATE TABLE IF NOT EXISTS local_evidence_usage (job_id TEXT PRIMARY KEY REFERENCES jobs(id), evidence_bytes INTEGER NOT NULL);
@@ -282,6 +283,48 @@ impl Store {
                 == Some(request),
             "job is not the claimed local request"
         );
+        Ok(())
+    }
+    /// Replace the bounded discovery snapshot while the local job is running.
+    pub(crate) async fn record_local_sitemap(
+        &self,
+        id: &str,
+        run: &crate::sitemap_evidence::LocalRun,
+    ) -> Result<()> {
+        let value = serde_json::to_string(run)?;
+        ensure!(
+            value.len() <= 2 * 1024 * 1024,
+            "sitemap evidence exceeds limit"
+        );
+        let mut tx = self.0.begin_with("BEGIN IMMEDIATE").await?;
+        let state: Option<(String, Option<String>)> =
+            sqlx::query_as("SELECT state,execution_mode FROM jobs WHERE id=?")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        ensure!(
+            state == Some(("local_running".into(), Some("local".into()))),
+            "job is not local running"
+        );
+        let existing: Option<String> =
+            sqlx::query_scalar("SELECT evidence FROM local_sitemap_run WHERE job_id=?")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if let Some(old) = existing {
+            if old == value || run.state == "in_progress" {
+                tx.commit().await?;
+                return Ok(());
+            }
+            let old: crate::sitemap_evidence::LocalRun = serde_json::from_str(&old)?;
+            ensure!(
+                old.state == "in_progress" && run.state != "in_progress",
+                "sitemap evidence replay differs"
+            );
+        }
+        sqlx::query("INSERT INTO local_sitemap_run(job_id,evidence) VALUES(?,?) ON CONFLICT(job_id) DO UPDATE SET evidence=excluded.evidence")
+            .bind(id).bind(value).execute(&mut *tx).await?;
+        tx.commit().await?;
         Ok(())
     }
     /// Persist bounded origin outcomes even if no page is checkpointed. Serialized with cancellation.
@@ -650,6 +693,45 @@ mod local_checkpoint_tests {
         assert_eq!(count, i64::from(checkpoint.is_ok()));
         assert!(store.cancelled(&id).await?);
         assert!(store.checkpoint_local(&id, &page, &evidence).await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sitemap_snapshot_replay_and_cancel_are_serialized() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(dir.path().join("sitemap.sqlite").to_str().unwrap()).await?;
+        let report: Report =
+            serde_json::from_str(include_str!("../fixtures/contracts/legacy.json"))?;
+        let mut request = report.request;
+        request.request_id = uuid::Uuid::new_v4();
+        let id = request.request_id.to_string();
+        store.submit_local(&request).await?;
+        store.claim_local(&id).await?.unwrap();
+        let mut run = crate::sitemap_evidence::LocalRun::new(&[]);
+        store.record_local_sitemap(&id, &run).await?;
+        store.record_local_sitemap(&id, &run).await?;
+        let source = url::Url::parse("https://example.com/map.xml")?;
+        run.source(&source, "fetched", Some(200), Some(b"<urlset></urlset>"));
+        run.state = "complete".into();
+        run.discovery_state = "complete".into();
+        store.record_local_sitemap(&id, &run).await?;
+        store.record_local_sitemap(&id, &run).await?;
+        let mut different = run.clone();
+        different.sources[0].body_sha256 = Some("different".into());
+        assert!(store.record_local_sitemap(&id, &different).await.is_err());
+        run.state = "partial".into();
+        assert!(store.record_local_sitemap(&id, &run).await.is_err());
+        assert!(store.cancel(&id).await?);
+        assert!(store.record_local_sitemap(&id, &run).await.is_err());
+        let stored: String =
+            sqlx::query_scalar("SELECT evidence FROM local_sitemap_run WHERE job_id=?")
+                .bind(id)
+                .fetch_one(&store.0)
+                .await?;
+        assert_eq!(
+            serde_json::from_str::<crate::sitemap_evidence::LocalRun>(&stored)?.state,
+            "complete"
+        );
         Ok(())
     }
 
