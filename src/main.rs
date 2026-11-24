@@ -1,4 +1,5 @@
 mod saved_graph;
+mod saved_pair;
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
 use seosmith::{
@@ -42,6 +43,36 @@ enum Command {
     /// Analyze retained checkpoints of a terminal local-only job, without writes.
     SavedGraph {
         request_id: uuid::Uuid,
+    },
+    /// Compare two saved page assessments or two caller-supplied retained HTML files.
+    SavedPair {
+        /// Terminal local-only job ID for saved-checkpoint comparison.
+        #[arg(long)]
+        request_id: Option<uuid::Uuid>,
+        /// Source page URL from the saved local job.
+        #[arg(long)]
+        source: Option<String>,
+        /// Explicit comparison peer URL from the saved local job.
+        #[arg(long)]
+        peer: Option<String>,
+        /// Caller-supplied retained source HTML file; no fetch is performed.
+        #[arg(long)]
+        source_html: Option<std::path::PathBuf>,
+        /// Caller-supplied retained peer HTML file; no fetch is performed.
+        #[arg(long)]
+        peer_html: Option<std::path::PathBuf>,
+        /// Response status asserted by the caller for --source-html.
+        #[arg(long)]
+        source_status: Option<u16>,
+        /// Response status asserted by the caller for --peer-html.
+        #[arg(long)]
+        peer_status: Option<u16>,
+        /// Source content type for --source-html.
+        #[arg(long)]
+        source_content_type: Option<String>,
+        /// Peer content type for --peer-html.
+        #[arg(long)]
+        peer_content_type: Option<String>,
     },
     Rules,
     /// Validate a saved report locally without submitting or delivering a job.
@@ -155,6 +186,39 @@ async fn main() -> Result<()> {
         saved_graph::run(std::path::Path::new(&cli.database), &request_id.to_string()).await?;
         return Ok(());
     }
+    if let Command::SavedPair {
+        request_id,
+        source,
+        peer,
+        source_html,
+        peer_html,
+        source_status,
+        peer_status,
+        source_content_type,
+        peer_content_type,
+    } = &cli.command
+    {
+        ensure!(
+            policy.is_none() && !cli.evidence_contract_v2,
+            "saved pair does not accept report options"
+        );
+        saved_pair::run(
+            std::path::Path::new(&cli.database),
+            saved_pair::SavedPairArgs {
+                request_id: *request_id,
+                source: source.as_deref(),
+                peer: peer.as_deref(),
+                source_html: source_html.as_deref(),
+                peer_html: peer_html.as_deref(),
+                source_status: *source_status,
+                peer_status: *peer_status,
+                source_content_type: source_content_type.as_deref(),
+                peer_content_type: peer_content_type.as_deref(),
+            },
+        )
+        .await?;
+        return Ok(());
+    }
     if let Command::Operations { operation } = cli.command {
         if policy.is_some() {
             eprintln!(
@@ -209,7 +273,10 @@ async fn main() -> Result<()> {
     store.recover().await?;
     match cli.command {
         Command::Operations { .. } => unreachable!(),
-        Command::Rules | Command::ValidateStructured { .. } | Command::SavedGraph { .. } => {}
+        Command::Rules
+        | Command::ValidateStructured { .. }
+        | Command::SavedGraph { .. }
+        | Command::SavedPair { .. } => {}
         Command::Crawl { request } => {
             let r: CrawlRequest = serde_json::from_slice(&tokio::fs::read(request).await?)?;
 
