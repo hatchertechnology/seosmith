@@ -59,3 +59,7 @@ required-features = ["policy-wire-prototype"]
 [[example]]
 name = "make_wire_url_review"
 required-features = ["policy-wire-prototype"]
+
+[[example]]
+name = "make_finding_coverage"
+required-features = ["policy-wire-prototype"]
