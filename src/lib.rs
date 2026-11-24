@@ -33,3 +33,6 @@ pub mod graph_evidence;
 pub mod resource_evidence;
 
 mod local_checkpoint;
+
+/// Experimental versioned content detector.
+pub mod s06_detector;

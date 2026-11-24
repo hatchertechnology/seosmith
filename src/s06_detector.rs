@@ -89,7 +89,7 @@ fn extract(source: &Source<'_>) -> Result<Evidence, &'static str> {
     {
         return Err("not HTML");
     }
-    let (decoded, _, errors) = seosmith::extract::decode(bytes, source.content_type);
+    let (decoded, _, errors) = crate::extract::decode(bytes, source.content_type);
     if errors {
         return Err("decoding errors");
     }
@@ -125,8 +125,8 @@ fn extract(source: &Source<'_>) -> Result<Evidence, &'static str> {
     };
     let excerpt = main.chars().take(240).collect();
     Ok(Evidence {
-        source_sha256: seosmith::model::digest(bytes),
-        main_sha256: seosmith::model::digest(main.to_lowercase().as_bytes()),
+        source_sha256: crate::model::digest(bytes),
+        main_sha256: crate::model::digest(main.to_lowercase().as_bytes()),
         title,
         h1,
         excerpt,

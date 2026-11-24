@@ -1,6 +1,4 @@
-#[path = "../src/s06_detector.rs"]
-mod detector;
-use detector::{Decision, Source};
+use seosmith::s06_detector::{self as detector, Decision, Source};
 use serde_json::Value;
 use std::fs;
 
