@@ -330,6 +330,8 @@ struct FixtureResponse {
     #[serde(default)]
     headers: std::collections::BTreeMap<String, String>,
     body: String,
+    #[serde(default)]
+    header_fields: Option<Vec<(String, String)>>,
 }
 #[cfg(feature = "local-cli-fixtures")]
 struct FixtureTransport(std::collections::BTreeMap<String, FixtureResponse>);
@@ -338,9 +340,25 @@ impl seosmith::fetch::Transport for FixtureTransport {
     #[allow(clippy::unused_async_trait_impl)] // Matches the production transport's async interface.
     async fn get(&self, url: &url::Url) -> Result<seosmith::fetch::Response> {
         let fixture = self.0.get(url.as_str()).context("fixture URL missing")?;
+        let mut fields = reqwest::header::HeaderMap::new();
+        let entries: Vec<_> = fixture.header_fields.clone().unwrap_or_else(|| {
+            fixture
+                .headers
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        });
+        for (name, value) in entries {
+            fields.append(
+                reqwest::header::HeaderName::from_bytes(name.as_bytes())?,
+                reqwest::header::HeaderValue::from_bytes(value.as_bytes())?,
+            );
+        }
+        let (headers, occurrences) = seosmith::fetch::extract_headers(&fields);
         Ok(seosmith::fetch::Response {
             status: fixture.status,
-            headers: fixture.headers.clone(),
+            headers,
+            local_http_occurrences: Some(occurrences),
             body: fixture.body.as_bytes().to_vec(),
             ttfb_ms: 0,
         })

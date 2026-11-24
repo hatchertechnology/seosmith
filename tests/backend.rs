@@ -35,6 +35,7 @@ fn response(html: &str) -> Response {
         status: 200,
         headers: BTreeMap::from([("content-type".into(), "text/html".into())]),
         body: html.as_bytes().to_vec(),
+        local_http_occurrences: None,
         ttfb_ms: 10,
     }
 }
@@ -203,8 +204,10 @@ impl Transport for Fixture {
     async fn get(&self, u: &Url) -> anyhow::Result<Response> {
         self.calls.lock().unwrap().push(u.to_string());
         Ok(match u.path() {
-            "/robots.txt"=>Response{status:200,headers:BTreeMap::new(),body:b"User-agent: *\nDisallow: /private".to_vec(),ttfb_ms:1},
-            "/sitemap.xml"=>Response{status:200,headers:BTreeMap::new(),body:b"<urlset><url><loc>https://example.com/private</loc></url><url><loc>https://example.com/orphan</loc></url></urlset>".to_vec(),ttfb_ms:1},
+            "/robots.txt"=>Response{status:200,headers:BTreeMap::new(),body:b"User-agent: *\nDisallow: /private".to_vec(),local_http_occurrences: None,
+            ttfb_ms:1},
+            "/sitemap.xml"=>Response{status:200,headers:BTreeMap::new(),body:b"<urlset><url><loc>https://example.com/private</loc></url><url><loc>https://example.com/orphan</loc></url></urlset>".to_vec(),local_http_occurrences: None,
+            ttfb_ms:1},
             "/"=>response("<html><head><title>Shared title for test</title></head><body><a href='/about'>About</a><a href='/private'>Private</a><a href='http://127.0.0.1/'>Never fetch</a></body></html>"),
             _=>response("<html><head><title>Shared title for test</title></head><body><h1>Page</h1></body></html>"),
         })
@@ -444,18 +447,21 @@ impl Transport for Resources {
                 status: 200,
                 headers: BTreeMap::new(),
                 body: Vec::new(),
+                local_http_occurrences: None,
                 ttfb_ms: 1,
             },
             "/sitemap.xml" | "/bad" => Response {
                 status: 404,
                 headers: BTreeMap::new(),
                 body: Vec::new(),
+                local_http_occurrences: None,
                 ttfb_ms: 1,
             },
             "/image.jpg" => Response {
                 status: 200,
                 headers: BTreeMap::from([("content-type".into(), "image/jpeg".into())]),
                 body: vec![0; 150_000],
+                local_http_occurrences: None,
                 ttfb_ms: 1,
             },
             _ => response(
@@ -638,7 +644,7 @@ async fn local_crawl_persists_typed_evidence_across_reopen_without_delivery() {
     for (url, value) in rows {
         let value: serde_json::Value = serde_json::from_str(&value).unwrap();
         assert_eq!(value["capture"]["url"], url);
-        assert_eq!(value["capture"]["collectors"].as_array().unwrap().len(), 4);
+        assert_eq!(value["capture"]["collectors"].as_array().unwrap().len(), 6);
         assert_eq!(value["capture"]["collectors"][3]["collector"], "robots");
         if url.ends_with("/private") {
             assert_eq!(
@@ -702,12 +708,14 @@ impl Transport for LongDiscoveredFixture {
                 status: 200,
                 headers: BTreeMap::new(),
                 body: b"User-agent: *\nAllow: /".to_vec(),
+                local_http_occurrences: None,
                 ttfb_ms: 0,
             },
             "/sitemap.xml" => Response {
                 status: 404,
                 headers: BTreeMap::new(),
                 body: vec![],
+                local_http_occurrences: None,
                 ttfb_ms: 0,
             },
             "/" => response(&format!("<a href='/{}'>Long</a>", "x".repeat(10_000))),

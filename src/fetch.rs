@@ -13,6 +13,7 @@ pub const MAX_BODY: usize = 4 * 1024 * 1024;
 pub struct Response {
     pub status: u16,
     pub headers: BTreeMap<String, String>,
+    pub local_http_occurrences: Option<crate::collection_evidence::Collection>,
     pub body: Vec<u8>,
     pub ttfb_ms: u64,
 }
@@ -113,18 +114,7 @@ impl Transport for Fetcher {
         let mut response = client.get(url.clone()).send().await?;
         let ttfb_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let status = response.status().as_u16();
-        let mut headers = BTreeMap::<String, String>::new();
-        for (key, value) in response.headers() {
-            if let Ok(value) = value.to_str() {
-                headers
-                    .entry(key.to_string())
-                    .and_modify(|old| {
-                        old.push_str(", ");
-                        old.push_str(value);
-                    })
-                    .or_insert_with(|| value.to_owned());
-            }
-        }
+        let (headers, local_http_occurrences) = extract_headers(response.headers());
         if response
             .content_length()
             .is_some_and(|n| n > MAX_BODY as u64)
@@ -142,10 +132,45 @@ impl Transport for Fetcher {
         Ok(Response {
             status,
             headers,
+            local_http_occurrences: Some(local_http_occurrences),
             body,
             ttfb_ms,
         })
     }
+}
+/// Extract the ordinary merged headers and separately retain bounded directive fields.
+pub fn extract_headers(
+    headers: &reqwest::header::HeaderMap,
+) -> (
+    BTreeMap<String, String>,
+    crate::collection_evidence::Collection,
+) {
+    let mut merged = BTreeMap::<String, String>::new();
+    let mut fields = Vec::new();
+    let mut invalid = 0;
+    for (key, value) in headers {
+        if let Ok(value) = value.to_str() {
+            merged
+                .entry(key.to_string())
+                .and_modify(|old| {
+                    old.push_str(", ");
+                    old.push_str(value);
+                })
+                .or_insert_with(|| value.to_owned());
+            fields.push((key.as_str(), value));
+        } else if key.as_str().eq_ignore_ascii_case("x-robots-tag")
+            || key.as_str().eq_ignore_ascii_case("link")
+        {
+            invalid += 1;
+        }
+    }
+    let mut occurrences = crate::collection_evidence::http_occurrences(&fields);
+    if invalid > 0 {
+        occurrences.complete = false;
+        occurrences.omitted += invalid + occurrences.occurrences.len();
+        occurrences.occurrences.clear();
+    }
+    (merged, occurrences)
 }
 pub fn service_url(value: &str, allow_private_http: bool) -> Result<Url> {
     let u = Url::parse(value)?;
@@ -162,4 +187,34 @@ pub fn service_url(value: &str, allow_private_http: bool) -> Result<Url> {
         "HTTPS required"
     );
     Ok(u)
+}
+
+#[cfg(test)]
+mod header_tests {
+    use super::*;
+    #[test]
+    fn ordinary_extraction_retains_repeated_and_marks_invalid_or_limited() {
+        use reqwest::header::{HeaderMap, HeaderValue};
+        let mut h = HeaderMap::new();
+        h.append("x-robots-tag", HeaderValue::from_static("index"));
+        h.append("x-robots-tag", HeaderValue::from_static("noindex"));
+        let (ordinary, evidence) = extract_headers(&h);
+        assert_eq!(ordinary["x-robots-tag"], "index, noindex");
+        assert_eq!(evidence.occurrences.len(), 2);
+        assert_eq!(evidence.occurrences[1].ordinal, 1);
+        h.append("x-robots-tag", HeaderValue::from_bytes(&[0xff]).unwrap());
+        let (ordinary, evidence) = extract_headers(&h);
+        assert_eq!(ordinary["x-robots-tag"], "index, noindex");
+        assert!(!evidence.complete);
+        assert!(evidence.occurrences.is_empty());
+        assert_eq!(evidence.omitted, 3);
+        let mut h = HeaderMap::new();
+        h.append(
+            "x-robots-tag",
+            HeaderValue::from_str(&"x".repeat(16_385)).unwrap(),
+        );
+        let (_, evidence) = extract_headers(&h);
+        assert!(!evidence.complete);
+        assert_eq!(evidence.omitted, 1);
+    }
 }

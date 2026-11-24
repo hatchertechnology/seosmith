@@ -13,6 +13,7 @@ fn response(body: &str) -> Response {
         status: 200,
         headers: BTreeMap::from([("content-type".into(), "text/html".into())]),
         body: body.as_bytes().to_vec(),
+        local_http_occurrences: None,
         ttfb_ms: 1,
     }
 }
