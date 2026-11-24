@@ -751,3 +751,41 @@ async fn long_discovered_url_is_checkpointed() {
         seosmith::model::digest(target.url.as_bytes())
     );
 }
+
+#[tokio::test]
+async fn local_sitemap_capture_does_not_add_requests_or_change_discovery() {
+    let (_local_dir, local) = db().await;
+    let (_standard_dir, standard) = db().await;
+    let r = request();
+    let id = r.request_id.to_string();
+    local.submit_local(&r).await.unwrap();
+    local.claim_local(&id).await.unwrap().unwrap();
+    standard.submit(&r).await.unwrap();
+    standard.claim().await.unwrap().unwrap();
+    let local_fixture = Fixture {
+        calls: Arc::default(),
+    };
+    let standard_fixture = Fixture {
+        calls: Arc::default(),
+    };
+    let local_report = crawler::crawl_local_with(&local, &r, &local_fixture)
+        .await
+        .unwrap();
+    let standard_report = crawler::crawl_with(&standard, &r, &standard_fixture)
+        .await
+        .unwrap();
+    assert_eq!(
+        *local_fixture.calls.lock().unwrap(),
+        *standard_fixture.calls.lock().unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(local_report.pages).unwrap(),
+        serde_json::to_value(standard_report.pages).unwrap()
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM local_sitemap_run WHERE job_id=?")
+        .bind(&id)
+        .fetch_one(&standard.0)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}

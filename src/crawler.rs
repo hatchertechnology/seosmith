@@ -101,6 +101,7 @@ async fn discover_sitemaps(
     r: &CrawlRequest,
     fetch: &impl Transport,
     body: &str,
+    mut capture: Option<&mut crate::sitemap_evidence::LocalRun>,
 ) -> Result<bool> {
     let id = r.request_id.to_string();
     let mut maps: Vec<Url> = body
@@ -114,11 +115,27 @@ async fn discover_sitemaps(
         })
         .filter(|u| r.in_scope(u))
         .collect();
+    let skipped_roots = if capture.is_some() {
+        body.lines()
+            .filter(|line| {
+                line.split_once(':')
+                    .is_some_and(|(key, _)| key.trim().eq_ignore_ascii_case("sitemap"))
+            })
+            .count()
+            .saturating_sub(maps.len())
+    } else {
+        0
+    };
     if maps.is_empty() {
         maps.push(r.url.join("/sitemap.xml")?);
     }
+    if let Some(run) = capture.as_deref_mut() {
+        *run = crate::sitemap_evidence::LocalRun::new(&maps);
+        run.skipped_roots = skipped_roots;
+    }
     let mut seen = HashSet::new();
     let mut complete = true;
+    let mut hit_source_limit = false;
     while let Some(u) = maps.pop() {
         if !(Robots {
             body: body.into(),
@@ -126,18 +143,42 @@ async fn discover_sitemaps(
         })
         .allowed(&u)
         {
+            if let Some(run) = capture.as_deref_mut() {
+                run.source(&u, "skipped_robots", None, None);
+            }
             complete = false;
             continue;
         }
         if !seen.insert(u.to_string()) {
+            if let Some(run) = capture.as_deref_mut() {
+                run.source(&u, "skipped_duplicate", None, None);
+            }
             continue;
         }
         if seen.len() > 20 {
+            hit_source_limit = true;
+            if let Some(run) = capture.as_deref_mut() {
+                run.source(&u, "skipped_source_limit", None, None);
+                run.remaining_sources_unknown = true;
+            }
             complete = false;
             break;
         }
+        let pending = capture
+            .as_deref_mut()
+            .and_then(|run| run.source(&u, "fetch_pending_unknown", None, None));
         tokio::time::sleep(Duration::from_millis(r.delay_ms)).await;
-        match fetch.get(&u).await {
+        let response = fetch.get(&u).await;
+        if let Some(run) = capture.as_deref_mut() {
+            match &response {
+                Ok(resp) if resp.status == 200 => {
+                    run.finish_fetch(pending, &u, Some(resp.status), Some(&resp.body));
+                }
+                Ok(resp) => run.finish_fetch(pending, &u, Some(resp.status), None),
+                Err(_) => run.finish_fetch(pending, &u, None, None),
+            }
+        }
+        match response {
             Ok(resp) if resp.status == 200 => match sitemap_locations(&resp.body) {
                 Ok((index, urls)) => {
                     for url in urls {
@@ -157,6 +198,9 @@ async fn discover_sitemaps(
             Ok(resp) if matches!(resp.status, 404 | 410) => {}
             _ => complete = false,
         }
+    }
+    if let Some(run) = capture {
+        run.finish(complete, hit_source_limit, &r.url);
     }
     Ok(complete)
 }
@@ -191,6 +235,10 @@ async fn crawl_internal(
     let deadline = chrono::DateTime::parse_from_rfc3339(&started_at)?.timestamp()
         + i64::try_from(r.max_duration_seconds)?;
     let mut policies = HashMap::new();
+    let mut sitemap_capture = local.then(|| crate::sitemap_evidence::LocalRun::new(&[]));
+    if let Some(run) = &sitemap_capture {
+        store.record_local_sitemap(&id, run).await?;
+    }
     let result = robots(fetch, &r.url).await;
     if local {
         store
@@ -202,17 +250,32 @@ async fn crawl_internal(
             .await?;
     }
     let Ok(policy) = result else {
+        if let Some(run) = &mut sitemap_capture {
+            run.state = "partial".into();
+            run.discovery_state = "skipped_robots_unavailable".into();
+            run.remaining_sources_unknown = true;
+            store.record_local_sitemap(&id, run).await?;
+        }
         return report(store, r, started_at, "failed", "robots_unavailable", false).await;
     };
-    let map_complete = match tokio::time::timeout(
+    let map_complete = if let Ok(v) = tokio::time::timeout(
         Duration::from_secs(60),
-        discover_sitemaps(store, r, fetch, &policy.body),
+        discover_sitemaps(store, r, fetch, &policy.body, sitemap_capture.as_mut()),
     )
     .await
     {
-        Ok(v) => v?,
-        Err(_) => false,
+        v?
+    } else {
+        if let Some(run) = &mut sitemap_capture {
+            run.state = "partial".into();
+            run.discovery_state = "timeout_unknown".into();
+            run.remaining_sources_unknown = true;
+        }
+        false
     };
+    if let Some(run) = &sitemap_capture {
+        store.record_local_sitemap(&id, run).await?;
+    }
     policies.insert(origin(&r.url), policy);
     let existing = store.pages(&id).await?;
     let mut count = existing.iter().filter(|p| !p.is_resource).count();

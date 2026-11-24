@@ -69,7 +69,7 @@ async fn policy_cli_fixtures_upgrade_and_reopen_without_delivery_changes() -> an
         ),
         (
             "https://fixture.invalid/sitemap.xml",
-            serde_json::json!({"status":404,"body":""}),
+            serde_json::json!({"status":200,"body":format!("<urlset>{}</urlset>", "<url></url>".repeat(300))}),
         ),
         (
             "https://fixture.invalid/",
@@ -123,6 +123,17 @@ async fn policy_cli_fixtures_upgrade_and_reopen_without_delivery_changes() -> an
     assert_eq!(result["request"]["request_id"], id);
     assert_eq!(result["pages"].as_array().unwrap().len(), 8);
     let store = Store::open(db.to_str().unwrap()).await?;
+    let raw: String = sqlx::query_scalar("SELECT evidence FROM local_sitemap_run WHERE job_id=?")
+        .bind(&id)
+        .fetch_one(&store.0)
+        .await?;
+    let run: seosmith::sitemap_evidence::LocalRun = serde_json::from_str(&raw)?;
+    assert_eq!(run.discovery_state, "complete");
+    assert_eq!(run.state, "partial");
+    assert_eq!(
+        run.sources[0].document.as_ref().unwrap().omitted_entries,
+        None
+    );
     let captures: Vec<(String, String)> =
         sqlx::query_as("SELECT url,evidence FROM local_page_evidence WHERE job_id=? ORDER BY url")
             .bind(&id)
@@ -456,8 +467,11 @@ async fn saved_graph_reads_real_crawl_without_mutating_store() -> anyhow::Result
     std::fs::write(
         &fixture_path,
         serde_json::to_vec(&serde_json::json!({
-            "https://fixture.invalid/robots.txt": {"status":200,"body":"User-agent: *\nDisallow: /private\n"},
-            "https://fixture.invalid/sitemap.xml": {"status":200,"body":"<?xml version='1.0'?><urlset xmlns='http://www.sitemaps.org/schemas/sitemap/0.9'><url><loc>https://fixture.invalid/hidden</loc></url></urlset>"},
+            "https://fixture.invalid/robots.txt": {"status":200,"body":"User-agent: *\nDisallow: /private\nDisallow: /blocked.xml\n"},
+            "https://fixture.invalid/sitemap.xml": {"status":200,"body":"<sitemapindex><sitemap><loc>https://fixture.invalid/child.xml</loc></sitemap><sitemap><loc>https://fixture.invalid/child.xml</loc></sitemap><sitemap><loc>https://fixture.invalid/blocked.xml</loc></sitemap><sitemap><loc>https://fixture.invalid/error.xml</loc></sitemap></sitemapindex>"},
+            "https://fixture.invalid/error.xml": {"status":503,"body":""},
+            "https://fixture.invalid/child.xml": {"status":200,"body":"<sitemapindex><sitemap><loc>https://fixture.invalid/leaf.xml</loc></sitemap></sitemapindex>"},
+            "https://fixture.invalid/leaf.xml": {"status":200,"body":format!("<urlset><url><loc>https://fixture.invalid/hidden</loc></url><url><loc>bad</loc></url><url></url>{}</urlset>", "<url></url>".repeat(260))},
             "https://fixture.invalid/": {"status":200,"headers":{"content-type":"text/html"},"body":"<a href='/next#missing'>next</a><a href='/private'>private</a><a href='mailto:test@example.com'>rejected</a>"},
             "https://fixture.invalid/next": {"status":200,"headers":{"content-type":"text/html"},"body":"<h1 id='here'>Next</h1>"},
             "https://fixture.invalid/hidden": {"status":200,"headers":{"content-type":"text/html"},"body":"<p>Hidden</p>"}
@@ -481,6 +495,57 @@ async fn saved_graph_reads_real_crawl_without_mutating_store() -> anyhow::Result
         "{}",
         String::from_utf8_lossy(&crawl.stderr)
     );
+    let reopened = Store::open(db.to_str().unwrap()).await?;
+    assert!(
+        reopened
+            .report(&request.request_id.to_string())
+            .await?
+            .is_none()
+    );
+    assert!(reopened.pending().await?.is_none());
+    let raw: String = sqlx::query_scalar("SELECT evidence FROM local_sitemap_run WHERE job_id=?")
+        .bind(request.request_id.to_string())
+        .fetch_one(&reopened.0)
+        .await?;
+    let run: seosmith::sitemap_evidence::LocalRun = serde_json::from_str(&raw)?;
+    assert_eq!(run.state, "partial");
+    assert_eq!(run.discovery_state, "incomplete");
+    assert!(run.sources.iter().any(|s| s.state == "skipped_robots"));
+    assert!(
+        run.sources
+            .iter()
+            .any(|s| s.state == "fetched_http_error" && s.status == Some(503))
+    );
+    let documents = run
+        .sources
+        .iter()
+        .filter_map(|source| source.document.clone().map(|doc| (source.url.clone(), doc)))
+        .collect();
+    let origins = seosmith::sitemap_evidence::entry_origins(
+        "https://fixture.invalid/sitemap.xml",
+        "https://fixture.invalid/hidden",
+        &documents,
+        &request.url,
+        20,
+    );
+    assert_eq!(origins.paths.len(), 2);
+    assert!(!origins.complete);
+    assert_eq!(origins.paths[0].index_entry_ordinals, vec![0, 0]);
+    assert_eq!(origins.paths[1].index_entry_ordinals, vec![1, 0]);
+    let leaf = &documents["https://fixture.invalid/leaf.xml"];
+    assert_eq!(leaf.entries[1].error.as_deref(), Some("invalid_location"));
+    assert_eq!(leaf.entries[2].error.as_deref(), Some("missing_location"));
+    assert_eq!(leaf.omitted_entries, None);
+    assert!(matches!(
+        leaf.error.as_deref(),
+        Some("entry_limit" | "budget_limit")
+    ));
+    assert!(
+        run.sources
+            .iter()
+            .any(|source| source.state == "skipped_duplicate")
+    );
+    reopened.0.close().await;
     // Explicitly quiesce/checkpoint the completed fixture before immutable analysis.
     let quiesce = SqlitePool::connect_with(
         SqliteConnectOptions::new()

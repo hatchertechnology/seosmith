@@ -701,3 +701,155 @@ mod document_budget_tests {
         assert_eq!(partial.omitted_entries, None);
     }
 }
+
+/// Bounded local discovery record. Entries in index documents retain each
+/// parent-hop ordinal, including repeated references to the same child.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LocalRun {
+    pub version: u8,
+    /// Coverage of retained evidence, distinct from the crawler's result.
+    pub state: String,
+    pub discovery_state: String,
+    pub roots: Vec<String>,
+    pub omitted_roots: usize,
+    /// Robots sitemap directives ignored by discovery because they are invalid or out of scope.
+    pub skipped_roots: usize,
+    pub sources: Vec<LocalSource>,
+    pub omitted_sources: usize,
+    pub remaining_sources_unknown: bool,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LocalSource {
+    pub url: String,
+    pub state: String,
+    pub status: Option<u16>,
+    pub body_sha256: Option<String>,
+    pub document: Option<Sitemap>,
+}
+impl LocalRun {
+    pub fn new(roots: &[Url]) -> Self {
+        let mut run = Self {
+            version: 1,
+            state: "in_progress".into(),
+            discovery_state: "in_progress".into(),
+            roots: Vec::new(),
+            omitted_roots: 0,
+            skipped_roots: 0,
+            sources: Vec::new(),
+            omitted_sources: 0,
+            remaining_sources_unknown: true,
+        };
+        for root in roots {
+            if run.roots.len() < 32 && root.as_str().len() <= 2048 {
+                run.roots.push(root.to_string());
+            } else {
+                run.omitted_roots += 1;
+            }
+        }
+        run
+    }
+    pub fn finish(&mut self, discovery_complete: bool, remaining_unknown: bool, scope: &Url) {
+        self.discovery_state = if discovery_complete {
+            "complete"
+        } else {
+            "incomplete"
+        }
+        .into();
+        self.remaining_sources_unknown = remaining_unknown;
+        let partial = !discovery_complete
+            || remaining_unknown
+            || self.omitted_roots > 0
+            || self.skipped_roots > 0
+            || self.omitted_sources > 0
+            || self
+                .sources
+                .iter()
+                .any(|source| match source.state.as_str() {
+                    "skipped_duplicate" => false,
+                    "fetched" => source.document.as_ref().is_none_or(|doc| {
+                        doc.error.is_some()
+                            || doc.omitted_entries != Some(0)
+                            || doc
+                                .entries
+                                .iter()
+                                .any(|entry| entry_scope(entry, scope) != EntryScope::InScope)
+                    }),
+                    _ => true,
+                });
+        self.state = if partial { "partial" } else { "complete" }.into();
+    }
+    pub fn source(
+        &mut self,
+        url: &Url,
+        state: &str,
+        status: Option<u16>,
+        bytes: Option<&[u8]>,
+    ) -> Option<usize> {
+        if self.sources.len() >= 64 || url.as_str().len() > 2048 {
+            self.omitted_sources = self.omitted_sources.saturating_add(1);
+            return None;
+        }
+        let document = bytes.and_then(|bytes| {
+            let mut doc = parse(url.as_str(), bytes, 256 * 1024, 256);
+            enforce_document_budget(&mut doc, 16 * 1024)
+                .ok()
+                .map(|()| doc)
+        });
+        let state = if bytes.is_some() && document.is_none() {
+            "document_budget_unknown"
+        } else {
+            state
+        };
+        self.sources.push(LocalSource {
+            url: url.to_string(),
+            state: state.into(),
+            status,
+            body_sha256: bytes.map(crate::model::digest),
+            document,
+        });
+        Some(self.sources.len() - 1)
+    }
+    pub fn finish_fetch(
+        &mut self,
+        index: Option<usize>,
+        url: &Url,
+        status: Option<u16>,
+        bytes: Option<&[u8]>,
+    ) {
+        if let Some(index) = index {
+            self.sources.remove(index);
+            let state = if bytes.is_some() {
+                "fetched"
+            } else if status.is_some() {
+                "fetched_http_error"
+            } else {
+                "fetch_error"
+            };
+            self.source(url, state, status, bytes);
+        }
+    }
+}
+
+#[cfg(test)]
+mod local_run_tests {
+    use super::*;
+    #[test]
+    fn capture_limits_keep_unknown_omissions_and_errors() {
+        let url = Url::parse("https://example.com/map.xml").unwrap();
+        let mut run = LocalRun::new(std::slice::from_ref(&url));
+        let body = format!(
+            "<urlset>{}</urlset>",
+            "<url><loc>https://example.com/a</loc></url>".repeat(300)
+        );
+        run.source(&url, "fetched", Some(200), Some(body.as_bytes()));
+        let doc = run.sources[0].document.as_ref().unwrap();
+        assert_eq!(doc.error.as_deref(), Some("entry_limit"));
+        assert_eq!(doc.omitted_entries, None);
+        for _ in 1..66 {
+            run.source(&url, "skipped_duplicate", None, None);
+        }
+        assert_eq!(run.sources.len(), 64);
+        assert_eq!(run.omitted_sources, 2);
+        assert!(serde_json::to_vec(&run).unwrap().len() < 2 * 1024 * 1024);
+    }
+}
