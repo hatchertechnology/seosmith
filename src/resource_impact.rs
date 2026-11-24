@@ -326,9 +326,14 @@ pub struct ByteGroup {
     pub origin: Option<String>,
     pub mime: Option<String>,
     pub counted_resources: usize,
+    /// Sum of the counted members only, or `None` when no member was counted.
+    /// Excluded and unknown members contribute nothing, so a non-`None` value is
+    /// a lower bound on the delivered bytes unless `complete` is true.
     pub decoded_body_bytes: Option<u64>,
     pub unknown_decoded_bytes_resources: usize,
     pub excluded_resources: usize,
+    /// False when any member is excluded, unknown, partial, truncated or lost to
+    /// a row limit, so the group sum is then only a lower bound.
     pub complete: bool,
 }
 
@@ -336,9 +341,14 @@ pub struct ByteGroup {
 pub struct ByteSummary {
     pub semantics: ByteSemantics,
     pub counted_resources: usize,
+    /// Sum of the counted resources only, or `None` when nothing was counted.
+    /// Excluded and unknown resources contribute nothing, so a non-`None` value
+    /// is a lower bound on the delivered bytes unless `complete` is true.
     pub decoded_body_bytes: Option<u64>,
     pub unknown_decoded_bytes_resources: usize,
     pub excluded_resources: usize,
+    /// False when any resource is excluded, unknown, partial, truncated or lost
+    /// to a row limit, so the totals are then only a lower bound.
     pub complete: bool,
     pub groups: Vec<ByteGroup>,
 }
@@ -992,6 +1002,9 @@ pub fn analyze(input: &ImpactInput<'_>) -> ResourceImpact {
         } else {
             excluded += 1;
             group.excluded += 1;
+            // An excluded member is not in the group sum, so the group can only
+            // be a lower bound. Keep group and aggregate completeness aligned.
+            group.complete = false;
         }
         if data.is_none() {
             unknown_bytes += 1;
@@ -1337,5 +1350,160 @@ mod tests {
         assert_eq!(impact.duplicates.len(), 1);
         assert_eq!(impact.duplicates[0].urls.len(), 2);
         assert_eq!(impact.bytes.decoded_body_bytes, Some(8));
+    }
+
+    fn measured(url: &str, status: Option<u16>, mime: &str, body: &[u8]) -> SavedPageRow {
+        let measured = crate::resource_evidence::resource(
+            url,
+            &BTreeMap::from([("content-type".into(), mime.into())]),
+            body,
+        );
+        let mut value = row(
+            url,
+            true,
+            Page {
+                url: url.into(),
+                status,
+                content_type: mime.into(),
+                is_resource: true,
+                ..Page::default()
+            },
+        );
+        value.resource = CollectorValue::Observed(
+            serde_json::from_value(serde_json::to_value(measured).unwrap()).unwrap(),
+        );
+        value
+    }
+
+    #[test]
+    fn group_with_successful_and_excluded_members_is_incomplete() {
+        let ok = measured(
+            "https://example.test/a.gif",
+            Some(200),
+            "image/gif",
+            b"GIF89a....",
+        );
+        let gone = measured(
+            "https://example.test/gone.gif",
+            Some(404),
+            "image/gif",
+            b"notfound",
+        );
+        let sheet = measured(
+            "https://example.test/a.css",
+            Some(200),
+            "text/css",
+            b"body{}",
+        );
+        let impact = analyze(&ImpactInput {
+            rows: &[ok, gone, sheet],
+            input_truncated: false,
+        });
+        assert_eq!(impact.bytes.counted_resources, 2);
+        assert_eq!(impact.bytes.excluded_resources, 1);
+        assert_eq!(impact.bytes.decoded_body_bytes, Some(16));
+        assert_eq!(impact.bytes.groups.len(), 2);
+
+        let gif = impact
+            .bytes
+            .groups
+            .iter()
+            .find(|group| group.mime.as_deref() == Some("image/gif"))
+            .unwrap();
+        assert_eq!(gif.counted_resources, 1);
+        assert_eq!(gif.excluded_resources, 1);
+        // Only the counted member contributes, so the group value is a lower bound.
+        assert_eq!(gif.decoded_body_bytes, Some(10));
+        assert!(!gif.complete);
+
+        // A fully counted group stays complete even though the totals are not.
+        let css = impact
+            .bytes
+            .groups
+            .iter()
+            .find(|group| group.mime.as_deref() == Some("text/css"))
+            .unwrap();
+        assert_eq!(css.counted_resources, 1);
+        assert_eq!(css.excluded_resources, 0);
+        assert_eq!(css.decoded_body_bytes, Some(6));
+        assert!(css.complete);
+        assert!(!impact.bytes.complete);
+    }
+
+    #[test]
+    fn all_excluded_and_missing_status_groups_stay_null_and_incomplete() {
+        let mut not_fetched = measured(
+            "https://example.test/never.gif",
+            Some(200),
+            "image/gif",
+            b"unused",
+        );
+        not_fetched.fetched = false;
+        let mut omitted = measured(
+            "https://example.test/omitted.gif",
+            Some(200),
+            "image/gif",
+            b"unused",
+        );
+        omitted.page = None;
+        let mut blocked = measured(
+            "https://example.test/blocked.gif",
+            Some(200),
+            "image/gif",
+            b"unused",
+        );
+        blocked.page.as_mut().unwrap().blocked_by_robots = true;
+        let impact = analyze(&ImpactInput {
+            rows: &[
+                measured(
+                    "https://example.test/gone.gif",
+                    Some(404),
+                    "image/gif",
+                    b"notfound",
+                ),
+                not_fetched,
+                omitted,
+                measured(
+                    "https://example.test/nostatus.gif",
+                    None,
+                    "image/gif",
+                    b"unused",
+                ),
+                blocked,
+            ],
+            input_truncated: false,
+        });
+        assert_eq!(impact.bytes.counted_resources, 0);
+        assert_eq!(impact.bytes.excluded_resources, 5);
+        assert_eq!(impact.bytes.unknown_decoded_bytes_resources, 0);
+        assert!(impact.bytes.decoded_body_bytes.is_none());
+        assert!(!impact.bytes.complete);
+        assert_eq!(impact.bytes.groups.len(), 1);
+        let group = &impact.bytes.groups[0];
+        assert_eq!(group.counted_resources, 0);
+        assert_eq!(group.excluded_resources, 5);
+        assert_eq!(group.decoded_body_bytes, None);
+        assert!(!group.complete);
+        let reasons: BTreeSet<&str> = impact
+            .resources
+            .iter()
+            .map(|entry| entry.exclusion_reason.unwrap())
+            .collect();
+        assert_eq!(
+            reasons,
+            BTreeSet::from([
+                "blocked_by_robots",
+                "resource_not_fetched",
+                "response_page_evidence_omitted",
+                "response_status_unavailable",
+                "unsuccessful_http_status",
+            ])
+        );
+        assert!(
+            impact
+                .resources
+                .iter()
+                .all(|entry| !entry.counted_in_byte_totals)
+        );
     }
 }

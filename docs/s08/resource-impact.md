@@ -55,8 +55,16 @@ reason. Missing resource bytes are never written as zero. Aggregated
 `decoded_body_bytes` is `null` when nothing was measured; otherwise it sums only
 counted measurements and reports the number of resources whose decoded bytes are
 unknown. A group that has no counted resources also has `null`, not zero.
-`complete=false` is set for unknown measurements, partial collectors, excluded
-resources, input truncation or a row limit.
+
+Because a sum covers counted measurements only, a non-`null` total or group value
+is a lower bound on the bytes actually delivered, never an exact total. It is
+exact only when the same aggregate reports `complete=true`.
+
+`complete` has the same meaning for the aggregate and for each origin/MIME group:
+it is `false` for unknown measurements, partial collectors, excluded resources,
+input truncation or a row limit. A group that retains an excluded member is
+therefore incomplete even when every other member was measured, and
+`excluded_resources` above zero always implies `complete=false` at both levels.
 
 Totals count only observed resource measurements on a successful 2xx response.
 Non-2xx responses, robots-blocked requests, fetch failures, unfetched resources,
@@ -67,14 +75,20 @@ is false.
 
 Duplicate groups use equality of measured decoded-body hashes only. Equality
 does not establish interchangeability. A resource with unknown bytes is not
-placed in a duplicate group.
+placed in a duplicate group. Groups cover every resource with a measured body,
+including excluded ones, so a non-2xx response can share a group with counted
+resources; each member's `counted_in_byte_totals` and `exclusion_reason` say
+whether its bytes are in the totals.
 
 ## Referring-page provenance and affected pages
 
 Each resource lists observed referrers with the source page, relationship kind
 and descriptor, or the retained static HTML element, attribute, raw value,
 `srcset` candidate descriptor, media/type/sizes/loading/priority attributes.
-Relationship and static-reference occurrences are kept separately. Reference
+Relationship and static-reference occurrences are kept separately. The static
+collector does not retain the attribute name, so `link` elements report `href`
+and every other element reports `src`; that derivation is not an independent
+observation. Reference
 coverage is `partial` when a relevant source is partial, unavailable or absent,
 or when input is truncated; `unknown` when no relevant reference source was
 retained; otherwise `bounded`. Even `bounded` means only the retained checkpoint,

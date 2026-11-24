@@ -18,6 +18,10 @@ fn cli(database: &Path, id: &str) -> std::process::Output {
 }
 
 async fn quiesce(database: &Path) -> anyhow::Result<()> {
+    // Switching out of WAL needs exclusive access: SQLite returns SQLITE_BUSY
+    // immediately while any other connection still holds the database. Callers
+    // must close their pool first (`store.0.close().await`) rather than dropping
+    // it, because pool shutdown is asynchronous.
     let pool = sqlx::SqlitePool::connect_with(
         sqlx::sqlite::SqliteConnectOptions::new()
             .filename(database)
@@ -172,6 +176,7 @@ async fn local_cli_joins_resource_measurements_with_page_provenance() -> anyhow:
         assert_eq!(resource["state"], "observed", "{url}");
         assert!(resource["data"]["transfer_bytes"].is_null(), "{url}");
     }
+    store.0.close().await;
     drop(store);
     quiesce(&db).await?;
     assert!(!Path::new(&format!("{}-wal", db.display())).exists());
@@ -196,6 +201,27 @@ async fn local_cli_joins_resource_measurements_with_page_provenance() -> anyhow:
     assert_eq!(value["bytes"]["excluded_resources"], 1);
     assert_eq!(value["bytes"]["decoded_body_bytes"], 77);
     assert_eq!(value["bytes"]["complete"], false);
+    let gif_group = value["bytes"]["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|group| group["mime"] == "image/gif")
+        .unwrap();
+    // a.gif, b.gif and c.gif are counted; the measured 404 body is excluded.
+    assert_eq!(gif_group["counted_resources"], 3);
+    assert_eq!(gif_group["excluded_resources"], 1);
+    assert_eq!(gif_group["decoded_body_bytes"], 49);
+    assert_eq!(gif_group["complete"], false);
+    let css_group = value["bytes"]["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|group| group["mime"] == "text/css")
+        .unwrap();
+    assert_eq!(css_group["counted_resources"], 1);
+    assert_eq!(css_group["excluded_resources"], 0);
+    assert_eq!(css_group["decoded_body_bytes"], 28);
+    assert_eq!(css_group["complete"], true);
 
     let a = resource_entry(&value, "https://fixture.invalid/a.gif");
     assert_eq!(a["response"]["status"], 200);
@@ -271,6 +297,7 @@ async fn local_cli_joins_resource_measurements_with_page_provenance() -> anyhow:
         .bind("https://fixture.invalid/b.gif")
         .execute(&store.0)
         .await?;
+    store.0.close().await;
     drop(store);
     quiesce(&db).await?;
     let before = std::fs::read(&db)?;
@@ -302,6 +329,8 @@ async fn local_cli_joins_resource_measurements_with_page_provenance() -> anyhow:
     assert_eq!(gif_group["counted_resources"], 2);
     assert_eq!(gif_group["decoded_body_bytes"], 32);
     assert_eq!(gif_group["unknown_decoded_bytes_resources"], 1);
+    // The measured 404 body and the row whose collector was removed are both excluded.
+    assert_eq!(gif_group["excluded_resources"], 2);
     assert_eq!(gif_group["complete"], false);
     assert!(
         !value["bytes"]["groups"]
@@ -468,6 +497,7 @@ async fn resource_impact_refuses_non_local_jobs() -> anyhow::Result<()> {
     let mut request = report.request;
     request.request_id = Uuid::new_v4();
     store.submit(&request).await?;
+    store.0.close().await;
     drop(store);
     quiesce(&db).await?;
     let output = cli(&db, &request.request_id.to_string());
