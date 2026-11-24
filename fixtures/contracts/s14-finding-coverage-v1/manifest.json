@@ -1,0 +1,107 @@
+{
+  "status": "proposed-local-only-not-frozen",
+  "note": "Synthetic producer fixtures for the schema-4 finding_coverage extension. Producer claims only; the receiver independently verifies and may return claimed-unverified. No historical fixture was modified.",
+  "catalogue": {
+    "path": "catalogue-v1.json",
+    "version": 1,
+    "rules": 88
+  },
+  "base_fixture": {
+    "path": "../../policies/v3-local-complete.json",
+    "sha256": "90d500ca38451e3d9470a5973b501d0c4d86bde33364b99cbf92e1b21a596e71"
+  },
+  "wire": {
+    "version": 1,
+    "audit": [
+      "complete",
+      "partial"
+    ],
+    "checks": "unique sorted catalogue rule_ids, status complete|unknown"
+  },
+  "mutation_recipe": "Load fixtures/policies/v3-local-complete.json; force schema_version=1, drop policy_guidance/evidence_contract; truncate pages to page 0; clear page 0 links/relationships/alternates. complete-missing-h1: headings=[], coverage_complete=true, stop_reason=frontier_exhausted. complete-clean-h1: headings=[(1,'A heading')], otherwise as complete-missing-h1. partial-missing-h1: headings=[], extraction_truncated=true, coverage_complete=false, stop_reason=page_limit. partial-clean-h1: headings=[(1,'A heading')], check_external_links=false, one external link 'https://outside.example/not-fetched', coverage_complete=true, stop_reason=frontier_exhausted. Then run audit::analyze + policy and add the extension.",
+  "cases": [
+    {
+      "path": "complete-missing-h1.json",
+      "bytes": 26567,
+      "sha256": "2443936d93da699595bdb135995e3d1d1503b96d973f5be4f3b82d9f243f4342",
+      "audit": "complete",
+      "checks": {
+        "complete": 88,
+        "unknown": 0
+      },
+      "coverage_complete": true,
+      "stop_reason": "frontier_exhausted",
+      "expected_findings": [
+        "deadend",
+        "little_content",
+        "missing_description",
+        "missing_h1",
+        "missing_language",
+        "short_title"
+      ],
+      "missing_h1_finding": true,
+      "missing_h1_check": "complete"
+    },
+    {
+      "path": "complete-clean-h1.json",
+      "bytes": 26282,
+      "sha256": "1f4b0889b2477397f129eaaa59d3d9c3451fe83bbd8c2ae50e039cf7f7fd87ff",
+      "audit": "complete",
+      "checks": {
+        "complete": 88,
+        "unknown": 0
+      },
+      "coverage_complete": true,
+      "stop_reason": "frontier_exhausted",
+      "expected_findings": [
+        "deadend",
+        "little_content",
+        "missing_description",
+        "missing_language",
+        "short_title"
+      ],
+      "missing_h1_finding": false,
+      "missing_h1_check": "complete"
+    },
+    {
+      "path": "partial-missing-h1.json",
+      "bytes": 25999,
+      "sha256": "d3c2ebd72e6632c5e9f654e7675a13b3a6850841e4f685d5e032dade1137200d",
+      "audit": "partial",
+      "checks": {
+        "complete": 0,
+        "unknown": 88
+      },
+      "coverage_complete": false,
+      "stop_reason": "page_limit",
+      "expected_findings": [
+        "deadend",
+        "missing_description",
+        "missing_h1",
+        "missing_language"
+      ],
+      "missing_h1_finding": true,
+      "missing_h1_check": "unknown"
+    },
+    {
+      "path": "partial-clean-h1.json",
+      "bytes": 26829,
+      "sha256": "e95085661f1cbddc165e3acf47fb05a69e47bbe6c4be4dbffe480b385f15902e",
+      "audit": "partial",
+      "checks": {
+        "complete": 63,
+        "unknown": 25
+      },
+      "coverage_complete": true,
+      "stop_reason": "frontier_exhausted",
+      "expected_findings": [
+        "little_content",
+        "missing_description",
+        "missing_language",
+        "short_title"
+      ],
+      "missing_h1_finding": false,
+      "missing_h1_check": "complete"
+    }
+  ]
+}

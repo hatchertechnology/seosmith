@@ -24,6 +24,8 @@ pub mod policy_candidate;
 pub mod structured_validation;
 
 #[cfg(feature = "policy-wire-prototype")]
+pub mod finding_coverage_prototype;
+#[cfg(feature = "policy-wire-prototype")]
 pub mod policy_wire_prototype;
 
 /// Experimental offline link graph analysis.

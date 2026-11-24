@@ -1,4 +1,6 @@
 mod resource_impact_cli;
+#[cfg(feature = "policy-wire-prototype")]
+mod saved_export;
 mod saved_graph;
 mod saved_index_integrity;
 mod saved_pair;
@@ -88,6 +90,11 @@ enum Command {
     /// Validate a saved report locally without submitting or delivering a job.
     ValidateStructured {
         report: std::path::PathBuf,
+    },
+    /// Export one saved report as a bounded local schema-4 finding-coverage view without writes.
+    #[cfg(feature = "policy-wire-prototype")]
+    SavedExport {
+        request_id: uuid::Uuid,
     },
 }
 fn secret(name: &str) -> Result<String> {
@@ -186,6 +193,20 @@ async fn main() -> Result<()> {
                 &serde_json::json!({"profile_version": seosmith::structured_validation::PROFILE_VERSION, "structured_validation": observations})
             )?
         );
+        return Ok(());
+    }
+    #[cfg(feature = "policy-wire-prototype")]
+    if let Command::SavedExport { request_id } = cli.command {
+        ensure!(
+            !cli.evidence_contract_v2,
+            "saved export does not accept evidence contract v2"
+        );
+        saved_export::run(
+            std::path::Path::new(&cli.database),
+            &request_id.to_string(),
+            policy.as_ref(),
+        )
+        .await?;
         return Ok(());
     }
     if let Command::SavedGraph { request_id } = cli.command {
@@ -307,6 +328,8 @@ async fn main() -> Result<()> {
         | Command::ResourceImpact { .. }
         | Command::SavedPair { .. }
         | Command::SavedIndexIntegrity { .. } => {}
+        #[cfg(feature = "policy-wire-prototype")]
+        Command::SavedExport { .. } => {}
         Command::Crawl { request } => {
             let r: CrawlRequest = serde_json::from_slice(&tokio::fs::read(request).await?)?;
 
