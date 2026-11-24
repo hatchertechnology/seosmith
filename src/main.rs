@@ -10,7 +10,11 @@ use seosmith::{
     model::CrawlRequest,
     store::Store,
 };
-use std::{fs::OpenOptions, io::Read, time::Duration};
+use std::{
+    fs::OpenOptions,
+    io::{Read, Write},
+    time::Duration,
+};
 use tokio::sync::watch;
 #[derive(Parser)]
 #[command(version, about)]
@@ -169,8 +173,15 @@ async fn main() -> Result<()> {
             }
         }
         let report: seosmith::model::Report = serde_json::from_value(source)?;
-        let output = seosmith::structured_validation::report_wrapper(&report.pages);
-        println!("{}", serde_json::to_string_pretty(&output)?);
+        let limit = std::env::var("SEOSMITH_STRUCTURED_OUTPUT_LIMIT_BYTES")
+            .ok()
+            .map(|value| value.parse::<usize>())
+            .transpose()
+            .context("invalid SEOSMITH_STRUCTURED_OUTPUT_LIMIT_BYTES")?
+            .unwrap_or(seosmith::structured_validation::MAX_REPORT_OUTPUT_BYTES);
+        let output =
+            seosmith::structured_validation::report_wrapper_with_limit(&report.pages, limit)?;
+        std::io::stdout().write_all(&output.serialized)?;
         return Ok(());
     }
     if let Command::SavedGraph { request_id } = cli.command {
