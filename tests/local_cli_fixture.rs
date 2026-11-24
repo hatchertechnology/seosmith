@@ -1013,3 +1013,115 @@ async fn saved_graph_reads_real_crawl_without_mutating_store() -> anyhow::Result
     assert_eq!(legacy_before, std::fs::read(&legacy)?);
     Ok(())
 }
+
+#[tokio::test]
+async fn saved_graph_cli_reports_retained_canonical_and_followability_evidence()
+-> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db = dir.path().join("graph-evidence.sqlite");
+    let report: Report = serde_json::from_str(include_str!("../fixtures/contracts/legacy.json"))?;
+    let mut request = report.request;
+    request.request_id = Uuid::new_v4();
+    request.url = "https://fixture.invalid/".parse()?;
+    request.max_pages = 10;
+    request.max_resources = 0;
+    request.max_duration_seconds = 30;
+    request.delay_ms = 1000;
+    request.check_external_links = false;
+    let request_path = dir.path().join("request.json");
+    let policy_path = dir.path().join("policy.json");
+    let fixture_path = dir.path().join("responses.json");
+    std::fs::write(&request_path, serde_json::to_vec(&request)?)?;
+    std::fs::write(&policy_path, "{}")?;
+    std::fs::write(
+        &fixture_path,
+        serde_json::to_vec(&serde_json::json!({
+            "https://fixture.invalid/robots.txt": {"status":200,"body":"User-agent: *\n"},
+            "https://fixture.invalid/sitemap.xml": {"status":200,"body":"<urlset><url><loc>https://fixture.invalid/sitemap-only</loc></url><url><loc>https://fixture.invalid/nofollow-target</loc></url></urlset>"},
+            "https://fixture.invalid/": {"status":200,"headers":{"content-type":"text/html"},"body":"<head><link rel='canonical' href='/'></head><body><a href='/variant'>variant</a><a href='/nofollow'>nofollow</a></body>"},
+            "https://fixture.invalid/variant": {"status":200,"headers":{"content-type":"text/html"},"body":"<head><link rel='canonical' href='/canonical-target'></head><body><a href='/canonical-target'>canonical</a></body>"},
+            "https://fixture.invalid/canonical-target": {"status":200,"headers":{"content-type":"text/html"},"body":"<body>canonical</body>"},
+            "https://fixture.invalid/nofollow": {"status":200,"headers":{"content-type":"text/html"},"body":"<head><meta name='robots' content='nofollow'></head><body><a href='/nofollow-target'>target</a></body>"},
+            "https://fixture.invalid/nofollow-target": {"status":200,"headers":{"content-type":"text/html"},"body":"<body>target</body>"},
+            "https://fixture.invalid/sitemap-only": {"status":200,"headers":{"content-type":"text/html"},"body":"<body>sitemap only</body>"}
+        }))?,
+    )?;
+    let crawl = Command::new(env!("CARGO_BIN_EXE_seosmith"))
+        .env_clear()
+        .env("SEOSMITH_LOCAL_FIXTURES", &fixture_path)
+        .args([
+            "--database",
+            db.to_str().unwrap(),
+            "--advisory-policy",
+            policy_path.to_str().unwrap(),
+            "crawl",
+            "--request",
+            request_path.to_str().unwrap(),
+        ])
+        .output()?;
+    assert!(
+        crawl.status.success(),
+        "{}",
+        String::from_utf8_lossy(&crawl.stderr)
+    );
+    // Explicitly quiesce/checkpoint the completed fixture before immutable analysis.
+    let quiesce = SqlitePool::connect_with(
+        SqliteConnectOptions::new()
+            .filename(&db)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Delete),
+    )
+    .await?;
+    quiesce.close().await;
+    let output = Command::new(env!("CARGO_BIN_EXE_seosmith"))
+        .env_clear()
+        .args([
+            "--database",
+            db.to_str().unwrap(),
+            "saved-graph",
+            &request.request_id.to_string(),
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(result["semantics"], "seosmith-saved-graph-2");
+    let nodes = result["nodes"].as_array().unwrap();
+    let node = |path: &str| {
+        let url = format!("https://fixture.invalid/{path}");
+        nodes
+            .iter()
+            .find(|n| n["url"] == url.as_str())
+            .unwrap_or_else(|| panic!("missing node {url}"))
+    };
+    // Positive: a retained same-origin canonical declaration is link provenance,
+    // not canonical truth and not navigation.
+    let variants = result["canonical_variants"].as_array().unwrap();
+    assert_eq!(variants.len(), 1);
+    assert_eq!(variants[0]["source"], "https://fixture.invalid/");
+    assert_eq!(variants[0]["link_ordinal"], 0);
+    assert_eq!(variants[0]["target"], "https://fixture.invalid/variant");
+    assert_eq!(
+        variants[0]["declared_canonical"],
+        "https://fixture.invalid/canonical-target"
+    );
+    assert_eq!(variants[0]["declaration_source"], "html_head_link");
+    assert_eq!(variants[0]["declaration_version"], 1);
+    assert_eq!(node("variant")["canonical_target"], "not_declared");
+    assert_eq!(node("canonical-target")["canonical_target"], "declared");
+    assert_eq!(node("")["canonical_target"], "not_declared");
+    // Sitemap membership is retained separately from navigation distance.
+    assert_eq!(node("sitemap-only")["sitemap_listed"], "listed");
+    assert!(node("sitemap-only")["navigation_distance"].is_null());
+    assert_eq!(node("nofollow-target")["sitemap_listed"], "listed");
+    // Positive: observed followable navigation.
+    assert_eq!(node("variant")["navigation_distance"], 1);
+    assert_eq!(node("variant")["page_follow"], "followable");
+    // Negative: a retained page-level nofollow directive blocks navigation even
+    // though the target was independently retained from the sitemap.
+    assert_eq!(node("nofollow")["page_follow"], "restricted");
+    assert!(node("nofollow-target")["navigation_distance"].is_null());
+    Ok(())
+}

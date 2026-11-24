@@ -1,12 +1,20 @@
 use anyhow::{Context, Result, ensure};
 use futures_util::TryStreamExt;
-use seosmith::graph_evidence::{self, GraphCoverageInput, LocalPageEvidence};
+use seosmith::{
+    collection_evidence,
+    graph_evidence::{self, GraphCoverageInput, LocalPageEvidence},
+    integrity_evidence,
+};
 use serde_json::{Value, json};
 use sqlx::{
     Row,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
 };
-use std::{collections::BTreeSet, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
+use url::Url;
 
 const MAX_ROWS: usize = 1000;
 const MAX_EVIDENCE: i64 = 64 * 1024;
@@ -14,6 +22,115 @@ const MAX_OUTPUT: usize = 4 * 1024 * 1024;
 const MAX_INPUT: usize = 2 * 1024 * 1024;
 const MAX_LINKS: usize = 10_000;
 const MAX_ESTIMATED_OUTPUT: usize = 3 * 1024 * 1024;
+
+fn collector_collection(
+    collectors: &[Value],
+    name: &str,
+) -> Option<collection_evidence::Collection> {
+    let collector = collectors.iter().find(|c| c["collector"] == name)?;
+    if collector["version"].as_u64() != Some(1)
+        || !matches!(collector["state"].as_str(), Some("observed" | "partial"))
+    {
+        return None;
+    }
+    serde_json::from_value(collector["data"].clone()).ok()
+}
+
+/// Page-level followability from the crawler's own retained directive evaluation.
+/// Unknown or absent evidence stays `None` rather than assuming permission.
+fn page_follow(collectors: &[Value]) -> Option<bool> {
+    let collector = collectors
+        .iter()
+        .find(|c| c["collector"] == "effective_indexing")?;
+    if collector["version"].as_u64() != Some(1)
+        || !matches!(collector["state"].as_str(), Some("observed" | "partial"))
+    {
+        return None;
+    }
+    let decisions = collector["data"]["decisions"].as_array()?;
+    let decision = decisions.iter().find(|d| {
+        d["bot"]
+            .as_str()
+            .is_some_and(|bot| bot.eq_ignore_ascii_case("Seosmith"))
+    })?;
+    match decision["directives"]["follow"].as_str()? {
+        "Allowed" => Some(true),
+        "Restricted" => Some(false),
+        _ => None,
+    }
+}
+
+/// A conclusive retained canonical declaration. `false` means the retained
+/// evidence cannot determine a single declaration, so absence of a variant on
+/// that page must not be promoted to a negative result.
+fn canonical_declaration(
+    collectors: &[Value],
+    url: &str,
+    scope: Option<&Url>,
+) -> (bool, Option<graph_evidence::CanonicalDeclaration>) {
+    let (Some(html), Some(http), Some(scope)) = (
+        collector_collection(collectors, "html_occurrences"),
+        collector_collection(collectors, "http_occurrences"),
+        scope,
+    ) else {
+        return (false, None);
+    };
+    let Some(state) = collectors
+        .iter()
+        .find(|c| c["collector"] == "effective_indexing")
+        .and_then(|c| c["data"]["state"].as_str())
+    else {
+        return (false, None);
+    };
+    let Ok(base) = Url::parse(url) else {
+        return (false, None);
+    };
+    let capture = collection_evidence::PageCapture {
+        version: "s02-s03-local-1".into(),
+        url: url.into(),
+        state: state.into(),
+        robots: vec![],
+        robots_source: String::new(),
+        http: Some(http),
+        html: Some(html),
+    };
+    let assessment = integrity_evidence::canonical_assessment(&capture, &base, scope);
+    match assessment.agreement {
+        integrity_evidence::CanonicalAgreement::Consistent => {
+            match assessment
+                .declarations
+                .iter()
+                .find(|d| {
+                    d.state == integrity_evidence::DeclarationState::Valid && d.target.is_some()
+                })
+                .and_then(|d| d.target.clone().map(|target| (d.source.clone(), target)))
+            {
+                Some((source, target)) if target != url => (
+                    true,
+                    Some(graph_evidence::CanonicalDeclaration {
+                        page: url.into(),
+                        declared_canonical: target,
+                        declaration_source: source,
+                        declaration_version: 1,
+                    }),
+                ),
+                Some(_) => (true, None),
+                None => (false, None),
+            }
+        }
+        integrity_evidence::CanonicalAgreement::Absent => (true, None),
+        integrity_evidence::CanonicalAgreement::Conflicting
+        | integrity_evidence::CanonicalAgreement::Unknown => (false, None),
+    }
+}
+
+/// Retained page evidence kept parallel to the retained graph pages.
+struct RetainedMeta {
+    page_follow: Option<bool>,
+    sitemap_listed: Option<bool>,
+    canonical_conclusive: bool,
+    declaration: Option<graph_evidence::CanonicalDeclaration>,
+}
 
 pub async fn run(path: &Path, id: &str) -> Result<()> {
     ensure!(path.is_file(), "database does not exist");
@@ -76,11 +193,13 @@ pub async fn run(path: &Path, id: &str) -> Result<()> {
         .get("url")
         .and_then(Value::as_str)
         .context("saved seed absent")?;
-    let mut rows = sqlx::query("SELECT CASE WHEN length(CAST(f.url AS BLOB)) <= 8192 THEN f.url END AS url, f.page IS NOT NULL AS has_page, CASE WHEN length(CAST(f.url AS BLOB)) <= 8192 AND length(CAST(e.evidence AS BLOB)) <= ? THEN e.evidence END AS evidence, e.evidence IS NOT NULL AS has_evidence FROM frontier f LEFT JOIN local_page_evidence e ON e.job_id=f.job_id AND e.url=f.url WHERE f.job_id=? ORDER BY f.url LIMIT ?")
+    let scope = Url::parse(seed).ok();
+    let mut rows = sqlx::query("SELECT CASE WHEN length(CAST(f.url AS BLOB)) <= 8192 THEN f.url END AS url, f.page IS NOT NULL AS has_page, f.in_sitemap AS in_sitemap, CASE WHEN length(CAST(f.url AS BLOB)) <= 8192 AND length(CAST(e.evidence AS BLOB)) <= ? THEN e.evidence END AS evidence, e.evidence IS NOT NULL AS has_evidence FROM frontier f LEFT JOIN local_page_evidence e ON e.job_id=f.job_id AND e.url=f.url WHERE f.job_id=? ORDER BY f.url LIMIT ?")
         .bind(MAX_EVIDENCE).bind(id).bind(i64::try_from(MAX_ROWS + 1)?).fetch(&pool);
     let mut row_count = 0usize;
     let mut row_limit = false;
     let mut pages = Vec::new();
+    let mut metas: Vec<RetainedMeta> = Vec::new();
     let mut omitted = Vec::new();
     let mut unique_urls = BTreeSet::new();
     let mut input_bytes = 0usize;
@@ -103,6 +222,7 @@ pub async fn run(path: &Path, id: &str) -> Result<()> {
         };
         let page: bool = row.try_get("has_page")?;
         let present: bool = row.try_get("has_evidence")?;
+        let in_sitemap: bool = row.try_get("in_sitemap")?;
         let evidence: Option<String> = row.try_get("evidence")?;
         let reason = if !page {
             Some("page_checkpoint_absent")
@@ -199,8 +319,53 @@ pub async fn run(path: &Path, id: &str) -> Result<()> {
         if g["state"] == "partial" {
             item.extraction_complete = false;
         }
+        let collectors = collectors.map_or(&[][..], Vec::as_slice);
+        let (canonical_conclusive, declaration) =
+            canonical_declaration(collectors, &url, scope.as_ref());
+        metas.push(RetainedMeta {
+            page_follow: page_follow(collectors),
+            sitemap_listed: in_sitemap.then_some(true),
+            canonical_conclusive,
+            declaration,
+        });
         pages.push(item);
     }
+    // A sitemap/declaration relationship is retained evidence, not proof of first
+    // discovery or of navigation. Canonical targets stay unknown unless every
+    // retained page's declaration evidence is conclusive.
+    let any_unknown_canonical = metas.iter().any(|meta| !meta.canonical_conclusive);
+    let declared_targets: BTreeSet<&str> = metas
+        .iter()
+        .filter_map(|meta| {
+            meta.declaration
+                .as_ref()
+                .map(|declaration| declaration.declared_canonical.as_str())
+        })
+        .collect();
+    let mut evidence = BTreeMap::new();
+    for (page, meta) in pages.iter().zip(&metas) {
+        let canonical_target = if declared_targets.contains(page.url.as_str()) {
+            Some(true)
+        } else if any_unknown_canonical {
+            None
+        } else {
+            Some(false)
+        };
+        evidence.insert(
+            page.url.clone(),
+            graph_evidence::PageEvidence {
+                page_follow: meta.page_follow,
+                sitemap_listed: meta.sitemap_listed,
+                canonical_target,
+            },
+        );
+    }
+    let declarations: Vec<_> = metas
+        .iter()
+        .filter_map(|meta| meta.declaration.clone())
+        .collect();
+    let canonical_variants = graph_evidence::saved_canonical_variant_links(&pages, &declarations)
+        .map_err(|_| anyhow::anyhow!("duplicate page URLs"))?;
     let coverage = GraphCoverageInput {
         discovery_complete: None,
         expected_pages: if row_limit { None } else { Some(row_count) },
@@ -210,12 +375,17 @@ pub async fn run(path: &Path, id: &str) -> Result<()> {
         omitted_records: if row_limit { None } else { Some(omitted.len()) },
         comparisons_complete: Some(true),
     };
-    let nodes = graph_evidence::graph(seed, &pages, &coverage)
+    let nodes = graph_evidence::graph_with_evidence(seed, &pages, &coverage, &evidence)
         .map_err(|_| anyhow::anyhow!("duplicate page URLs"))?;
     let fragments = graph_evidence::fragment_checks(&pages)
         .map_err(|_| anyhow::anyhow!("duplicate page URLs"))?;
+    ensure!(
+        estimated_output.saturating_add(serde_json::to_vec(&canonical_variants)?.len())
+            <= MAX_ESTIMATED_OUTPUT,
+        "analysis output exceeds 3 MiB graph-result estimate; no partial output produced"
+    );
     let output = serde_json::to_vec(
-        &json!({"seed":seed,"terminal_state":"local_only", "input_state":if row_count == 0 {"absent"} else {"present"}, "completion":completion, "coverage":graph_evidence::graph_coverage(&coverage), "row_limit_reached":row_limit, "omitted":omitted, "nodes":nodes, "fragments":fragments}),
+        &json!({"semantics":"seosmith-saved-graph-2","seed":seed,"terminal_state":"local_only", "input_state":if row_count == 0 {"absent"} else {"present"}, "completion":completion, "coverage":graph_evidence::graph_coverage(&coverage), "row_limit_reached":row_limit, "omitted":omitted, "nodes":nodes, "fragments":fragments, "canonical_variants":canonical_variants}),
     )?;
     ensure!(
         output.len() <= MAX_OUTPUT,
