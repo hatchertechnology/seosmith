@@ -1,3 +1,4 @@
+mod resource_impact_cli;
 mod saved_graph;
 mod saved_pair;
 use anyhow::{Context, Result, ensure};
@@ -42,6 +43,10 @@ enum Command {
     },
     /// Analyze retained checkpoints of a terminal local-only job, without writes.
     SavedGraph {
+        request_id: uuid::Uuid,
+    },
+    /// Analyze saved local resource delivery and affected pages without writes.
+    ResourceImpact {
         request_id: uuid::Uuid,
     },
     /// Compare two saved page assessments or two caller-supplied retained HTML files.
@@ -186,6 +191,15 @@ async fn main() -> Result<()> {
         saved_graph::run(std::path::Path::new(&cli.database), &request_id.to_string()).await?;
         return Ok(());
     }
+    if let Command::ResourceImpact { request_id } = cli.command {
+        ensure!(
+            policy.is_none() && !cli.evidence_contract_v2,
+            "resource impact does not accept report options"
+        );
+        resource_impact_cli::run(std::path::Path::new(&cli.database), &request_id.to_string())
+            .await?;
+        return Ok(());
+    }
     if let Command::SavedPair {
         request_id,
         source,
@@ -276,6 +290,7 @@ async fn main() -> Result<()> {
         Command::Rules
         | Command::ValidateStructured { .. }
         | Command::SavedGraph { .. }
+        | Command::ResourceImpact { .. }
         | Command::SavedPair { .. } => {}
         Command::Crawl { request } => {
             let r: CrawlRequest = serde_json::from_slice(&tokio::fs::read(request).await?)?;
