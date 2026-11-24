@@ -62,7 +62,9 @@ fn page_follow(collectors: &[Value]) -> Option<bool> {
 
 /// A conclusive retained canonical declaration. `false` means the retained
 /// evidence cannot determine a single declaration, so absence of a variant on
-/// that page must not be promoted to a negative result.
+/// that page must not be promoted to a negative result. A page that names
+/// itself is still a declaration: it counts with the retained source and
+/// version, while `saved_canonical_variant_links` excludes the self-reference.
 fn canonical_declaration(
     collectors: &[Value],
     url: &str,
@@ -105,7 +107,7 @@ fn canonical_declaration(
                 })
                 .and_then(|d| d.target.clone().map(|target| (d.source.clone(), target)))
             {
-                Some((source, target)) if target != url => (
+                Some((source, target)) => (
                     true,
                     Some(graph_evidence::CanonicalDeclaration {
                         page: url.into(),
@@ -114,7 +116,6 @@ fn canonical_declaration(
                         declaration_version: 1,
                     }),
                 ),
-                Some(_) => (true, None),
                 None => (false, None),
             }
         }
@@ -331,9 +332,12 @@ pub async fn run(path: &Path, id: &str) -> Result<()> {
         pages.push(item);
     }
     // A sitemap/declaration relationship is retained evidence, not proof of first
-    // discovery or of navigation. Canonical targets stay unknown unless every
-    // retained page's declaration evidence is conclusive.
+    // discovery or of navigation. A negative canonical result also requires that
+    // declaration coverage is observed and complete: an omitted page or a
+    // truncated row set could have declared a canonical that is invisible here,
+    // so those scopes stay unknown rather than being promoted to `not_declared`.
     let any_unknown_canonical = metas.iter().any(|meta| !meta.canonical_conclusive);
+    let declaration_coverage_complete = omitted.is_empty() && !row_limit;
     let declared_targets: BTreeSet<&str> = metas
         .iter()
         .filter_map(|meta| {
@@ -346,7 +350,7 @@ pub async fn run(path: &Path, id: &str) -> Result<()> {
     for (page, meta) in pages.iter().zip(&metas) {
         let canonical_target = if declared_targets.contains(page.url.as_str()) {
             Some(true)
-        } else if any_unknown_canonical {
+        } else if any_unknown_canonical || !declaration_coverage_complete {
             None
         } else {
             Some(false)

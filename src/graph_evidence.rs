@@ -416,7 +416,9 @@ pub fn canonical_variant_links(
         .collect())
 }
 /// Reports observed links whose retained target declares a different canonical.
-/// Duplicate local pages or duplicate declaration pages require caller reconciliation.
+/// A page that names its own URL is a retained declaration, but a self-reference
+/// is not a variant link and contributes no entry here. Duplicate local pages or
+/// duplicate non-self declaration pages require caller reconciliation.
 pub fn saved_canonical_variant_links(
     local: &[LocalPageEvidence],
     declarations: &[CanonicalDeclaration],
@@ -424,6 +426,9 @@ pub fn saved_canonical_variant_links(
     unique_pages(local)?;
     let mut by_page = BTreeMap::new();
     for declaration in declarations {
+        if declaration.declared_canonical == declaration.page {
+            continue;
+        }
         if by_page
             .insert(declaration.page.as_str(), declaration)
             .is_some()

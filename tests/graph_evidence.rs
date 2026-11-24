@@ -504,3 +504,42 @@ fn saved_canonical_variants_reject_duplicate_declarations() {
         DuplicatePageUrl("https://example.test/variant".to_owned())
     );
 }
+
+#[test]
+fn self_canonical_declaration_is_not_a_variant_link() {
+    use seosmith::graph_evidence::{CanonicalDeclaration, saved_canonical_variant_links};
+    // A page that names itself is a retained declaration; the self reference is
+    // not a variant link even though it is conclusive declaration evidence.
+    let self_page = page("/self", "<a href='/self'>self</a>");
+    let self_declaration = CanonicalDeclaration {
+        page: "https://example.test/self".to_owned(),
+        declared_canonical: "https://example.test/self".to_owned(),
+        declaration_source: "html_head_link".to_owned(),
+        declaration_version: 1,
+    };
+    let links = saved_canonical_variant_links(
+        std::slice::from_ref(&self_page),
+        std::slice::from_ref(&self_declaration),
+    )
+    .unwrap();
+    assert!(links.is_empty());
+    // A non-self declaration still produces its variant link.
+    let variant_page = page("/variant", "<a href='/variant'>variant</a>");
+    let variant_declaration = CanonicalDeclaration {
+        page: "https://example.test/variant".to_owned(),
+        declared_canonical: "https://example.test/canonical".to_owned(),
+        declaration_source: "html_head_link".to_owned(),
+        declaration_version: 1,
+    };
+    let links = saved_canonical_variant_links(
+        std::slice::from_ref(&variant_page),
+        &[self_declaration, variant_declaration],
+    )
+    .unwrap();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].target, "https://example.test/variant");
+    assert_eq!(
+        links[0].declared_canonical,
+        "https://example.test/canonical"
+    );
+}
