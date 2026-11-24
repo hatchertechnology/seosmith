@@ -34,7 +34,11 @@ async fn local_cli_reopens_resource_references_without_delivery() -> anyhow::Res
         ),
         (
             "https://fixture.invalid/",
-            serde_json::json!({"status":200,"headers":{"content-type":"text/html","content-length":"999"},"body":"<link rel='stylesheet' href='/style.css' media='screen' type='text/css'><picture><source srcset='small.webp 1x, big.webp 2x' media='(min-width: 10px)' type='image/webp'><img src='fallback.png' srcset='a.png 1x, b.png 2x' sizes='100vw'></picture><a href='/blocked'>blocked</a><a href='/plain'>plain</a><a href='/large'>large</a><a href='/decode'>decode</a>"}),
+            serde_json::json!({"status":200,"headers":{"content-type":"text/html","content-length":"999"},"body":"<link rel='stylesheet' href='/style.css' media='screen' type='text/css'><picture><source srcset='small.webp 1x, big.webp 2x' media='(min-width: 10px)' type='image/webp'><img src='fallback.png' srcset='a.png 1x, b.png 2x' sizes='100vw'></picture><a href='/blocked'>blocked</a><a href='/plain'>plain</a><a href='/missing'>missing</a><a href='/large'>large</a><a href='/decode'>decode</a>"}),
+        ),
+        (
+            "https://fixture.invalid/missing",
+            serde_json::json!({"status":404,"headers":{"content-type":"text/html"},"body":"<img src='/missing.png'>"}),
         ),
         (
             "https://fixture.invalid/plain",
@@ -74,7 +78,7 @@ async fn local_cli_reopens_resource_references_without_delivery() -> anyhow::Res
             .bind(&id)
             .fetch_all(&store.0)
             .await?;
-    assert_eq!(rows.len(), 5);
+    assert_eq!(rows.len(), 6);
     for (url, raw) in rows {
         let value: serde_json::Value = serde_json::from_str(&raw)?;
         let collectors = value["capture"]["collectors"].as_array().unwrap();
@@ -83,6 +87,9 @@ async fn local_cli_reopens_resource_references_without_delivery() -> anyhow::Res
         assert_eq!(refs["collector"], "resource_references");
         if url.ends_with("/blocked") {
             assert_eq!(refs["reason"], "blocked_by_robots");
+        } else if url.ends_with("/missing") {
+            assert_eq!(refs["state"], "unavailable");
+            assert_eq!(refs["reason"], "unsuccessful_http_status");
         } else if url.ends_with("/plain") {
             assert_eq!(refs["reason"], "not_html");
         } else if url.ends_with("/large") {

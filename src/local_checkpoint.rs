@@ -164,6 +164,9 @@ fn resource_references(url: &Url, page: &Page, response: Option<&Response>) -> O
             },
         );
     };
+    if !(200..300).contains(&response.status) {
+        return unavailable("resource_references", "unsuccessful_http_status");
+    }
     if !page.html() {
         return unavailable("resource_references", "not_html");
     }
