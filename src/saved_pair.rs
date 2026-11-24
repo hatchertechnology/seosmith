@@ -183,7 +183,7 @@ async fn compare_saved(
 }
 
 async fn load_side(pool: &sqlx::SqlitePool, id: &str, url: &str) -> SavedSide {
-    let query = "SELECT f.page IS NOT NULL AS has_page, CASE WHEN length(CAST(e.evidence AS BLOB)) <= ? THEN e.evidence END AS evidence, e.evidence IS NOT NULL AS has_evidence FROM frontier f LEFT JOIN local_page_evidence e ON e.job_id=f.job_id AND e.url=f.url WHERE f.job_id=? AND f.url=?";
+    let query = "SELECT f.page IS NOT NULL AS has_page, f.page AS page, CASE WHEN length(CAST(e.evidence AS BLOB)) <= ? THEN e.evidence END AS evidence, e.evidence IS NOT NULL AS has_evidence FROM frontier f LEFT JOIN local_page_evidence e ON e.job_id=f.job_id AND e.url=f.url WHERE f.job_id=? AND f.url=?";
     let Ok(row) = sqlx::query(query)
         .bind(MAX_EVIDENCE_BYTES)
         .bind(id)
@@ -208,7 +208,15 @@ async fn load_side(pool: &sqlx::SqlitePool, id: &str, url: &str) -> SavedSide {
     let Some(raw) = evidence else {
         return SavedSide::unavailable(url, "evidence_byte_limit");
     };
-    SavedSide::parse(url, &raw)
+    // The frontier page JSON retains the crawled status; byte equality is only
+    // meaningful for complete 200 responses, matching the detector's gate.
+    let page: Option<String> = row.try_get("page").unwrap_or(None);
+    let http_status = page
+        .as_deref()
+        .and_then(|page| serde_json::from_str::<Value>(page).ok())
+        .and_then(|page| page.get("status").and_then(Value::as_u64))
+        .and_then(|status| u16::try_from(status).ok());
+    SavedSide::parse(url, http_status, &raw)
 }
 
 #[derive(Debug)]
@@ -237,6 +245,7 @@ impl From<&Evidence> for EvidenceSummary {
 #[derive(Debug)]
 struct SavedSide {
     url: String,
+    http_status: Option<u16>,
     checkpoint_state: String,
     checkpoint_reason: Option<String>,
     assessment: Option<Value>,
@@ -248,6 +257,7 @@ impl SavedSide {
     fn unavailable(url: &str, reason: &str) -> Self {
         Self {
             url: url.to_owned(),
+            http_status: None,
             checkpoint_state: "unavailable".into(),
             checkpoint_reason: Some(reason.to_owned()),
             assessment: None,
@@ -256,7 +266,7 @@ impl SavedSide {
         }
     }
 
-    fn parse(url: &str, raw: &str) -> Self {
+    fn parse(url: &str, http_status: Option<u16>, raw: &str) -> Self {
         let value: Value = match serde_json::from_str(raw) {
             Ok(value) => value,
             Err(_) => return Self::unavailable(url, "invalid_evidence"),
@@ -353,6 +363,12 @@ impl SavedSide {
             Some("incompatible_saved_semantics".to_owned())
         } else if evidence.is_none() {
             Some("invalid_or_absent_assessment_evidence".to_owned())
+        } else if http_status != Some(200) {
+            // The detector only permits exact-byte candidates after both sides
+            // pass the complete HTTP 200 and available-main gates. A saved page
+            // whose frontier status is not 200 (for example a 404/410 error
+            // page) must never become a byte-equality candidate.
+            Some("saved_side_not_http_200".to_owned())
         } else if decision == "unknown" {
             Some(reason.clone())
         } else {
@@ -360,6 +376,7 @@ impl SavedSide {
         };
         Self {
             url: url.to_owned(),
+            http_status,
             checkpoint_state: state.into(),
             checkpoint_reason: if state == "observed" {
                 None
@@ -377,6 +394,7 @@ impl SavedSide {
             "input": "saved_checkpoint",
             "url": self.url,
             "url_sha256": seosmith::model::digest(self.url.as_bytes()),
+            "http_status": self.http_status,
             "checkpoint": {
                 "state": self.checkpoint_state,
                 "reason": self.checkpoint_reason
@@ -443,12 +461,16 @@ fn evidence_json(evidence: &EvidenceSummary) -> Value {
 
 fn compare_saved_sides(source: &SavedSide, peer: &SavedSide) -> Value {
     if let Some(reason) = &source.unusable {
+        let mut omissions = vec![(Some("source"), reason.clone())];
+        if let Some(peer_reason) = &peer.unusable {
+            omissions.push((Some("peer"), peer_reason.clone()));
+        }
         return comparison(
             "unknown",
             reason,
             "source_assessment_unavailable",
             Some("source"),
-            vec![(Some("source"), reason.clone())],
+            omissions,
         );
     }
     if let Some(reason) = &peer.unusable {
@@ -717,6 +739,7 @@ mod tests {
         let b = evidence("same", "alpha beta gamma");
         let source = SavedSide::parse(
             "https://fixture.invalid/a",
+            Some(200),
             &envelope(
                 "https://fixture.invalid/a",
                 "no_candidate",
@@ -726,6 +749,7 @@ mod tests {
         );
         let peer = SavedSide::parse(
             "https://fixture.invalid/b",
+            Some(200),
             &envelope(
                 "https://fixture.invalid/b",
                 "no_candidate",
@@ -741,11 +765,94 @@ mod tests {
     }
 
     #[test]
+    fn identical_bytes_for_non_200_saved_sides_are_not_a_candidate() {
+        let a = evidence("same", "alpha beta gamma");
+        let b = evidence("same", "alpha beta gamma");
+        let reason = "explicit missing status";
+        let source = SavedSide::parse(
+            "https://fixture.invalid/a",
+            Some(404),
+            &envelope(
+                "https://fixture.invalid/a",
+                "no_candidate",
+                reason,
+                Some(&a),
+            ),
+        );
+        let peer = SavedSide::parse(
+            "https://fixture.invalid/b",
+            Some(404),
+            &envelope(
+                "https://fixture.invalid/b",
+                "no_candidate",
+                reason,
+                Some(&b),
+            ),
+        );
+        let comparison = compare_saved_sides(&source, &peer);
+        assert_eq!(comparison["decision"], "unknown");
+        assert_eq!(comparison["unavailable_side"], "source");
+        assert_eq!(comparison["reason"], "saved_side_not_http_200");
+        assert!(comparison.get("observations").is_none());
+        assert_eq!(comparison["omissions"][0]["side"], "source");
+        assert_eq!(comparison["omissions"][1]["side"], "peer");
+        assert_eq!(source.to_json()["http_status"], 404);
+        assert_ne!(comparison["decision"], "candidate");
+    }
+
+    #[test]
+    fn a_200_side_is_not_byte_equal_to_a_non_200_saved_side() {
+        let a = evidence("same", "alpha beta gamma");
+        let b = evidence("same", "alpha beta gamma");
+        let ok = SavedSide::parse(
+            "https://fixture.invalid/ok",
+            Some(200),
+            &envelope(
+                "https://fixture.invalid/ok",
+                "no_candidate",
+                "no matching error pattern",
+                Some(&a),
+            ),
+        );
+        let missing = SavedSide::parse(
+            "https://fixture.invalid/missing",
+            Some(404),
+            &envelope(
+                "https://fixture.invalid/missing",
+                "no_candidate",
+                "explicit missing status",
+                Some(&b),
+            ),
+        );
+        let comparison = compare_saved_sides(&ok, &missing);
+        assert_eq!(comparison["decision"], "unknown");
+        assert_eq!(comparison["unavailable_side"], "peer");
+        assert_eq!(comparison["reason"], "saved_side_not_http_200");
+    }
+
+    #[test]
+    fn a_missing_frontier_status_is_not_a_usable_side() {
+        let a = evidence("same", "alpha beta gamma");
+        let side = SavedSide::parse(
+            "https://fixture.invalid/a",
+            None,
+            &envelope(
+                "https://fixture.invalid/a",
+                "no_candidate",
+                "no matching error pattern",
+                Some(&a),
+            ),
+        );
+        assert_eq!(side.unusable.as_deref(), Some("saved_side_not_http_200"));
+    }
+
+    #[test]
     fn near_duplicate_saved_evidence_stays_unknown() {
         let a = evidence("left", "alpha beta gamma");
         let b = evidence("right", "alpha beta gamma delta");
         let source = SavedSide::parse(
             "https://fixture.invalid/a",
+            Some(200),
             &envelope(
                 "https://fixture.invalid/a",
                 "no_candidate",
@@ -755,6 +862,7 @@ mod tests {
         );
         let peer = SavedSide::parse(
             "https://fixture.invalid/b",
+            Some(200),
             &envelope(
                 "https://fixture.invalid/b",
                 "no_candidate",
@@ -774,6 +882,7 @@ mod tests {
         let b = evidence("right", "welcome");
         let source = SavedSide::parse(
             "https://fixture.invalid/a",
+            Some(200),
             &envelope(
                 "https://fixture.invalid/a",
                 "no_candidate",
@@ -783,6 +892,7 @@ mod tests {
         );
         let peer = SavedSide::parse(
             "https://fixture.invalid/b",
+            Some(200),
             &envelope(
                 "https://fixture.invalid/b",
                 "no_candidate",
@@ -801,6 +911,7 @@ mod tests {
         let a = evidence("left", "");
         let shell = SavedSide::parse(
             "https://fixture.invalid/shell",
+            Some(200),
             &envelope(
                 "https://fixture.invalid/shell",
                 "unknown",
@@ -810,6 +921,7 @@ mod tests {
         );
         let page = SavedSide::parse(
             "https://fixture.invalid/page",
+            Some(200),
             &envelope(
                 "https://fixture.invalid/page",
                 "no_candidate",
@@ -830,7 +942,7 @@ mod tests {
 
     #[test]
     fn missing_incompatible_and_tampered_evidence_stays_unavailable() {
-        let missing = SavedSide::parse("https://fixture.invalid/x", "{}");
+        let missing = SavedSide::parse("https://fixture.invalid/x", Some(200), "{}");
         assert_eq!(
             missing.unusable.as_deref(),
             Some("unsupported_evidence_envelope")
@@ -842,7 +954,7 @@ mod tests {
             "no matching error pattern",
             Some(&a),
         );
-        let wrong_url = SavedSide::parse("https://fixture.invalid/b", &right);
+        let wrong_url = SavedSide::parse("https://fixture.invalid/b", Some(200), &right);
         assert_eq!(
             wrong_url.unusable.as_deref(),
             Some("unsupported_or_unbound_capture")
@@ -851,6 +963,7 @@ mod tests {
         tampered["capture"]["url"] = json!("https://fixture.invalid/other");
         let tampered = SavedSide::parse(
             "https://fixture.invalid/other",
+            Some(200),
             &serde_json::to_string(&tampered).unwrap(),
         );
         assert_eq!(
@@ -864,7 +977,7 @@ mod tests {
             "no matching error pattern",
             Some(&a),
         );
-        let incompatible = SavedSide::parse("https://fixture.invalid/a", &old_semantics);
+        let incompatible = SavedSide::parse("https://fixture.invalid/a", Some(200), &old_semantics);
         assert_eq!(
             incompatible.unusable.as_deref(),
             Some("incompatible_saved_semantics")
@@ -884,7 +997,7 @@ mod tests {
                 "collectors": []
             }
         });
-        let side = SavedSide::parse(url, &serde_json::to_string(&marker).unwrap());
+        let side = SavedSide::parse(url, Some(200), &serde_json::to_string(&marker).unwrap());
         assert_eq!(side.unusable.as_deref(), Some("run_byte_limit"));
         assert_eq!(
             side.to_json()["url_sha256"],
@@ -892,6 +1005,7 @@ mod tests {
         );
         let wrong = SavedSide::parse(
             "https://fixture.invalid/other",
+            Some(200),
             &serde_json::to_string(&marker).unwrap(),
         );
         assert_eq!(

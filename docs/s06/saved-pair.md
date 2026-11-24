@@ -22,8 +22,8 @@ distinct absolute URLs of at most 8 KiB. The command reads the fixed
 `soft_404` collector from `local_page_evidence` and emits:
 
 - explicit source and peer URLs plus URL SHA-256 identities;
-- each side's checkpoint state (`observed`, `partial` or `unavailable`) and
-  reason;
+- each side's crawled HTTP status, checkpoint state (`observed`, `partial` or
+  `unavailable`) and reason;
 - the retained `s06-local-detector-2` per-page assessment: decision, reason,
   semantics, source/main SHA-256, title, H1, bounded excerpt and template
   fraction;
@@ -34,8 +34,11 @@ distinct absolute URLs of at most 8 KiB. The command reads the fixed
 Saved evidence does not include main text, so a pairwise similarity score cannot
 be recomputed without inventing evidence. Consequently:
 
-- identical source bytes across distinct URLs are a `candidate` compatible with
-  the detector's exact-byte observation;
+- identical source bytes across distinct URLs are a `candidate` only when both
+  sides were complete HTTP 200 responses with available main content, matching
+  the detector's readiness gate; a saved side whose frontier status is not 200
+  (for example an identical 404/410 error page) is `unknown` with reason
+  `saved_side_not_http_200`, never a byte-equality candidate;
 - equal main-text hashes are reported as an observation, not a candidate,
   because the saved excerpt cannot prove the detector's token-support and SKU
   gates;

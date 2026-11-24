@@ -173,10 +173,10 @@ fn retained_html_pair_separates_duplicates_variants_and_short_pages() {
     assert!(!std::path::Path::new(database).exists());
 }
 
-fn capture(url: &str, html: &[u8]) -> anyhow::Result<String> {
+fn capture(url: &str, html: &[u8], status: u16) -> anyhow::Result<String> {
     let out = s06_detector::soft_404(&Source {
         bytes: Some(html),
-        status: Some(200),
+        status: Some(status),
         content_type: "text/html",
         complete: true,
     });
@@ -257,20 +257,22 @@ async fn saved_checkpoint_pair_preserves_peer_identity_and_unknowns() -> anyhow:
     store.claim_local(&id).await?.unwrap();
 
     let pages = [
-        ("https://fixture.invalid/east", "service-east.html"),
-        ("https://fixture.invalid/copy", "exact-copy.html"),
-        ("https://fixture.invalid/west", "service-west.html"),
-        ("https://fixture.invalid/hours", "short-hours.html"),
-        ("https://fixture.invalid/contact", "short-contact.html"),
-        ("https://fixture.invalid/red", "product-red.html"),
-        ("https://fixture.invalid/blue", "product-blue.html"),
-        ("https://fixture.invalid/shell", "app-shell.html"),
-        ("https://fixture.invalid/error", "error-200.html"),
+        ("https://fixture.invalid/east", "service-east.html", 200u16),
+        ("https://fixture.invalid/copy", "exact-copy.html", 200),
+        ("https://fixture.invalid/west", "service-west.html", 200),
+        ("https://fixture.invalid/hours", "short-hours.html", 200),
+        ("https://fixture.invalid/contact", "short-contact.html", 200),
+        ("https://fixture.invalid/red", "product-red.html", 200),
+        ("https://fixture.invalid/blue", "product-blue.html", 200),
+        ("https://fixture.invalid/shell", "app-shell.html", 200),
+        ("https://fixture.invalid/error", "error-200.html", 200),
+        ("https://fixture.invalid/notfound-a", "error-404.html", 404),
+        ("https://fixture.invalid/notfound-b", "error-404.html", 404),
     ];
-    for (url, file) in pages {
+    for (url, file, status) in pages {
         let page = Page {
             url: url.into(),
-            status: Some(200),
+            status: Some(status),
             content_type: "text/html".into(),
             ..Page::default()
         };
@@ -283,7 +285,7 @@ async fn saved_checkpoint_pair_preserves_peer_identity_and_unknowns() -> anyhow:
         sqlx::query("INSERT INTO local_page_evidence(job_id,url,evidence) VALUES(?,?,?)")
             .bind(&id)
             .bind(url)
-            .bind(capture(url, &fixture(file))?)
+            .bind(capture(url, &fixture(file), status)?)
             .execute(&store.0)
             .await?;
     }
@@ -432,6 +434,71 @@ async fn saved_checkpoint_pair_preserves_peer_identity_and_unknowns() -> anyhow:
         "the per-page soft-404 assessment remains provenance, not a pair candidate"
     );
     assert_eq!(soft_404["comparison"]["decision"], "unknown");
+
+    // Identical custom 404 error pages must not become a byte-equality candidate:
+    // the saved side is only usable when its frontier status was HTTP 200.
+    let identical_missing = run_pair(
+        database,
+        &[
+            "--request-id",
+            &id,
+            "--source",
+            "https://fixture.invalid/notfound-a",
+            "--peer",
+            "https://fixture.invalid/notfound-b",
+        ],
+    );
+    assert_eq!(
+        identical_missing["source"]["assessment"]["decision"],
+        "no_candidate"
+    );
+    assert_eq!(
+        identical_missing["source"]["assessment"]["reason"],
+        "explicit missing status"
+    );
+    assert_eq!(identical_missing["source"]["http_status"], 404);
+    assert_eq!(identical_missing["peer"]["http_status"], 404);
+    assert_eq!(
+        identical_missing["source"]["assessment"]["evidence"]["source_sha256"],
+        identical_missing["peer"]["assessment"]["evidence"]["source_sha256"],
+        "the identical 404 fixtures must share source bytes or this regression is void"
+    );
+    assert_eq!(identical_missing["comparison"]["decision"], "unknown");
+    assert_ne!(identical_missing["comparison"]["decision"], "candidate");
+    assert_eq!(
+        identical_missing["comparison"]["unavailable_side"],
+        "source"
+    );
+    assert_eq!(
+        identical_missing["comparison"]["reason"],
+        "saved_side_not_http_200"
+    );
+
+    // error-200.html and error-404.html are byte-identical; only the frontier
+    // status differs, so the same bytes must not compare as a candidate.
+    let mixed_missing = run_pair(
+        database,
+        &[
+            "--request-id",
+            &id,
+            "--source",
+            "https://fixture.invalid/error",
+            "--peer",
+            "https://fixture.invalid/notfound-a",
+        ],
+    );
+    assert_eq!(
+        mixed_missing["source"]["assessment"]["evidence"]["source_sha256"],
+        mixed_missing["peer"]["assessment"]["evidence"]["source_sha256"],
+        "error-200.html and error-404.html share bytes; only the frontier status differs"
+    );
+    assert_eq!(mixed_missing["comparison"]["decision"], "unknown");
+    assert_ne!(mixed_missing["comparison"]["decision"], "candidate");
+    assert_eq!(mixed_missing["comparison"]["unavailable_side"], "peer");
+    assert_eq!(
+        mixed_missing["comparison"]["reason"],
+        "saved_side_not_http_200"
+    );
 
     let no_evidence = run_pair(
         database,
