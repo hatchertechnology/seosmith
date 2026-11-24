@@ -998,3 +998,100 @@ fn local_id_node_merging_completes_split_definitions_without_false_assertions() 
             .any(|o| o.code == "missing_required" && o.path.ends_with("/name"))
     );
 }
+
+/// Values completed from a separate local definition are reported at the
+/// definition's actual occurrence, never at a nonexistent pointer on the node.
+#[test]
+fn merged_values_report_their_actual_definition_pointer() {
+    // Split Product: the description and offers live only in the definition.
+    let product = validate(
+        &page(),
+        &[block(json!({"@graph":[
+            {"@type":"Product", "@id":"#p", "name":"Widget"},
+            {"@id":"#p",
+             "description":42,
+             "offers":{"@type":"Offer", "price":"abc", "priceCurrency":"usd"}}
+        ]}))],
+    );
+    assert!(product.iter().any(|o| o.code == "unexpected_value_type"
+        && o.path == "/0/data/@graph/1/description"
+        && o.value == Some(json!(42))));
+    assert!(
+        !product
+            .iter()
+            .any(|o| o.code == "unexpected_value_type" && o.path.contains("@graph/0/description"))
+    );
+    assert!(
+        product
+            .iter()
+            .any(|o| o.code == "invalid_offer_value" && o.path == "/0/data/@graph/1/offers/price")
+    );
+    assert!(
+        product.iter().any(|o| o.code == "invalid_offer_value"
+            && o.path == "/0/data/@graph/1/offers/priceCurrency")
+    );
+    assert!(
+        !product
+            .iter()
+            .any(|o| o.path.contains("@graph/0/offers/price"))
+    );
+
+    // A ListItem position completed from its definition keeps the definition path.
+    let breadcrumb = validate(
+        &page(),
+        &[block(json!({"@graph":[
+            {"@type":"BreadcrumbList", "itemListElement":[{"@type":"ListItem", "@id":"#li"}]},
+            {"@id":"#li", "position":0}
+        ]}))],
+    );
+    assert!(
+        breadcrumb
+            .iter()
+            .any(|o| o.code == "invalid_breadcrumb_position"
+                && o.path == "/0/data/@graph/1/position")
+    );
+    assert!(
+        !breadcrumb
+            .iter()
+            .any(|o| o.path == "/0/data/@graph/0/itemListElement/0/position")
+    );
+}
+
+/// Two typed declarations sharing an `@id` are a duplicate or conflicting
+/// declaration, not a definition: neither is completed and the conflict is
+/// reported instead of silently merging cross-block properties.
+#[test]
+fn symmetric_typed_declarations_are_ambiguous_and_not_merged() {
+    let result = validate(
+        &page(),
+        &[block(json!({"@graph":[
+            {"@type":"Product", "@id":"#p", "offers":{"@type":"Offer", "price":5, "priceCurrency":"USD"}},
+            {"@type":"Article", "@id":"#p", "headline":7}
+        ]}))],
+    );
+    assert!(result.iter().any(|o| o.category == "coverage"
+        && o.code == "local_definition_ambiguous"
+        && o.path == "/0/data/@graph/0"));
+    assert!(
+        result
+            .iter()
+            .any(|o| o.code == "local_definition_ambiguous" && o.path == "/0/data/@graph/1")
+    );
+    assert!(!result.iter().any(|o| o.code == "local_definition_merged"));
+    // The Product must not inherit and re-check the Article headline.
+    assert!(
+        !result
+            .iter()
+            .any(|o| o.code == "unexpected_value_type" && o.path == "/0/data/@graph/0/headline")
+    );
+    assert!(
+        result
+            .iter()
+            .any(|o| o.code == "unexpected_value_type" && o.path == "/0/data/@graph/1/headline")
+    );
+    assert!(
+        result
+            .iter()
+            .any(|o| o.code == "missing_required" && o.path == "/0/data/@graph/0/name")
+    );
+}
