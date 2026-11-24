@@ -137,13 +137,11 @@ fn collect_ids<'a>(v: &'a Value, path: &str, base: &Url, ids: &mut IdIndex<'a>) 
         _ => {}
     }
 }
-fn unique_reference<'a>(
-    v: &Value,
-    base: Option<&Url>,
-    ids: &'a IdIndex<'a>,
-) -> Option<(&'a Value, &'a str)> {
+/// Resolve a node's retained local identifier to a same-origin, same-path and
+/// same-query URL. JSON-LD `@id` and extracted microdata `id` are both accepted.
+fn local_id_url(v: &Value, base: Option<&Url>) -> Option<Url> {
     let base = base?;
-    let id = v.get("@id")?.as_str()?;
+    let id = v.get("@id").or_else(|| v.get("id"))?.as_str()?;
     let target = base.join(id).ok()?;
     if target.origin() != base.origin()
         || target.path() != base.path()
@@ -151,11 +149,105 @@ fn unique_reference<'a>(
     {
         return None;
     }
-    let entries = ids.get(target.as_str())?;
+    Some(target)
+}
+/// Separate retained entries sharing `v`'s local identifier, excluding `v`
+/// itself. References are not indexed, so they never appear here.
+fn separate_entries<'a>(
+    v: &Value,
+    base: Option<&Url>,
+    ids: &'a IdIndex<'a>,
+) -> Vec<(&'a Value, &'a str)> {
+    let Some(entries) = local_id_url(v, base).and_then(|target| ids.get(target.as_str())) else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter(|(entry, _)| !std::ptr::eq(*entry, v))
+        .map(|(entry, path)| (*entry, path.as_str()))
+        .collect()
+}
+/// Find the single separate retained definition that completes a typed inline
+/// node's local `@id`. Only a node with its own `@type` is completed, and only
+/// from an untyped separate entry: a second typed entry sharing the identifier
+/// is a duplicate or conflicting declaration, so two declarations can never
+/// complete one another. Ambiguous, foreign or missing identifiers return
+/// `None`.
+fn local_definition<'a>(
+    v: &Value,
+    base: Option<&Url>,
+    ids: &'a IdIndex<'a>,
+) -> Option<(&'a Value, &'a str)> {
+    if is_reference(v) || types(v).is_empty() {
+        return None;
+    }
+    let candidates = separate_entries(v, base, ids);
+    if let [candidate] = candidates.as_slice()
+        && types(candidate.0).is_empty()
+    {
+        return Some(*candidate);
+    }
+    None
+}
+/// Resolve a reference (`{"@id": ...}`) to its single retained local
+/// definition. Ambiguous, foreign or missing identifiers return `None`.
+fn unique_reference<'a>(
+    v: &Value,
+    base: Option<&Url>,
+    ids: &'a IdIndex<'a>,
+) -> Option<(&'a Value, &'a str)> {
+    let entries = ids.get(local_id_url(v, base)?.as_str())?;
     if entries.len() != 1 {
         return None;
     }
     Some((entries[0].0, entries[0].1.as_str()))
+}
+/// RFC 6901 pointer to a node's property container (`properties` for extracted
+/// microdata, the node itself otherwise).
+fn props_path(v: &Value, path: &str) -> String {
+    if v.get("properties").is_some() {
+        format!("{path}/properties")
+    } else {
+        path.to_string()
+    }
+}
+/// Layered property view for a node completed from one separate local
+/// definition with the same identifier. The node's own properties take
+/// precedence. `merged_path` reports the definition's actual occurrence for a
+/// value the node does not provide, so pointers never claim a position the
+/// value does not occupy. This is not full JSON-LD expansion; foreign and
+/// ambiguous identifiers are never merged.
+struct MergedProps<'a> {
+    own: &'a Value,
+    definition: Option<(&'a Value, String)>,
+}
+impl<'a> MergedProps<'a> {
+    fn get(&self, key: &str) -> Option<&'a Value> {
+        if let Some(value) = self.own.get(key) {
+            return Some(value);
+        }
+        self.definition
+            .as_ref()
+            .and_then(|(definition, _)| definition.get(key))
+    }
+    /// Actual pointer of a value completed from the separate definition.
+    /// `None` means the node's own expected pointer applies.
+    fn merged_path(&self, key: &str) -> Option<String> {
+        if self.own.get(key).is_some() {
+            return None;
+        }
+        let (definition, prefix) = self.definition.as_ref()?;
+        definition.get(key)?;
+        Some(format!("{prefix}/{}", escape(key)))
+    }
+}
+fn effective_props<'a>(v: &'a Value, base: Option<&Url>, ids: &'a IdIndex<'a>) -> MergedProps<'a> {
+    let definition = local_definition(v, base, ids)
+        .map(|(definition, path)| (props(definition), props_path(definition, path)));
+    MergedProps {
+        own: props(v),
+        definition,
+    }
 }
 fn is_reference(v: &Value) -> bool {
     v.as_object()
@@ -190,7 +282,34 @@ fn check_item(
         return;
     }
     let ts = types(v);
-    let p = props(v);
+    let p = effective_props(v, base, ids);
+    if !is_reference(v) && !ts.is_empty() {
+        let candidates = separate_entries(v, base, ids);
+        if let [candidate] = candidates.as_slice()
+            && types(candidate.0).is_empty()
+        {
+            add(
+                out,
+                "coverage",
+                "local_definition_merged",
+                path.into(),
+                v.get("@id").or_else(|| v.get("id")),
+                &format!(
+                    "Node properties were completed from the unique local definition at {}",
+                    candidate.1
+                ),
+            );
+        } else if !candidates.is_empty() {
+            add(
+                out,
+                "coverage",
+                "local_definition_ambiguous",
+                path.into(),
+                v.get("@id").or_else(|| v.get("id")),
+                "Multiple retained nodes share this local identifier; the node was not completed because the definition is ambiguous",
+            );
+        }
+    }
     let prefix = if v.get("properties").is_some() {
         format!("{path}/properties")
     } else {
@@ -220,7 +339,7 @@ fn check_item(
             (recommended, "missing_recommended"),
         ] {
             for field in fields {
-                if !p.get(*field).is_some_and(present) {
+                if !p.get(field).is_some_and(present) {
                     add(
                         out,
                         "provider_eligibility",
@@ -235,7 +354,7 @@ fn check_item(
         if t == "Product"
             && !["offers", "review", "aggregateRating"]
                 .iter()
-                .any(|x| p.get(*x).is_some_and(present))
+                .any(|x| p.get(x).is_some_and(present))
         {
             add(
                 out,
@@ -248,6 +367,9 @@ fn check_item(
         }
         for field in ["name", "headline", "description", "telephone"] {
             if let Some(val) = p.get(field) {
+                let field_path = p
+                    .merged_path(field)
+                    .unwrap_or_else(|| format!("{prefix}/{}", escape(field)));
                 for (i, x) in values(val).iter().enumerate() {
                     if !x.is_string() && !is_reference(x) {
                         add(
@@ -255,8 +377,7 @@ fn check_item(
                             "vocabulary",
                             "unexpected_value_type",
                             format!(
-                                "{prefix}/{}{}",
-                                escape(field),
+                                "{field_path}{}",
                                 if val.is_array() {
                                     format!("/{i}")
                                 } else {
@@ -273,9 +394,12 @@ fn check_item(
         if matches!(t, "Article" | "NewsArticle" | "BlogPosting")
             && let Some(authors) = p.get("author")
         {
+            let authors_path = p
+                .merged_path("author")
+                .unwrap_or_else(|| format!("{prefix}/author"));
             for (i, author) in values(authors).iter().enumerate() {
                 let source_path = format!(
-                    "{prefix}/author{}",
+                    "{authors_path}{}",
                     if authors.is_array() {
                         format!("/{i}")
                     } else {
@@ -328,7 +452,10 @@ fn check_item(
                             "Article author should be a Person or Organization; custom types may need review",
                         );
                     }
-                    if !props(author).get("name").is_some_and(present) {
+                    if !effective_props(author, base, ids)
+                        .get("name")
+                        .is_some_and(present)
+                    {
                         add(
                             out,
                             "provider_eligibility",
@@ -360,9 +487,12 @@ fn check_item(
         if t == "Product"
             && let Some(offers) = p.get("offers")
         {
+            let offers_path = p
+                .merged_path("offers")
+                .unwrap_or_else(|| format!("{prefix}/offers"));
             for (i, offer) in values(offers).iter().enumerate() {
                 let offer_path = format!(
-                    "{prefix}/offers{}",
+                    "{offers_path}{}",
                     if offers.is_array() {
                         format!("/{i}")
                     } else {
@@ -400,14 +530,13 @@ fn check_item(
                         "Offer reference requires graph expansion before its properties can be assessed",
                     );
                 } else if offer.is_object() {
-                    let op = props(offer);
-                    let opath = if offer.get("properties").is_some() {
-                        format!("{offer_path}/properties")
-                    } else {
-                        offer_path.clone()
-                    };
+                    let op = effective_props(offer, base, ids);
+                    let opath = props_path(offer, &offer_path);
                     for field in ["price", "lowPrice", "priceCurrency"] {
                         if let Some(raw) = op.get(field) {
+                            let field_path = op
+                                .merged_path(field)
+                                .unwrap_or_else(|| format!("{opath}/{}", escape(field)));
                             for (j, value) in values(raw).iter().enumerate() {
                                 let valid = if field == "priceCurrency" {
                                     value.as_str().is_some_and(|s| {
@@ -426,7 +555,7 @@ fn check_item(
                                         "vocabulary",
                                         "invalid_offer_value",
                                         format!(
-                                            "{opath}/{field}{}",
+                                            "{field_path}{}",
                                             if raw.is_array() {
                                                 format!("/{j}")
                                             } else {
@@ -503,7 +632,10 @@ fn check_item(
                                         Some(specification),
                                         "Referenced price specification could not be uniquely resolved",
                                     );
-                                } else if props(specification).get("price").is_some_and(present) {
+                                } else if effective_props(specification, base, ids)
+                                    .get("price")
+                                    .is_some_and(present)
+                                {
                                     has_price = true;
                                 }
                             }
@@ -564,9 +696,12 @@ fn check_item(
         if matches!(t, "LocalBusiness" | "Restaurant" | "Store" | "Pharmacy")
             && let Some(address) = p.get("address")
         {
+            let address_path = p
+                .merged_path("address")
+                .unwrap_or_else(|| format!("{prefix}/address"));
             for (i, entry) in values(address).iter().enumerate() {
                 let location = format!(
-                    "{prefix}/address{}",
+                    "{address_path}{}",
                     if address.is_array() {
                         format!("/{i}")
                     } else {
@@ -618,9 +753,12 @@ fn check_item(
         if t == "BreadcrumbList"
             && let Some(elements) = p.get("itemListElement")
         {
+            let elements_path = p
+                .merged_path("itemListElement")
+                .unwrap_or_else(|| format!("{prefix}/itemListElement"));
             for (i, item) in values(elements).iter().enumerate() {
                 let item_path = format!(
-                    "{prefix}/itemListElement{}",
+                    "{elements_path}{}",
                     if elements.is_array() {
                         format!("/{i}")
                     } else {
@@ -630,7 +768,11 @@ fn check_item(
                 if unsupported_context(item) {
                     continue;
                 }
-                if let Some(position) = props(item).get("position") {
+                let item_props = effective_props(item, base, ids);
+                if let Some(position) = item_props.get("position") {
+                    let position_base = item_props
+                        .merged_path("position")
+                        .unwrap_or_else(|| format!("{}/position", props_path(item, &item_path)));
                     for (j, value) in values(position).iter().enumerate() {
                         let valid = value.as_u64().is_some_and(|n| n > 0)
                             || value
@@ -638,12 +780,7 @@ fn check_item(
                                 .is_some_and(|s| s.parse::<u64>().is_ok_and(|n| n > 0));
                         if !valid {
                             let position_path = format!(
-                                "{item_path}{}/position{}",
-                                if item.get("properties").is_some() {
-                                    "/properties"
-                                } else {
-                                    ""
-                                },
+                                "{position_base}{}",
                                 if position.is_array() {
                                     format!("/{j}")
                                 } else {
@@ -663,7 +800,7 @@ fn check_item(
                 }
                 if item.is_object() && !is_reference(item) {
                     for field in ["position", "name"] {
-                        let breadcrumb_item = props(item).get("item");
+                        let breadcrumb_item = item_props.get("item");
                         let mut item_name = false;
                         let mut item_unknown = false;
                         if field == "name" {
@@ -676,8 +813,9 @@ fn check_item(
                                     };
                                     match target {
                                         Some(target) if !unsupported_context(target) => {
-                                            item_name |=
-                                                props(target).get("name").is_some_and(present);
+                                            item_name |= effective_props(target, base, ids)
+                                                .get("name")
+                                                .is_some_and(present);
                                             if !target.is_object() {
                                                 item_unknown = true;
                                             }
@@ -688,7 +826,7 @@ fn check_item(
                             }
                             if !item_name
                                 && item_unknown
-                                && !props(item).get("name").is_some_and(present)
+                                && !item_props.get("name").is_some_and(present)
                             {
                                 add(
                                     out,
@@ -707,7 +845,7 @@ fn check_item(
                                 );
                             }
                         }
-                        if !(props(item).get(field).is_some_and(present)
+                        if !(item_props.get(field).is_some_and(present)
                             || item_name
                             || item_unknown)
                         {
