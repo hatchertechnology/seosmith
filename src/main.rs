@@ -457,6 +457,12 @@ mod tests {
                     .state,
                 "local_only"
             );
+            let origin: Option<String> =
+                sqlx::query_scalar("SELECT local_finalization FROM jobs WHERE id=?")
+                    .bind(request.request_id.to_string())
+                    .fetch_one(&store.0)
+                    .await?;
+            assert_eq!(origin.as_deref(), Some("interrupted"));
             assert!(store.submit(request).await.is_err());
         }
         assert!(store.claim().await?.is_none());
