@@ -45,6 +45,7 @@ impl Store {
             started_at TEXT, report TEXT, report_hash TEXT, error TEXT,
             delivery_state TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
             next_attempt INTEGER NOT NULL DEFAULT 0, discovery_truncated INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL DEFAULT (unixepoch()));
+            CREATE TABLE IF NOT EXISTS local_robots_run (job_id TEXT PRIMARY KEY REFERENCES jobs(id), evidence TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS local_page_evidence (job_id TEXT NOT NULL REFERENCES jobs(id), url TEXT NOT NULL, evidence TEXT NOT NULL, PRIMARY KEY(job_id,url));
             CREATE TABLE IF NOT EXISTS local_evidence_usage (job_id TEXT PRIMARY KEY REFERENCES jobs(id), evidence_bytes INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS frontier (job_id TEXT NOT NULL REFERENCES jobs(id), url TEXT NOT NULL,
@@ -273,6 +274,48 @@ impl Store {
                 == Some(request),
             "job is not the claimed local request"
         );
+        Ok(())
+    }
+    /// Persist bounded origin outcomes even if no page is checkpointed. Serialized with cancellation.
+    pub(crate) async fn record_local_robots(
+        &self,
+        id: &str,
+        origin: &str,
+        source: &str,
+    ) -> Result<()> {
+        let mut tx = self.0.begin_with("BEGIN IMMEDIATE").await?;
+        let state: Option<(String, Option<String>)> =
+            sqlx::query_as("SELECT state,execution_mode FROM jobs WHERE id=?")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        ensure!(
+            state == Some(("local_running".into(), Some("local".into()))),
+            "job is not local running"
+        );
+        let existing: Option<String> =
+            sqlx::query_scalar("SELECT evidence FROM local_robots_run WHERE job_id=?")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let mut value = match existing {
+            Some(s) => serde_json::from_str::<serde_json::Value>(&s)?,
+            None => serde_json::json!({"version":1,"origins":[],"omitted_origins":0}),
+        };
+        let origins = value["origins"]
+            .as_array_mut()
+            .context("invalid robots run evidence")?;
+        if origins.len() < 32 && origin.len() <= 1024 {
+            origins.push(serde_json::json!({"origin":origin,"source":source}));
+        } else {
+            let omitted = value["omitted_origins"]
+                .as_u64()
+                .unwrap_or(0)
+                .saturating_add(1);
+            value["omitted_origins"] = omitted.into();
+        }
+        sqlx::query("INSERT INTO local_robots_run(job_id,evidence) VALUES(?,?) ON CONFLICT(job_id) DO UPDATE SET evidence=excluded.evidence").bind(id).bind(serde_json::to_string(&value)?).execute(&mut *tx).await?;
+        tx.commit().await?;
         Ok(())
     }
     /// Atomically persist a local page and its fixed collector set. Replays must match bytes.
@@ -522,6 +565,51 @@ impl Store {
 mod local_checkpoint_tests {
     use super::*;
     use crate::local_checkpoint;
+
+    #[tokio::test]
+    async fn robots_run_is_bounded_and_cancel_serializes() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(dir.path().join("robots.sqlite").to_str().unwrap()).await?;
+        let report: Report =
+            serde_json::from_str(include_str!("../fixtures/contracts/legacy.json"))?;
+        let mut request = report.request;
+        request.request_id = uuid::Uuid::new_v4();
+        let id = request.request_id.to_string();
+        store.submit_local(&request).await?;
+        store.claim_local(&id).await?.unwrap();
+        for n in 0..34 {
+            store
+                .record_local_robots(&id, &format!("https://{n}.example"), "robots_txt")
+                .await?;
+        }
+        let raw: String =
+            sqlx::query_scalar("SELECT evidence FROM local_robots_run WHERE job_id=?")
+                .bind(&id)
+                .fetch_one(&store.0)
+                .await?;
+        let value: serde_json::Value = serde_json::from_str(&raw)?;
+        assert_eq!(value["origins"].as_array().unwrap().len(), 32);
+        assert_eq!(value["omitted_origins"], 2);
+        let (record, cancel) = tokio::join!(
+            store.record_local_robots(&id, "https://last.example", "unavailable"),
+            store.cancel(&id)
+        );
+        assert!(cancel?);
+        let raw: String =
+            sqlx::query_scalar("SELECT evidence FROM local_robots_run WHERE job_id=?")
+                .bind(&id)
+                .fetch_one(&store.0)
+                .await?;
+        let value: serde_json::Value = serde_json::from_str(&raw)?;
+        assert_eq!(value["omitted_origins"], if record.is_ok() { 3 } else { 2 });
+        assert!(
+            store
+                .record_local_robots(&id, "https://late.example", "unavailable")
+                .await
+                .is_err()
+        );
+        Ok(())
+    }
 
     #[tokio::test]
     async fn cancellation_and_checkpoint_serialize() -> Result<()> {
