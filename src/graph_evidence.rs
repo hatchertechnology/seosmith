@@ -1,6 +1,6 @@
 //! Experimental, local-only evidence. This module is not part of any delivered report.
 use scraper::{Html, Selector};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use url::Url;
 
@@ -18,7 +18,7 @@ fn fetch_url(mut url: Url) -> String {
     url.to_string()
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LinkEvidence {
     pub raw_href: String,
     pub resolved_url: String,
@@ -29,7 +29,7 @@ pub struct LinkEvidence {
     pub context: String,
     pub followable: bool,
 }
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LocalPageEvidence {
     pub url: String,
     pub links: Vec<LinkEvidence>,

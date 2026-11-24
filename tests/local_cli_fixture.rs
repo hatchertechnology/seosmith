@@ -373,3 +373,282 @@ async fn policy_cli_keeps_different_origin_policies_separate() -> anyhow::Result
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn saved_graph_reads_real_crawl_without_mutating_store() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db = dir.path().join("graph.sqlite");
+    let report: Report = serde_json::from_str(include_str!("../fixtures/contracts/legacy.json"))?;
+    let mut request = report.request;
+    request.request_id = Uuid::new_v4();
+    request.url = "https://fixture.invalid/".parse()?;
+    request.max_pages = 8;
+    request.max_resources = 0;
+    request.max_duration_seconds = 30;
+    request.delay_ms = 1000;
+    request.check_external_links = false;
+    let request_path = dir.path().join("request.json");
+    let policy_path = dir.path().join("policy.json");
+    let fixture_path = dir.path().join("responses.json");
+    std::fs::write(&request_path, serde_json::to_vec(&request)?)?;
+    std::fs::write(&policy_path, "{}")?;
+    std::fs::write(
+        &fixture_path,
+        serde_json::to_vec(&serde_json::json!({
+            "https://fixture.invalid/robots.txt": {"status":200,"body":"User-agent: *\nDisallow: /private\n"},
+            "https://fixture.invalid/sitemap.xml": {"status":200,"body":"<?xml version='1.0'?><urlset xmlns='http://www.sitemaps.org/schemas/sitemap/0.9'><url><loc>https://fixture.invalid/hidden</loc></url></urlset>"},
+            "https://fixture.invalid/": {"status":200,"headers":{"content-type":"text/html"},"body":"<a href='/next#missing'>next</a><a href='/private'>private</a><a href='mailto:test@example.com'>rejected</a>"},
+            "https://fixture.invalid/next": {"status":200,"headers":{"content-type":"text/html"},"body":"<h1 id='here'>Next</h1>"},
+            "https://fixture.invalid/hidden": {"status":200,"headers":{"content-type":"text/html"},"body":"<p>Hidden</p>"}
+        }))?,
+    )?;
+    let crawl = Command::new(env!("CARGO_BIN_EXE_seosmith"))
+        .env_clear()
+        .env("SEOSMITH_LOCAL_FIXTURES", &fixture_path)
+        .args([
+            "--database",
+            db.to_str().unwrap(),
+            "--advisory-policy",
+            policy_path.to_str().unwrap(),
+            "crawl",
+            "--request",
+            request_path.to_str().unwrap(),
+        ])
+        .output()?;
+    assert!(
+        crawl.status.success(),
+        "{}",
+        String::from_utf8_lossy(&crawl.stderr)
+    );
+    // Explicitly quiesce/checkpoint the completed fixture before immutable analysis.
+    let quiesce = SqlitePool::connect_with(
+        SqliteConnectOptions::new()
+            .filename(&db)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Delete),
+    )
+    .await?;
+    quiesce.close().await;
+    let before = std::fs::read(&db)?;
+    let output = Command::new(env!("CARGO_BIN_EXE_seosmith"))
+        .env_clear()
+        .args([
+            "--database",
+            db.to_str().unwrap(),
+            "saved-graph",
+            &request.request_id.to_string(),
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(before, std::fs::read(&db)?);
+    assert!(!db.with_extension("sqlite-wal").exists());
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(result["coverage"]["complete"], false);
+    let nodes = result["nodes"].as_array().unwrap();
+    assert_eq!(
+        nodes
+            .iter()
+            .find(|n| n["url"] == "https://fixture.invalid/hidden")
+            .unwrap()["reachability"],
+        "unknown"
+    );
+    assert_eq!(
+        nodes
+            .iter()
+            .find(|n| n["url"] == "https://fixture.invalid/next")
+            .unwrap()["navigation_distance"],
+        1
+    );
+    assert!(
+        result["omitted"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|o| o["collector_reason"] == "blocked_by_robots")
+    );
+    assert!(
+        result["coverage"]["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r == "extraction_truncated")
+    );
+    assert_eq!(result["fragments"][0]["state"], "absent");
+    let journal = dir.path().join("graph.sqlite-journal");
+    std::fs::write(&journal, b"hot")?;
+    let rejected = Command::new(env!("CARGO_BIN_EXE_seosmith"))
+        .env_clear()
+        .args([
+            "--database",
+            db.to_str().unwrap(),
+            "saved-graph",
+            &request.request_id.to_string(),
+        ])
+        .output()?;
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("rollback journal"));
+    std::fs::remove_file(journal)?;
+    let missing = dir.path().join("missing.sqlite");
+    let rejected = Command::new(env!("CARGO_BIN_EXE_seosmith"))
+        .env_clear()
+        .args([
+            "--database",
+            missing.to_str().unwrap(),
+            "saved-graph",
+            &request.request_id.to_string(),
+        ])
+        .output()?;
+    assert!(!rejected.status.success());
+    assert!(!missing.exists());
+    // Corrupt a copy to verify duplicate collectors are reported, not selected.
+    let copy = dir.path().join("copy.sqlite");
+    std::fs::copy(&db, &copy)?;
+    let pool = SqlitePool::connect_with(
+        SqliteConnectOptions::new()
+            .filename(&copy)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Delete),
+    )
+    .await?;
+    let raw: String =
+        sqlx::query_scalar("SELECT evidence FROM local_page_evidence WHERE job_id=? AND url=?")
+            .bind(request.request_id.to_string())
+            .bind("https://fixture.invalid/next")
+            .fetch_one(&pool)
+            .await?;
+    let mut evidence: serde_json::Value = serde_json::from_str(&raw)?;
+    let collectors = evidence["capture"]["collectors"].as_array_mut().unwrap();
+    let duplicate = collectors
+        .iter()
+        .find(|v| v["collector"] == "graph")
+        .unwrap()
+        .clone();
+    collectors.push(duplicate);
+    sqlx::query("UPDATE local_page_evidence SET evidence=? WHERE job_id=? AND url=?")
+        .bind(serde_json::to_string(&evidence)?)
+        .bind(request.request_id.to_string())
+        .bind("https://fixture.invalid/next")
+        .execute(&pool)
+        .await?;
+    pool.close().await;
+    let output = Command::new(env!("CARGO_BIN_EXE_seosmith"))
+        .env_clear()
+        .args([
+            "--database",
+            copy.to_str().unwrap(),
+            "saved-graph",
+            &request.request_id.to_string(),
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    assert!(
+        result["omitted"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|o| o["reason"] == "duplicate_graph_collector")
+    );
+    // Exercise the aggregate budget with individually valid, bounded envelopes.
+    let pool = SqlitePool::connect_with(
+        SqliteConnectOptions::new()
+            .filename(&copy)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Delete),
+    )
+    .await?;
+    for index in 0..40 {
+        let url = format!("https://fixture.invalid/budget-{index:02}");
+        let envelope = serde_json::json!({"capture":{"version":1,"url":url,"padding":"x".repeat(60_000),"collectors":[{"collector":"graph","version":1,"state":"observed","data":{"url":url,"links":[],"ids":[],"extraction_complete":true}}]}});
+        sqlx::query("INSERT INTO frontier(job_id,url,depth,in_sitemap,page) VALUES(?,?,1,0,'{}')")
+            .bind(request.request_id.to_string())
+            .bind(&url)
+            .execute(&pool)
+            .await?;
+        sqlx::query("INSERT INTO local_page_evidence(job_id,url,evidence) VALUES(?,?,?)")
+            .bind(request.request_id.to_string())
+            .bind(&url)
+            .bind(serde_json::to_string(&envelope)?)
+            .execute(&pool)
+            .await?;
+    }
+    let long_url = format!("https://fixture.invalid/z{}", "x".repeat(9000));
+    sqlx::query("INSERT INTO frontier(job_id,url,depth,in_sitemap,page) VALUES(?,?,1,0,'{}')")
+        .bind(request.request_id.to_string())
+        .bind(&long_url)
+        .execute(&pool)
+        .await?;
+    pool.close().await;
+    let output = Command::new(env!("CARGO_BIN_EXE_seosmith"))
+        .env_clear()
+        .args([
+            "--database",
+            copy.to_str().unwrap(),
+            "saved-graph",
+            &request.request_id.to_string(),
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let budget: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    assert!(
+        budget["omitted"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|o| o["reason"] == "aggregate_input_limit")
+    );
+    assert!(
+        budget["omitted"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|o| o["reason"] == "url_byte_limit" && o["url"].is_null())
+    );
+    assert_eq!(budget["coverage"]["complete"], false);
+    assert_eq!(
+        budget["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["url"] == "https://fixture.invalid/budget-00")
+            .unwrap()["reachability"],
+        "unknown"
+    );
+
+    // A pre-mode schema is rejected without creating or migrating anything.
+    let legacy = dir.path().join("pre-mode.sqlite");
+    let pool = SqlitePool::connect_with(
+        SqliteConnectOptions::new()
+            .filename(&legacy)
+            .create_if_missing(true)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Delete),
+    )
+    .await?;
+    sqlx::query("CREATE TABLE jobs (id TEXT PRIMARY KEY, request TEXT, state TEXT)")
+        .execute(&pool)
+        .await?;
+    pool.close().await;
+    let legacy_before = std::fs::read(&legacy)?;
+    let output = Command::new(env!("CARGO_BIN_EXE_seosmith"))
+        .env_clear()
+        .args([
+            "--database",
+            legacy.to_str().unwrap(),
+            "saved-graph",
+            &request.request_id.to_string(),
+        ])
+        .output()?;
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("legacy jobs schema"));
+    assert_eq!(legacy_before, std::fs::read(&legacy)?);
+    Ok(())
+}
