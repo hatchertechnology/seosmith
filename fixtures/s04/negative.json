@@ -1,0 +1,427 @@
+{
+  "schema_version": 1,
+  "engine_version": "0.2.0",
+  "ruleset_version": "2026-11-01.1",
+  "request": {
+    "request_id": "00000000-0000-4000-8000-0000000000a4",
+    "website_id": "00000000-0000-4000-8000-000000000002",
+    "binding_generation": 1,
+    "url": "https://shop.example.com/",
+    "max_pages": 500,
+    "max_duration_seconds": 1800,
+    "delay_ms": 1000,
+    "check_external_links": false,
+    "max_resources": 500
+  },
+  "started_at": "2026-11-23T12:00:00Z",
+  "finished_at": "2026-11-23T12:01:00Z",
+  "outcome": "completed",
+  "stop_reason": "frontier_exhausted",
+  "coverage_complete": true,
+  "pages": [
+    {
+      "url": "https://shop.example.com/bad-product",
+      "depth": 0,
+      "in_sitemap": false,
+      "status": 200,
+      "error": null,
+      "blocked_by_robots": false,
+      "content_type": "text/html",
+      "bytes": 0,
+      "ttfb_ms": 0,
+      "title": "",
+      "description": "",
+      "language": "",
+      "robots": "",
+      "canonical": null,
+      "header_canonical": null,
+      "redirect": null,
+      "headings": [
+        [
+          1,
+          "Bad product"
+        ]
+      ],
+      "links": [],
+      "images": [],
+      "alternates": [],
+      "body_hash": "",
+      "words": 0,
+      "dom_nodes": 0,
+      "flags": [],
+      "is_resource": false,
+      "encoding": "utf-8",
+      "language_source": "",
+      "refresh_delay": null,
+      "refresh_target": null,
+      "relationships": [],
+      "structured_data": [
+        {
+          "format": "json_ld",
+          "data": {
+            "@context": "https://schema.org",
+            "@type": "Product",
+            "offers": {
+              "@type": "Offer",
+              "price": -2,
+              "priceCurrency": "usd"
+            }
+          },
+          "error": null
+        }
+      ],
+      "open_graph": {},
+      "twitter": {},
+      "extraction_truncated": false
+    },
+    {
+      "url": "https://shop.example.com/typed",
+      "depth": 0,
+      "in_sitemap": false,
+      "status": 200,
+      "error": null,
+      "blocked_by_robots": false,
+      "content_type": "text/html",
+      "bytes": 0,
+      "ttfb_ms": 0,
+      "title": "",
+      "description": "",
+      "language": "",
+      "robots": "",
+      "canonical": null,
+      "header_canonical": null,
+      "redirect": null,
+      "headings": [
+        [
+          1,
+          "Typed"
+        ]
+      ],
+      "links": [],
+      "images": [],
+      "alternates": [],
+      "body_hash": "",
+      "words": 0,
+      "dom_nodes": 0,
+      "flags": [],
+      "is_resource": false,
+      "encoding": "utf-8",
+      "language_source": "",
+      "refresh_delay": null,
+      "refresh_target": null,
+      "relationships": [],
+      "structured_data": [
+        {
+          "format": "json_ld",
+          "data": {
+            "@context": "https://schema.org",
+            "@type": "Product",
+            "name": 42,
+            "offers": {
+              "@type": "Offer",
+              "price": "3.5",
+              "priceCurrency": "USD"
+            }
+          },
+          "error": null
+        }
+      ],
+      "open_graph": {},
+      "twitter": {},
+      "extraction_truncated": false
+    },
+    {
+      "url": "https://shop.example.com/bad-article",
+      "depth": 0,
+      "in_sitemap": false,
+      "status": 200,
+      "error": null,
+      "blocked_by_robots": false,
+      "content_type": "text/html",
+      "bytes": 0,
+      "ttfb_ms": 0,
+      "title": "",
+      "description": "",
+      "language": "",
+      "robots": "",
+      "canonical": null,
+      "header_canonical": null,
+      "redirect": null,
+      "headings": [
+        [
+          1,
+          "Actual heading"
+        ]
+      ],
+      "links": [],
+      "images": [],
+      "alternates": [],
+      "body_hash": "",
+      "words": 0,
+      "dom_nodes": 0,
+      "flags": [],
+      "is_resource": false,
+      "encoding": "utf-8",
+      "language_source": "",
+      "refresh_delay": null,
+      "refresh_target": null,
+      "relationships": [],
+      "structured_data": [
+        {
+          "format": "json_ld",
+          "data": {
+            "@context": "https://schema.org",
+            "@type": "Article",
+            "headline": "Different headline",
+            "author": {
+              "@id": "#ghost"
+            }
+          },
+          "error": null
+        }
+      ],
+      "open_graph": {},
+      "twitter": {},
+      "extraction_truncated": false
+    },
+    {
+      "url": "https://shop.example.com/bad-bread",
+      "depth": 0,
+      "in_sitemap": false,
+      "status": 200,
+      "error": null,
+      "blocked_by_robots": false,
+      "content_type": "text/html",
+      "bytes": 0,
+      "ttfb_ms": 0,
+      "title": "",
+      "description": "",
+      "language": "",
+      "robots": "",
+      "canonical": null,
+      "header_canonical": null,
+      "redirect": null,
+      "headings": [],
+      "links": [],
+      "images": [],
+      "alternates": [],
+      "body_hash": "",
+      "words": 0,
+      "dom_nodes": 0,
+      "flags": [],
+      "is_resource": false,
+      "encoding": "utf-8",
+      "language_source": "",
+      "refresh_delay": null,
+      "refresh_target": null,
+      "relationships": [],
+      "structured_data": [
+        {
+          "format": "json_ld",
+          "data": {
+            "@context": "https://schema.org",
+            "@type": "BreadcrumbList",
+            "itemListElement": [
+              {
+                "@type": "ListItem",
+                "position": 0,
+                "name": "A"
+              }
+            ]
+          },
+          "error": null
+        }
+      ],
+      "open_graph": {},
+      "twitter": {},
+      "extraction_truncated": false
+    },
+    {
+      "url": "https://shop.example.com/bad-store",
+      "depth": 0,
+      "in_sitemap": false,
+      "status": 200,
+      "error": null,
+      "blocked_by_robots": false,
+      "content_type": "text/html",
+      "bytes": 0,
+      "ttfb_ms": 0,
+      "title": "",
+      "description": "",
+      "language": "",
+      "robots": "",
+      "canonical": null,
+      "header_canonical": null,
+      "redirect": null,
+      "headings": [
+        [
+          1,
+          "Bad store"
+        ]
+      ],
+      "links": [],
+      "images": [],
+      "alternates": [],
+      "body_hash": "",
+      "words": 0,
+      "dom_nodes": 0,
+      "flags": [],
+      "is_resource": false,
+      "encoding": "utf-8",
+      "language_source": "",
+      "refresh_delay": null,
+      "refresh_target": null,
+      "relationships": [],
+      "structured_data": [
+        {
+          "format": "json_ld",
+          "data": {
+            "@context": "https://schema.org",
+            "@type": "LocalBusiness",
+            "name": "Sparse"
+          },
+          "error": null
+        }
+      ],
+      "open_graph": {},
+      "twitter": {},
+      "extraction_truncated": false
+    },
+    {
+      "url": "https://shop.example.com/broken",
+      "depth": 0,
+      "in_sitemap": false,
+      "status": 200,
+      "error": null,
+      "blocked_by_robots": false,
+      "content_type": "text/html",
+      "bytes": 0,
+      "ttfb_ms": 0,
+      "title": "",
+      "description": "",
+      "language": "",
+      "robots": "",
+      "canonical": null,
+      "header_canonical": null,
+      "redirect": null,
+      "headings": [
+        [
+          1,
+          "Broken"
+        ]
+      ],
+      "links": [],
+      "images": [],
+      "alternates": [],
+      "body_hash": "",
+      "words": 0,
+      "dom_nodes": 0,
+      "flags": [],
+      "is_resource": false,
+      "encoding": "utf-8",
+      "language_source": "",
+      "refresh_delay": null,
+      "refresh_target": null,
+      "relationships": [],
+      "structured_data": [
+        {
+          "format": "json_ld",
+          "data": null,
+          "error": "invalid_json at 1:2"
+        }
+      ],
+      "open_graph": {},
+      "twitter": {},
+      "extraction_truncated": false
+    },
+    {
+      "url": "https://shop.example.com/custom",
+      "depth": 0,
+      "in_sitemap": false,
+      "status": 200,
+      "error": null,
+      "blocked_by_robots": false,
+      "content_type": "text/html",
+      "bytes": 0,
+      "ttfb_ms": 0,
+      "title": "",
+      "description": "",
+      "language": "",
+      "robots": "",
+      "canonical": null,
+      "header_canonical": null,
+      "redirect": null,
+      "headings": [
+        [
+          1,
+          "Custom"
+        ]
+      ],
+      "links": [],
+      "images": [],
+      "alternates": [],
+      "body_hash": "",
+      "words": 0,
+      "dom_nodes": 0,
+      "flags": [],
+      "is_resource": false,
+      "encoding": "utf-8",
+      "language_source": "",
+      "refresh_delay": null,
+      "refresh_target": null,
+      "relationships": [],
+      "structured_data": [
+        {
+          "format": "json_ld",
+          "data": {
+            "@context": {
+              "Product": "https://example.org/Other"
+            },
+            "@type": "Product"
+          },
+          "error": null
+        }
+      ],
+      "open_graph": {},
+      "twitter": {},
+      "extraction_truncated": false
+    },
+    {
+      "url": "https://shop.example.com/blocked2",
+      "depth": 0,
+      "in_sitemap": false,
+      "status": null,
+      "error": null,
+      "blocked_by_robots": true,
+      "content_type": "text/html",
+      "bytes": 0,
+      "ttfb_ms": 0,
+      "title": "",
+      "description": "",
+      "language": "",
+      "robots": "",
+      "canonical": null,
+      "header_canonical": null,
+      "redirect": null,
+      "headings": [],
+      "links": [],
+      "images": [],
+      "alternates": [],
+      "body_hash": "",
+      "words": 0,
+      "dom_nodes": 0,
+      "flags": [],
+      "is_resource": false,
+      "encoding": "utf-8",
+      "language_source": "",
+      "refresh_delay": null,
+      "refresh_target": null,
+      "relationships": [],
+      "structured_data": [],
+      "open_graph": {},
+      "twitter": {},
+      "extraction_truncated": false
+    }
+  ],
+  "findings": []
+}

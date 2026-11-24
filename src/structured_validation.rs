@@ -137,13 +137,18 @@ fn collect_ids<'a>(v: &'a Value, path: &str, base: &Url, ids: &mut IdIndex<'a>) 
         _ => {}
     }
 }
-fn unique_reference<'a>(
+/// Find the single separate retained definition for a node's local `@id`.
+/// JSON-LD `@id` and extracted microdata `id` are both accepted. A node that is
+/// itself a retained definition is excluded, so a node carrying an `@id` and
+/// other properties can still be completed from one separate definition.
+/// Ambiguous, foreign or missing identifiers return `None`.
+fn local_definition<'a>(
     v: &Value,
     base: Option<&Url>,
     ids: &'a IdIndex<'a>,
 ) -> Option<(&'a Value, &'a str)> {
     let base = base?;
-    let id = v.get("@id")?.as_str()?;
+    let id = v.get("@id").or_else(|| v.get("id"))?.as_str()?;
     let target = base.join(id).ok()?;
     if target.origin() != base.origin()
         || target.path() != base.path()
@@ -152,10 +157,54 @@ fn unique_reference<'a>(
         return None;
     }
     let entries = ids.get(target.as_str())?;
-    if entries.len() != 1 {
+    let mut candidates = entries
+        .iter()
+        .map(|(entry, path)| (*entry, path.as_str()))
+        .filter(|(entry, _)| !std::ptr::eq(*entry, v));
+    let first = candidates.next()?;
+    if candidates.next().is_some() {
         return None;
     }
-    Some((entries[0].0, entries[0].1.as_str()))
+    Some(first)
+}
+fn unique_reference<'a>(
+    v: &Value,
+    base: Option<&Url>,
+    ids: &'a IdIndex<'a>,
+) -> Option<(&'a Value, &'a str)> {
+    local_definition(v, base, ids)
+}
+/// Layered property view for a node completed from one separate local
+/// definition with the same identifier. The node's own properties take
+/// precedence and returned values keep their original positions, so nested
+/// identity and source pointers are preserved. This is not full JSON-LD
+/// expansion; foreign and ambiguous identifiers are never merged.
+struct MergedProps<'a> {
+    layers: Vec<&'a Value>,
+}
+impl<'a> MergedProps<'a> {
+    fn get(&self, key: &str) -> Option<&'a Value> {
+        self.layers.iter().find_map(|layer| (*layer).get(key))
+    }
+}
+fn effective_props<'a>(v: &'a Value, base: Option<&Url>, ids: &'a IdIndex<'a>) -> MergedProps<'a> {
+    let mut layers = vec![props(v)];
+    if let Some((definition, _)) = local_definition(v, base, ids) {
+        layers.push(props(definition));
+    }
+    MergedProps { layers }
+}
+/// Types for a node. A node without its own `@type` inherits the types of one
+/// separate local definition; a typed node is never re-typed from another node.
+fn effective_types<'a>(v: &'a Value, base: Option<&Url>, ids: &'a IdIndex<'a>) -> Vec<&'a str> {
+    let own = types(v);
+    if !own.is_empty() {
+        return own;
+    }
+    match local_definition(v, base, ids) {
+        Some((definition, _)) => types(definition),
+        None => Vec::new(),
+    }
 }
 fn is_reference(v: &Value) -> bool {
     v.as_object()
@@ -189,8 +238,22 @@ fn check_item(
         );
         return;
     }
-    let ts = types(v);
-    let p = props(v);
+    let ts = effective_types(v, base, ids);
+    let p = effective_props(v, base, ids);
+    if !is_reference(v)
+        && let Some((_, definition_path)) = local_definition(v, base, ids)
+    {
+        add(
+            out,
+            "coverage",
+            "local_definition_merged",
+            path.into(),
+            v.get("@id").or_else(|| v.get("id")),
+            &format!(
+                "Node properties were completed from the unique local definition at {definition_path}"
+            ),
+        );
+    }
     let prefix = if v.get("properties").is_some() {
         format!("{path}/properties")
     } else {
@@ -220,7 +283,7 @@ fn check_item(
             (recommended, "missing_recommended"),
         ] {
             for field in fields {
-                if !p.get(*field).is_some_and(present) {
+                if !p.get(field).is_some_and(present) {
                     add(
                         out,
                         "provider_eligibility",
@@ -235,7 +298,7 @@ fn check_item(
         if t == "Product"
             && !["offers", "review", "aggregateRating"]
                 .iter()
-                .any(|x| p.get(*x).is_some_and(present))
+                .any(|x| p.get(x).is_some_and(present))
         {
             add(
                 out,
@@ -313,7 +376,7 @@ fn check_item(
                         "Author reference could not be uniquely resolved",
                     );
                 } else if author.is_object() {
-                    let author_types = types(author);
+                    let author_types = effective_types(author, base, ids);
                     if !author_types.is_empty()
                         && !author_types
                             .iter()
@@ -328,7 +391,10 @@ fn check_item(
                             "Article author should be a Person or Organization; custom types may need review",
                         );
                     }
-                    if !props(author).get("name").is_some_and(present) {
+                    if !effective_props(author, base, ids)
+                        .get("name")
+                        .is_some_and(present)
+                    {
                         add(
                             out,
                             "provider_eligibility",
@@ -400,7 +466,7 @@ fn check_item(
                         "Offer reference requires graph expansion before its properties can be assessed",
                     );
                 } else if offer.is_object() {
-                    let op = props(offer);
+                    let op = effective_props(offer, base, ids);
                     let opath = if offer.get("properties").is_some() {
                         format!("{offer_path}/properties")
                     } else {
@@ -440,7 +506,7 @@ fn check_item(
                             }
                         }
                     }
-                    let offer_types = types(offer);
+                    let offer_types = effective_types(offer, base, ids);
                     if offer_types.contains(&"AggregateOffer") {
                         for field in ["lowPrice", "priceCurrency"] {
                             if !op.get(field).is_some_and(present) {
@@ -503,7 +569,10 @@ fn check_item(
                                         Some(specification),
                                         "Referenced price specification could not be uniquely resolved",
                                     );
-                                } else if props(specification).get("price").is_some_and(present) {
+                                } else if effective_props(specification, base, ids)
+                                    .get("price")
+                                    .is_some_and(present)
+                                {
                                     has_price = true;
                                 }
                             }
@@ -630,7 +699,8 @@ fn check_item(
                 if unsupported_context(item) {
                     continue;
                 }
-                if let Some(position) = props(item).get("position") {
+                let item_props = effective_props(item, base, ids);
+                if let Some(position) = item_props.get("position") {
                     for (j, value) in values(position).iter().enumerate() {
                         let valid = value.as_u64().is_some_and(|n| n > 0)
                             || value
@@ -663,7 +733,7 @@ fn check_item(
                 }
                 if item.is_object() && !is_reference(item) {
                     for field in ["position", "name"] {
-                        let breadcrumb_item = props(item).get("item");
+                        let breadcrumb_item = item_props.get("item");
                         let mut item_name = false;
                         let mut item_unknown = false;
                         if field == "name" {
@@ -676,8 +746,9 @@ fn check_item(
                                     };
                                     match target {
                                         Some(target) if !unsupported_context(target) => {
-                                            item_name |=
-                                                props(target).get("name").is_some_and(present);
+                                            item_name |= effective_props(target, base, ids)
+                                                .get("name")
+                                                .is_some_and(present);
                                             if !target.is_object() {
                                                 item_unknown = true;
                                             }
@@ -688,7 +759,7 @@ fn check_item(
                             }
                             if !item_name
                                 && item_unknown
-                                && !props(item).get("name").is_some_and(present)
+                                && !item_props.get("name").is_some_and(present)
                             {
                                 add(
                                     out,
@@ -707,7 +778,7 @@ fn check_item(
                                 );
                             }
                         }
-                        if !(props(item).get(field).is_some_and(present)
+                        if !(item_props.get(field).is_some_and(present)
                             || item_name
                             || item_unknown)
                         {

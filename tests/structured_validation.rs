@@ -750,3 +750,251 @@ fn saved_v2_uses_page_evidence_even_when_contract_is_truncated() {
     assert!(v1.status.success());
     assert_eq!(v1.stdout, v2.stdout);
 }
+
+/// Representative checked-in valid markup must not produce syntax, vocabulary or
+/// provider-eligibility assertions. Source pointers, coverage, human-review and
+/// already-observed resource status remain explicit.
+#[test]
+fn checked_in_positive_fixture_is_clean_and_path_scoped() {
+    use seosmith::model::Report;
+    use seosmith::structured_validation::validate_crawl;
+    let report: Report =
+        serde_json::from_str(include_str!("../fixtures/s04/positive.json")).unwrap();
+    for (index, page) in report.pages.iter().enumerate().take(4) {
+        let observations = validate_crawl(page, &report.pages);
+        assert!(
+            observations
+                .iter()
+                .any(|o| o.code == "context_not_expanded" && o.category == "coverage"),
+            "page {index} lacks explicit context coverage"
+        );
+        assert!(
+            observations
+                .iter()
+                .any(|o| o.category == "human_review" && o.code == "visible_content_unverified"),
+            "page {index} lacks the human-review condition"
+        );
+        assert!(
+            !observations
+                .iter()
+                .any(|o| matches!(o.category, "syntax" | "vocabulary" | "provider_eligibility")),
+            "positive page {index} unexpectedly produced assertions: {observations:?}"
+        );
+    }
+    // An image already present in the retained crawl inventory is observed; the
+    // pointer is the RFC 6901 item/property path relative to `structured_data`.
+    let product = &report.pages[0];
+    let observations = validate_crawl(product, &report.pages);
+    assert!(observations.iter().any(|o| o.category == "resource"
+        && o.code == "referenced_resource_status"
+        && o.path == "/0/data/image"
+        && o.explanation.contains("state=observed")
+        && o.explanation.contains("status=200")));
+    // Pages that were never fetched stay unavailable rather than validated-empty.
+    for index in [4, 5] {
+        let unavailable = validate_crawl(&report.pages[index], &report.pages);
+        assert_eq!(unavailable.len(), 1);
+        assert_eq!(unavailable[0].code, "page_unavailable");
+    }
+}
+
+/// The negative fixture separates JSON syntax, vocabulary, provider eligibility
+/// and human-review conditions at their precise item/property pointers.
+#[test]
+fn checked_in_negative_fixture_separates_observation_categories() {
+    use seosmith::model::Report;
+    use seosmith::structured_validation::validate_crawl;
+    let report: Report =
+        serde_json::from_str(include_str!("../fixtures/s04/negative.json")).unwrap();
+    let has = |index: usize, category: &str, code: &str, path: &str| {
+        validate_crawl(&report.pages[index], &report.pages)
+            .iter()
+            .any(|o| o.category == category && o.code == code && o.path == path)
+    };
+    // Syntax is isolated from the rest.
+    assert!(has(5, "syntax", "invalid_source", "/0/error"));
+    // Vocabulary checks report the exact item/property pointer and retained value.
+    assert!(has(
+        1,
+        "vocabulary",
+        "unexpected_value_type",
+        "/0/data/name"
+    ));
+    assert!(has(
+        0,
+        "vocabulary",
+        "invalid_offer_value",
+        "/0/data/offers/price"
+    ));
+    assert!(has(
+        0,
+        "vocabulary",
+        "invalid_offer_value",
+        "/0/data/offers/priceCurrency"
+    ));
+    assert!(has(
+        3,
+        "vocabulary",
+        "invalid_breadcrumb_position",
+        "/0/data/itemListElement/0/position"
+    ));
+    // Provider eligibility and local-reference states stay distinct.
+    assert!(has(
+        0,
+        "provider_eligibility",
+        "missing_required",
+        "/0/data/name"
+    ));
+    assert!(has(
+        4,
+        "provider_eligibility",
+        "missing_required",
+        "/0/data/address"
+    ));
+    assert!(has(2, "coverage", "author_not_expanded", "/0/data/author"));
+    assert!(has(
+        6,
+        "coverage",
+        "unsupported_context",
+        "/0/data/@context"
+    ));
+    // Visible-content alignment is always a human-review candidate, never a verdict.
+    assert!(has(
+        2,
+        "human_review",
+        "headline_heading_mismatch_candidate",
+        "/0/data/headline"
+    ));
+    // A blocked page is explicitly unavailable, never a clean empty validation.
+    let blocked = validate_crawl(&report.pages[7], &report.pages);
+    assert_eq!(blocked.len(), 1);
+    assert_eq!(blocked[0].code, "page_unavailable");
+}
+
+/// Both checked-in fixtures run through the normal saved-report entry point
+/// without opening a database or mutating the source report.
+#[test]
+fn checked_in_s04_fixtures_run_through_cli_without_mutation() {
+    for fixture in [
+        include_bytes!("../fixtures/s04/positive.json").as_slice(),
+        include_bytes!("../fixtures/s04/negative.json").as_slice(),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("report.json");
+        let database = dir.path().join("absent.sqlite");
+        std::fs::write(&path, fixture).unwrap();
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_seosmith"))
+            .args([
+                "--database",
+                database.to_str().unwrap(),
+                "validate-structured",
+                path.to_str().unwrap(),
+            ])
+            .env_remove("SEOSMITH_ADVISORY_POLICY")
+            .env_remove("SEOSMITH_EVIDENCE_CONTRACT_V2")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let source: serde_json::Value = serde_json::from_slice(fixture).unwrap();
+        let sidecar: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            sidecar["profile_version"],
+            seosmith::structured_validation::PROFILE_VERSION
+        );
+        assert_eq!(
+            sidecar["structured_validation"].as_array().unwrap().len(),
+            source["pages"].as_array().unwrap().len()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), fixture);
+        assert!(!database.exists());
+    }
+}
+
+/// A node carrying a local `@id` is completed from one separate retained
+/// definition, so split Product and Offer nodes do not produce false missing
+/// assertions. Ambiguous or foreign identifiers are never merged.
+#[test]
+fn local_id_node_merging_completes_split_definitions_without_false_assertions() {
+    // A typed inline Product completed by a separate name/image definition.
+    let product = validate(
+        &page(),
+        &[block(json!({"@graph":[
+            {"@type":"Product", "@id":"#p", "offers":{"@type":"Offer", "price":5, "priceCurrency":"USD"}},
+            {"@id":"#p", "name":"Widget", "description":"A widget", "image":"/i.png"}
+        ]}))],
+    );
+    assert!(product.iter().any(|o| o.code == "local_definition_merged"));
+    assert!(!product.iter().any(|o| o.code == "missing_required"));
+    assert!(!product.iter().any(|o| o.code == "missing_recommended"));
+
+    // An inline Offer completed by a separate currency definition.
+    let offer = validate(
+        &page(),
+        &[block(json!({"@graph":[
+            {"@type":"Product", "name":"X", "offers":{"@id":"#offer", "@type":"Offer", "price":5}},
+            {"@id":"#offer", "priceCurrency":"USD"}
+        ]}))],
+    );
+    assert!(offer.iter().any(|o| o.code == "local_definition_merged"));
+    assert!(!offer.iter().any(|o| o.code == "missing_offer_currency"));
+    assert!(!offer.iter().any(|o| o.code == "missing_offer_price"));
+
+    // A breadcrumb ListItem completed by a separate position/name definition.
+    let breadcrumb = validate(
+        &page(),
+        &[block(json!({"@graph":[
+            {"@type":"BreadcrumbList", "itemListElement":[{"@id":"#li", "@type":"ListItem"}]},
+            {"@id":"#li", "position":1, "name":"Home"}
+        ]}))],
+    );
+    assert!(
+        !breadcrumb
+            .iter()
+            .any(|o| o.code == "missing_breadcrumb_property")
+    );
+    assert!(
+        !breadcrumb
+            .iter()
+            .any(|o| o.code == "invalid_breadcrumb_position")
+    );
+
+    // Two separate definitions stay ambiguous and are not merged, so the
+    // honestly missing Product name is still reported.
+    let ambiguous = validate(
+        &page(),
+        &[block(json!({"@graph":[
+            {"@type":"Product", "@id":"#p", "offers":{"@type":"Offer", "price":5, "priceCurrency":"USD"}},
+            {"@id":"#p", "name":"A"},
+            {"@id":"#p", "name":"B"}
+        ]}))],
+    );
+    assert!(
+        !ambiguous
+            .iter()
+            .any(|o| o.code == "local_definition_merged")
+    );
+    assert!(
+        ambiguous
+            .iter()
+            .any(|o| o.code == "missing_required" && o.path.ends_with("/name"))
+    );
+
+    // A foreign identifier is never merged into the local node.
+    let foreign = validate(
+        &page(),
+        &[block(json!({"@graph":[
+            {"@type":"Product", "@id":"https://other.example/p", "offers":{"@type":"Offer", "price":5, "priceCurrency":"USD"}},
+            {"@id":"https://other.example/p", "name":"Remote"}
+        ]}))],
+    );
+    assert!(!foreign.iter().any(|o| o.code == "local_definition_merged"));
+    assert!(
+        foreign
+            .iter()
+            .any(|o| o.code == "missing_required" && o.path.ends_with("/name"))
+    );
+}
