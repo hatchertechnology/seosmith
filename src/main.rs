@@ -169,13 +169,8 @@ async fn main() -> Result<()> {
             }
         }
         let report: seosmith::model::Report = serde_json::from_value(source)?;
-        let observations: Vec<_> = report.pages.iter().enumerate().map(|(page_index, page)| serde_json::json!({"page_index": page_index, "url": page.url, "observations": seosmith::structured_validation::validate_crawl(page, &report.pages)})).collect();
-        println!(
-            "{}",
-            serde_json::to_string_pretty(
-                &serde_json::json!({"profile_version": seosmith::structured_validation::PROFILE_VERSION, "structured_validation": observations})
-            )?
-        );
+        let output = seosmith::structured_validation::report_wrapper(&report.pages);
+        println!("{}", serde_json::to_string_pretty(&output)?);
         return Ok(());
     }
     if let Command::SavedGraph { request_id } = cli.command {

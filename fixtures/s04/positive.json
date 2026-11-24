@@ -66,8 +66,11 @@
             "description": "A blue widget",
             "offers": {
               "@type": "Offer",
-              "price": 19.99,
-              "priceCurrency": "USD"
+              "priceSpecification": {
+                "@type": "UnitPriceSpecification",
+                "price": 19.99,
+                "priceCurrency": "USD"
+              }
             }
           },
           "error": null

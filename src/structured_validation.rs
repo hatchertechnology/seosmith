@@ -1,13 +1,18 @@
 //! Experimental source-only structured data checks. This module is not wired into reports.
 use crate::model::{Page, StructuredData};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use url::Url;
 
 const MAX_OBSERVATIONS: usize = 512;
 const MAX_VALUE_BYTES: usize = 4096;
 // Reserve room for the collector envelope within the proposed 1 MiB page cap.
 const MAX_OBSERVATION_BYTES: usize = 512 * 1024;
+/// Aggregate serialized-output budget for the standalone saved-report wrapper.
+/// The per-page observation caps still apply; this bound limits how many pages
+/// the wrapper accumulates, and trailing pages are omitted with explicit
+/// coverage rather than silently dropped or treated as clean.
+pub const MAX_REPORT_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 
 pub const PROFILE_VERSION: &str = "google-subset-2026-11-21.4";
 
@@ -260,6 +265,13 @@ fn present(v: &Value) -> bool {
         Value::Array(a) => a.iter().any(present),
         _ => true,
     }
+}
+/// A retained currency is an uppercase three-letter code. Case variants and
+/// other lengths are retained values, not valid currency evidence.
+fn valid_currency(value: &Value) -> bool {
+    value
+        .as_str()
+        .is_some_and(|s| s.len() == 3 && s.bytes().all(|b| b.is_ascii_uppercase()))
 }
 fn check_item(
     v: &Value,
@@ -539,9 +551,7 @@ fn check_item(
                                 .unwrap_or_else(|| format!("{opath}/{}", escape(field)));
                             for (j, value) in values(raw).iter().enumerate() {
                                 let valid = if field == "priceCurrency" {
-                                    value.as_str().is_some_and(|s| {
-                                        s.len() == 3 && s.bytes().all(|b| b.is_ascii_uppercase())
-                                    })
+                                    valid_currency(value)
                                 } else {
                                     value.as_f64().is_some_and(|n| n >= 0.0)
                                         || value.as_str().is_some_and(|s| {
@@ -585,7 +595,12 @@ fn check_item(
                         }
                     } else if offer_types.contains(&"Offer") {
                         let mut has_price = op.get("price").is_some_and(present);
-                        let mut unknown = false;
+                        let mut price_unknown = false;
+                        let mut currency_unknown = false;
+                        // Currencies retained in expanded price specifications,
+                        // each with the property's actual occurrence pointer.
+                        let mut specification_currencies: Vec<(String, String, Value)> = Vec::new();
+                        let mut invalid_specification_currencies = 0usize;
                         if let Some(specifications) = op.get("priceSpecification") {
                             for (i, specification) in values(specifications).iter().enumerate() {
                                 let path = format!(
@@ -619,11 +634,13 @@ fn check_item(
                                     (*specification, path)
                                 };
                                 if unsupported_context(specification) {
-                                    unknown = true;
+                                    price_unknown = true;
+                                    currency_unknown = true;
                                     continue;
                                 }
                                 if is_reference(specification) {
-                                    unknown = true;
+                                    price_unknown = true;
+                                    currency_unknown = true;
                                     add(
                                         out,
                                         "coverage",
@@ -632,36 +649,98 @@ fn check_item(
                                         Some(specification),
                                         "Referenced price specification could not be uniquely resolved",
                                     );
-                                } else if effective_props(specification, base, ids)
-                                    .get("price")
-                                    .is_some_and(present)
-                                {
+                                    continue;
+                                }
+                                let specification_props = effective_props(specification, base, ids);
+                                let specification_path = props_path(specification, &target_path);
+                                if specification_props.get("price").is_some_and(present) {
                                     has_price = true;
+                                }
+                                if let Some(raw) = specification_props.get("priceCurrency") {
+                                    let base_path = specification_props
+                                        .merged_path("priceCurrency")
+                                        .unwrap_or_else(|| {
+                                            format!("{specification_path}/priceCurrency")
+                                        });
+                                    for (j, value) in values(raw).iter().enumerate() {
+                                        let pointer = format!(
+                                            "{base_path}{}",
+                                            if raw.is_array() {
+                                                format!("/{j}")
+                                            } else {
+                                                String::new()
+                                            }
+                                        );
+                                        if valid_currency(value) {
+                                            specification_currencies.push((
+                                                value.as_str().unwrap_or_default().to_string(),
+                                                pointer,
+                                                (*value).clone(),
+                                            ));
+                                        } else {
+                                            invalid_specification_currencies += 1;
+                                            add(
+                                                out,
+                                                "vocabulary",
+                                                "invalid_offer_value",
+                                                pointer,
+                                                Some(value),
+                                                "Expected an uppercase three-letter currency code",
+                                            );
+                                        }
+                                    }
                                 }
                             }
                         }
                         if !op.get("priceCurrency").is_some_and(present) {
-                            if op.get("priceSpecification").is_some_and(present) {
+                            // Distinguish a currency retained in a price
+                            // specification from invalid, ambiguous and still
+                            // unknown evidence instead of reporting false clean.
+                            let distinct: BTreeSet<&str> = specification_currencies
+                                .iter()
+                                .map(|(code, _, _)| code.as_str())
+                                .collect();
+                            if distinct.len() > 1 {
+                                add(
+                                    out,
+                                    "coverage",
+                                    "offer_currency_ambiguous",
+                                    format!("{opath}/priceSpecification"),
+                                    None,
+                                    "Multiple distinct currency codes were retained in price specifications; no single currency can be established",
+                                );
+                            } else if let Some((_, pointer, value)) =
+                                specification_currencies.first()
+                            {
+                                add(
+                                    out,
+                                    "coverage",
+                                    "offer_currency_from_price_specification",
+                                    pointer.clone(),
+                                    Some(value),
+                                    "Currency was retained in the offer's price specification; the pointer is the property's actual occurrence",
+                                );
+                            } else if currency_unknown {
                                 add(
                                     out,
                                     "coverage",
                                     "offer_currency_unknown",
                                     format!("{opath}/priceSpecification"),
                                     None,
-                                    "Currency may be supplied by a price specification; full currency alternatives are not assessed",
+                                    "A price specification could not be expanded; currency alternatives remain unknown",
                                 );
-                            } else {
+                            } else if invalid_specification_currencies == 0 {
                                 add(
                                     out,
                                     "provider_eligibility",
                                     "missing_offer_currency",
                                     format!("{opath}/priceCurrency"),
                                     None,
-                                    "Offer currency was not observed",
+                                    "Offer currency was not observed in the offer or its price specifications",
                                 );
                             }
                         }
-                        if !has_price && !unknown {
+                        if !has_price && !price_unknown {
                             add(
                                 out,
                                 "provider_eligibility",
@@ -1121,6 +1200,61 @@ pub fn validate_crawl(page: &Page, pages: &[Page]) -> Vec<Observation> {
     }
     bound_bytes(&mut out);
     out
+}
+/// Build page entries in order, stopping before the accumulated serialized
+/// output would exceed `limit`. Pages after the bound are never validated, so
+/// expensive accumulation stops before the final serialization. The returned
+/// count is the exact number of trailing pages that were not examined.
+fn bounded_pages(pages: &[Page], limit: usize) -> (Vec<serde_json::Value>, usize) {
+    let mut retained = Vec::new();
+    let mut used = 0usize;
+    let mut omitted_pages = 0usize;
+    for (index, page) in pages.iter().enumerate() {
+        let entry = serde_json::json!({
+            "page_index": index,
+            "url": page.url,
+            "observations": validate_crawl(page, pages),
+        });
+        let encoded = serde_json::to_vec_pretty(&entry).unwrap_or_default();
+        // Array elements are indented one level deeper than a top-level pretty
+        // value; a 25% margin covers that nesting and separators conservatively.
+        let estimated = encoded.len().saturating_mul(5) / 4;
+        let next = used.saturating_add(estimated).saturating_add(16);
+        if next > limit && !retained.is_empty() {
+            omitted_pages = pages.len() - index;
+            break;
+        }
+        used = next;
+        retained.push(entry);
+    }
+    (retained, omitted_pages)
+}
+/// Build the standalone saved-report validation wrapper, bounding the aggregate
+/// serialized output at `limit` bytes. Ordinary reports keep the historical
+/// `profile_version`/`structured_validation` shape; only a report that reaches
+/// the bound adds an explicit `output_coverage` omission marker.
+pub fn report_wrapper_with_limit(pages: &[Page], limit: usize) -> serde_json::Value {
+    let (retained, omitted_pages) = bounded_pages(pages, limit);
+    let retained_pages = retained.len();
+    let mut output = serde_json::json!({
+        "profile_version": PROFILE_VERSION,
+        "structured_validation": retained,
+    });
+    if omitted_pages > 0 {
+        output["output_coverage"] = serde_json::json!({
+            "state": "truncated",
+            "total_pages": pages.len(),
+            "retained_pages": retained_pages,
+            "omitted_pages": omitted_pages,
+            "reason": "aggregate_output_byte_limit",
+            "limit_bytes": limit,
+        });
+    }
+    output
+}
+/// Build the wrapper with the production aggregate output bound.
+pub fn report_wrapper(pages: &[Page]) -> serde_json::Value {
+    report_wrapper_with_limit(pages, MAX_REPORT_OUTPUT_BYTES)
 }
 fn resource_observations(
     v: &Value,

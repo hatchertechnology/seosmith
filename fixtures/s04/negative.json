@@ -421,6 +421,95 @@
       "open_graph": {},
       "twitter": {},
       "extraction_truncated": false
+    },
+    {
+      "url": "https://shop.example.com/currency",
+      "depth": 0,
+      "in_sitemap": false,
+      "status": 200,
+      "error": null,
+      "blocked_by_robots": false,
+      "content_type": "text/html",
+      "bytes": 0,
+      "ttfb_ms": 0,
+      "title": "",
+      "description": "",
+      "language": "",
+      "robots": "",
+      "canonical": null,
+      "header_canonical": null,
+      "redirect": null,
+      "headings": [
+        [
+          1,
+          "Bad product"
+        ]
+      ],
+      "links": [],
+      "images": [],
+      "alternates": [],
+      "body_hash": "",
+      "words": 0,
+      "dom_nodes": 0,
+      "flags": [],
+      "is_resource": false,
+      "encoding": "utf-8",
+      "language_source": "",
+      "refresh_delay": null,
+      "refresh_target": null,
+      "relationships": [],
+      "structured_data": [
+        {
+          "format": "json_ld",
+          "data": {
+            "@context": "https://schema.org",
+            "@type": "Product",
+            "name": "Currency shapes",
+            "offers": [
+              {
+                "@type": "Offer",
+                "priceSpecification": {
+                  "@type": "UnitPriceSpecification",
+                  "price": 1,
+                  "priceCurrency": "usd"
+                }
+              },
+              {
+                "@type": "Offer",
+                "priceSpecification": [
+                  {
+                    "@type": "UnitPriceSpecification",
+                    "price": 2,
+                    "priceCurrency": "USD"
+                  },
+                  {
+                    "@type": "UnitPriceSpecification",
+                    "price": 2,
+                    "priceCurrency": "EUR"
+                  }
+                ]
+              },
+              {
+                "@type": "Offer",
+                "priceSpecification": {
+                  "@type": "UnitPriceSpecification",
+                  "price": 3
+                }
+              },
+              {
+                "@type": "Offer",
+                "priceSpecification": {
+                  "@id": "#unretained-currency"
+                }
+              }
+            ]
+          },
+          "error": null
+        }
+      ],
+      "open_graph": {},
+      "twitter": {},
+      "extraction_truncated": false
     }
   ],
   "findings": []

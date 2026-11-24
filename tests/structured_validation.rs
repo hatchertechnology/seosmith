@@ -591,9 +591,9 @@ fn breadcrumb_item_references_preserve_name_evidence_and_unknowns() {
 }
 
 #[test]
-fn offer_currency_is_checked_without_assuming_price_specification() {
+fn offer_currency_uses_retained_price_specification_currency() {
     let data = block(
-        json!({"@type":"Product","name":"X","offers":[{"@type":"Offer","price":5},{"@type":"Offer","priceSpecification":{"price":5,"priceCurrency":"USD"}}]}),
+        json!({"@type":"Product","name":"X","offers":[{"@type":"Offer","price":5},{"@type":"Offer","priceSpecification":{"@type":"UnitPriceSpecification","price":5,"priceCurrency":"USD"}}]}),
     );
     let result = validate(&page(), &[data]);
     assert!(
@@ -603,14 +603,158 @@ fn offer_currency_is_checked_without_assuming_price_specification() {
                 && o.path == "/0/data/offers/0/priceCurrency")
     );
     assert!(
-        result.iter().any(|o| o.code == "offer_currency_unknown"
-            && o.path == "/0/data/offers/1/priceSpecification")
+        result
+            .iter()
+            .any(|o| o.code == "offer_currency_from_price_specification"
+                && o.path == "/0/data/offers/1/priceSpecification/priceCurrency"
+                && o.value == Some(json!("USD")))
     );
     assert!(
         !result
             .iter()
             .any(|o| o.code == "missing_offer_currency" && o.path.contains("/offers/1/"))
     );
+    assert!(
+        !result
+            .iter()
+            .any(|o| o.code == "offer_currency_unknown" && o.path.contains("/offers/1/"))
+    );
+}
+
+/// Retained `priceSpecification.priceCurrency` is evidence, and missing,
+/// ambiguous, invalid and still-unknown currency evidence stay distinct with
+/// exact item/property provenance.
+#[test]
+fn price_specification_currency_evidence_is_precise_and_distinct() {
+    let result = validate(
+        &page(),
+        &[block(json!({"@type":"Product","name":"X","offers":[
+            {"@type":"Offer","priceSpecification":{"@type":"UnitPriceSpecification","price":1,"priceCurrency":"USD"}},
+            {"@type":"Offer","priceSpecification":[{"@type":"UnitPriceSpecification","price":2,"priceCurrency":"USD"},{"@type":"UnitPriceSpecification","price":2,"priceCurrency":"EUR"}]},
+            {"@type":"Offer","priceSpecification":{"@type":"UnitPriceSpecification","price":3,"priceCurrency":"usd"}},
+            {"@type":"Offer","priceSpecification":{"@type":"UnitPriceSpecification","price":4}},
+            {"@type":"Offer","priceSpecification":{"@id":"#unretained"}}
+        ]}))],
+    );
+    // One valid retained currency is observed at its exact property pointer.
+    assert!(
+        result
+            .iter()
+            .any(|o| o.code == "offer_currency_from_price_specification"
+                && o.path == "/0/data/offers/0/priceSpecification/priceCurrency"
+                && o.value == Some(json!("USD")))
+    );
+    assert!(
+        !result
+            .iter()
+            .any(|o| o.path.starts_with("/0/data/offers/0/")
+                && matches!(
+                    o.code,
+                    "missing_offer_currency"
+                        | "offer_currency_unknown"
+                        | "offer_currency_ambiguous"
+                ))
+    );
+    // Two distinct retained currencies are ambiguous, not a clean currency.
+    assert!(
+        result.iter().any(|o| o.code == "offer_currency_ambiguous"
+            && o.path == "/0/data/offers/1/priceSpecification")
+    );
+    assert!(
+        !result
+            .iter()
+            .any(|o| o.code == "offer_currency_from_price_specification"
+                && o.path.contains("/offers/1/"))
+    );
+    // An invalid retained code is reported at the specification property.
+    assert!(result.iter().any(|o| o.code == "invalid_offer_value"
+        && o.path == "/0/data/offers/2/priceSpecification/priceCurrency"
+        && o.value == Some(json!("usd"))));
+    assert!(
+        !result
+            .iter()
+            .any(|o| o.path.contains("/offers/2/") && o.code == "missing_offer_currency")
+    );
+    // An expanded specification without a currency is genuinely missing.
+    assert!(
+        result
+            .iter()
+            .any(|o| o.code == "missing_offer_currency"
+                && o.path == "/0/data/offers/3/priceCurrency")
+    );
+    // An unresolved reference remains unknown rather than clean or missing.
+    assert!(
+        result.iter().any(|o| o.code == "offer_currency_unknown"
+            && o.path == "/0/data/offers/4/priceSpecification")
+    );
+    assert!(
+        result
+            .iter()
+            .any(|o| o.code == "price_specification_not_expanded"
+                && o.path == "/0/data/offers/4/priceSpecification")
+    );
+}
+
+/// A currency completed from a resolved price specification definition keeps
+/// the definition's actual occurrence pointer.
+#[test]
+fn price_specification_currency_reference_reports_definition_occurrence() {
+    let result = validate(
+        &page(),
+        &[block(json!({"@graph":[
+            {"@type":"Product","name":"X","offers":{"@type":"Offer","priceSpecification":{"@id":"#price"}}},
+            {"@id":"#price","@type":"UnitPriceSpecification","price":12,"priceCurrency":"GBP"}
+        ]}))],
+    );
+    assert!(
+        result
+            .iter()
+            .any(|o| o.code == "offer_currency_from_price_specification"
+                && o.path == "/0/data/@graph/1/priceCurrency"
+                && o.value == Some(json!("GBP")))
+    );
+    assert!(!result.iter().any(|o| o.code == "offer_currency_unknown"));
+    assert!(!result.iter().any(|o| o.code == "missing_offer_currency"));
+}
+
+#[test]
+fn aggregate_report_output_bound_omits_trailing_pages_explicitly() {
+    use seosmith::structured_validation::{report_wrapper, report_wrapper_with_limit};
+    let pages: Vec<Page> = (0..4)
+        .map(|i| Page {
+            url: format!("https://example.com/p{i}"),
+            structured_data: vec![block(json!({"@type":"Product","name":format!("Item {i}")}))],
+            ..page()
+        })
+        .collect();
+    // A one-byte budget retains the first page only and reports the exact
+    // number of unexamined trailing pages.
+    let bounded = report_wrapper_with_limit(&pages, 1);
+    let entries = bounded["structured_validation"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["page_index"], 0);
+    assert_eq!(bounded["output_coverage"]["state"], "truncated");
+    assert_eq!(bounded["output_coverage"]["total_pages"], 4);
+    assert_eq!(bounded["output_coverage"]["retained_pages"], 1);
+    assert_eq!(bounded["output_coverage"]["omitted_pages"], 3);
+    assert_eq!(bounded["output_coverage"]["limit_bytes"], 1);
+    // A generous budget keeps the historical wrapper shape with no marker.
+    let complete = report_wrapper_with_limit(&pages, 1_000_000);
+    assert_eq!(
+        complete["structured_validation"].as_array().unwrap().len(),
+        4
+    );
+    assert!(complete.get("output_coverage").is_none());
+    // The production wrapper uses the same shape for ordinary reports.
+    let production = report_wrapper(&pages);
+    assert_eq!(
+        production["structured_validation"]
+            .as_array()
+            .unwrap()
+            .len(),
+        4
+    );
+    assert!(production.get("output_coverage").is_none());
 }
 
 #[test]
@@ -790,6 +934,10 @@ fn checked_in_positive_fixture_is_clean_and_path_scoped() {
         && o.path == "/0/data/image"
         && o.explanation.contains("state=observed")
         && o.explanation.contains("status=200")));
+    // The retained price-specification currency is evidence, not unknown.
+    assert!(observations.iter().any(|o| o.category == "coverage"
+        && o.code == "offer_currency_from_price_specification"
+        && o.path == "/0/data/offers/priceSpecification/priceCurrency"));
     // Pages that were never fetched stay unavailable rather than validated-empty.
     for index in [4, 5] {
         let unavailable = validate_crawl(&report.pages[index], &report.pages);
@@ -869,6 +1017,32 @@ fn checked_in_negative_fixture_separates_observation_categories() {
     let blocked = validate_crawl(&report.pages[7], &report.pages);
     assert_eq!(blocked.len(), 1);
     assert_eq!(blocked[0].code, "page_unavailable");
+    // Retained price-specification currency evidence is distinguished:
+    // invalid, ambiguous, missing and unresolved remain separate.
+    assert!(has(
+        8,
+        "vocabulary",
+        "invalid_offer_value",
+        "/0/data/offers/0/priceSpecification/priceCurrency"
+    ));
+    assert!(has(
+        8,
+        "coverage",
+        "offer_currency_ambiguous",
+        "/0/data/offers/1/priceSpecification"
+    ));
+    assert!(has(
+        8,
+        "provider_eligibility",
+        "missing_offer_currency",
+        "/0/data/offers/2/priceCurrency"
+    ));
+    assert!(has(
+        8,
+        "coverage",
+        "offer_currency_unknown",
+        "/0/data/offers/3/priceSpecification"
+    ));
 }
 
 /// Both checked-in fixtures run through the normal saved-report entry point
@@ -909,6 +1083,7 @@ fn checked_in_s04_fixtures_run_through_cli_without_mutation() {
             sidecar["structured_validation"].as_array().unwrap().len(),
             source["pages"].as_array().unwrap().len()
         );
+        assert!(sidecar.get("output_coverage").is_none());
         assert_eq!(std::fs::read(&path).unwrap(), fixture);
         assert!(!database.exists());
     }
