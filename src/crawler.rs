@@ -15,6 +15,7 @@ use std::{
 use url::Url;
 struct Robots {
     body: String,
+    source: &'static str,
 }
 impl Robots {
     fn allowed(&self, url: &Url) -> bool {
@@ -33,12 +34,15 @@ async fn robots(fetch: &impl Transport, u: &Url) -> Result<Robots> {
     match r.status {
         200 => Ok(Robots {
             body: String::from_utf8_lossy(&r.body).into_owned(),
+            source: "robots_txt",
         }),
         404 | 410 => Ok(Robots {
             body: String::new(),
+            source: "not_found",
         }),
         401 | 403 => Ok(Robots {
             body: "User-agent: *\nDisallow: /".into(),
+            source: "http_denied_synthetic",
         }),
         _ => bail!("robots_unavailable"),
     }
@@ -116,7 +120,12 @@ async fn discover_sitemaps(
     let mut seen = HashSet::new();
     let mut complete = true;
     while let Some(u) = maps.pop() {
-        if !(Robots { body: body.into() }).allowed(&u) {
+        if !(Robots {
+            body: body.into(),
+            source: "robots_txt",
+        })
+        .allowed(&u)
+        {
             complete = false;
             continue;
         }
@@ -182,7 +191,17 @@ async fn crawl_internal(
     let deadline = chrono::DateTime::parse_from_rfc3339(&started_at)?.timestamp()
         + i64::try_from(r.max_duration_seconds)?;
     let mut policies = HashMap::new();
-    let Ok(policy) = robots(fetch, &r.url).await else {
+    let result = robots(fetch, &r.url).await;
+    if local {
+        store
+            .record_local_robots(
+                &id,
+                &origin(&r.url),
+                result.as_ref().map_or("unavailable", |p| p.source),
+            )
+            .await?;
+    }
+    let Ok(policy) = result else {
         return report(store, r, started_at, "failed", "robots_unavailable", false).await;
     };
     let map_complete = match tokio::time::timeout(
@@ -215,7 +234,17 @@ async fn crawl_internal(
         }
         let u = Url::parse(&url)?;
         if let std::collections::hash_map::Entry::Vacant(e) = policies.entry(origin(&u)) {
-            if let Ok(p) = robots(fetch, &u).await {
+            let result = robots(fetch, &u).await;
+            if local {
+                store
+                    .record_local_robots(
+                        &id,
+                        &origin(&u),
+                        result.as_ref().map_or("unavailable", |p| p.source),
+                    )
+                    .await?;
+            }
+            if let Ok(p) = result {
                 e.insert(p);
             } else {
                 reason = "robots_unavailable";
@@ -328,7 +357,14 @@ async fn crawl_internal(
         }
         // Checkpoint after discoveries: a crash can replay discovery without losing targets.
         if local {
-            let evidence = crate::local_checkpoint::capture(&u, &page, local_response.as_ref());
+            let policy = &policies[&origin(&u)];
+            let evidence = crate::local_checkpoint::capture_robots(
+                &u,
+                &page,
+                local_response.as_ref(),
+                &policy.body,
+                policy.source,
+            );
             store.checkpoint_local(&id, &page, &evidence).await?;
         } else {
             store.save_page(&id, &page).await?;

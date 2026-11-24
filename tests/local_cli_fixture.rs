@@ -65,7 +65,7 @@ async fn policy_cli_fixtures_upgrade_and_reopen_without_delivery_changes() -> an
     let fixtures = BTreeMap::from([
         (
             "https://fixture.invalid/robots.txt",
-            serde_json::json!({"status":200,"body":"User-agent: *\nDisallow: /private\n"}),
+            serde_json::json!({"status":200,"body":"User-agent: *\r\nDisallow: /private\rUser-agent: Googlebot\nAllow: /private\n"}),
         ),
         (
             "https://fixture.invalid/sitemap.xml",
@@ -112,7 +112,13 @@ async fn policy_cli_fixtures_upgrade_and_reopen_without_delivery_changes() -> an
     for (url, raw) in captures {
         let value: serde_json::Value = serde_json::from_str(&raw)?;
         assert_eq!(value["capture"]["url"], url);
+        let robots = &value["capture"]["collectors"][3]["data"];
+        assert_eq!(robots["source"], "robots_txt");
         if url.ends_with("/private") {
+            assert_eq!(robots["decisions"][0]["allowed"], false);
+            assert_eq!(robots["decisions"][0]["matched_line"], 2);
+            assert_eq!(robots["decisions"][0]["raw_line"], "Disallow: /private");
+            assert_eq!(robots["decisions"][1]["allowed"], true);
             assert_eq!(
                 value["capture"]["collectors"][0]["reason"],
                 "blocked_by_robots"
@@ -191,5 +197,153 @@ async fn policy_cli_fixtures_upgrade_and_reopen_without_delivery_changes() -> an
         Some(old_report)
     );
     assert_eq!(store.view(&delivered_id).await?.unwrap().attempts, 4);
+    Ok(())
+}
+
+#[tokio::test]
+async fn policy_cli_short_missing_and_unavailable_robots_survive_reopen() -> anyhow::Result<()> {
+    for (status, body, source, page_count) in [
+        (200, "", "robots_txt", 1),
+        (404, "", "not_found", 1),
+        (503, "", "unavailable", 0),
+        (403, "", "http_denied_synthetic", 1),
+    ] {
+        let dir = tempfile::tempdir()?;
+        let db = dir.path().join("db.sqlite");
+        let mut request: seosmith::model::CrawlRequest = serde_json::from_value(
+            serde_json::from_str::<serde_json::Value>(include_str!(
+                "../fixtures/contracts/legacy.json"
+            ))?["request"]
+                .clone(),
+        )?;
+        request.request_id = Uuid::new_v4();
+        request.url = "https://fixture.invalid/".parse()?;
+        request.max_pages = 1;
+        request.max_resources = 0;
+        request.max_duration_seconds = 30;
+        request.delay_ms = 1000;
+        request.check_external_links = false;
+        let request_path = dir.path().join("request.json");
+        let policy_path = dir.path().join("policy.json");
+        let fixture_path = dir.path().join("responses.json");
+        std::fs::write(&request_path, serde_json::to_vec(&request)?)?;
+        std::fs::write(&policy_path, "{}")?;
+        std::fs::write(
+            &fixture_path,
+            serde_json::to_vec(&serde_json::json!({
+                "https://fixture.invalid/robots.txt": {"status":status,"body":body},
+                "https://fixture.invalid/sitemap.xml": {"status":404,"body":""},
+                "https://fixture.invalid/": {"status":200,"headers":{"content-type":"text/html"},"body":"<html></html>"}
+            }))?,
+        )?;
+        let output = Command::new(env!("CARGO_BIN_EXE_seosmith"))
+            .env_clear()
+            .env("SEOSMITH_LOCAL_FIXTURES", &fixture_path)
+            .args([
+                "--database",
+                db.to_str().unwrap(),
+                "--advisory-policy",
+                policy_path.to_str().unwrap(),
+                "crawl",
+                "--request",
+                request_path.to_str().unwrap(),
+            ])
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let store = Store::open(db.to_str().unwrap()).await?;
+        let id = request.request_id.to_string();
+        let run: String =
+            sqlx::query_scalar("SELECT evidence FROM local_robots_run WHERE job_id=?")
+                .bind(&id)
+                .fetch_one(&store.0)
+                .await?;
+        let run: serde_json::Value = serde_json::from_str(&run)?;
+        assert_eq!(run["origins"][0]["origin"], "https://fixture.invalid");
+        assert_eq!(run["origins"][0]["source"], source);
+        let records: Vec<String> =
+            sqlx::query_scalar("SELECT evidence FROM local_page_evidence WHERE job_id=?")
+                .bind(&id)
+                .fetch_all(&store.0)
+                .await?;
+        assert_eq!(records.len(), page_count);
+        if let Some(record) = records.first() {
+            let value: serde_json::Value = serde_json::from_str(record)?;
+            let robots = &value["capture"]["collectors"][3]["data"];
+            assert_eq!(robots["source"], source);
+            assert_eq!(robots["decisions"][0]["allowed"], status != 403);
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn policy_cli_keeps_different_origin_policies_separate() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db = dir.path().join("db.sqlite");
+    let report: Report = serde_json::from_str(include_str!("../fixtures/contracts/legacy.json"))?;
+    let mut request = report.request;
+    request.request_id = Uuid::new_v4();
+    request.url = "https://fixture.invalid/".parse()?;
+    request.max_pages = 1;
+    request.max_resources = 1;
+    request.max_duration_seconds = 30;
+    request.delay_ms = 1000;
+    request.check_external_links = true;
+    let request_path = dir.path().join("request.json");
+    let policy_path = dir.path().join("policy.json");
+    let fixture_path = dir.path().join("responses.json");
+    std::fs::write(&request_path, serde_json::to_vec(&request)?)?;
+    std::fs::write(&policy_path, "{}")?;
+    std::fs::write(
+        &fixture_path,
+        serde_json::to_vec(&serde_json::json!({
+            "https://fixture.invalid/robots.txt": {"status":404,"body":""},
+            "https://fixture.invalid/sitemap.xml": {"status":404,"body":""},
+            "https://fixture.invalid/": {"status":200,"headers":{"content-type":"text/html"},"body":"<html><body><a href='https://other.invalid/private'>external</a></body></html>"},
+            "https://other.invalid/robots.txt": {"status":200,"body":"User-agent: *\nDisallow: /private\n"}
+        }))?,
+    )?;
+    let output = Command::new(env!("CARGO_BIN_EXE_seosmith"))
+        .env_clear()
+        .env("SEOSMITH_LOCAL_FIXTURES", &fixture_path)
+        .args([
+            "--database",
+            db.to_str().unwrap(),
+            "--advisory-policy",
+            policy_path.to_str().unwrap(),
+            "crawl",
+            "--request",
+            request_path.to_str().unwrap(),
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let store = Store::open(db.to_str().unwrap()).await?;
+    let id = request.request_id.to_string();
+    let run: String = sqlx::query_scalar("SELECT evidence FROM local_robots_run WHERE job_id=?")
+        .bind(&id)
+        .fetch_one(&store.0)
+        .await?;
+    let run: serde_json::Value = serde_json::from_str(&run)?;
+    assert_eq!(run["origins"].as_array().unwrap().len(), 2);
+    assert_eq!(run["origins"][1]["origin"], "https://other.invalid");
+    let raw: String =
+        sqlx::query_scalar("SELECT evidence FROM local_page_evidence WHERE job_id=? AND url=?")
+            .bind(&id)
+            .bind("https://other.invalid/private")
+            .fetch_one(&store.0)
+            .await?;
+    let capture: serde_json::Value = serde_json::from_str(&raw)?;
+    assert_eq!(
+        capture["capture"]["collectors"][3]["data"]["decisions"][0]["allowed"],
+        false
+    );
     Ok(())
 }
