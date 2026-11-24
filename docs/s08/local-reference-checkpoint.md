@@ -1,0 +1,7 @@
+# Local resource-reference checkpoint
+
+Opt-in local policy crawls append `resource_references` to each page checkpoint. It observes the existing static HTML reference extractor on response bytes already fetched; it makes no extra requests and is not included in standard reports or delivery. Earlier rows remain unchanged and can lack the collector. The first seven collectors retain their existing order.
+
+The collector parses at most 256 KiB of response body and 256 KiB of decoded UTF-8. Larger sources are unavailable with an explicit limit reason; decoding errors or the extractor's occurrence and attribute limits make observations partial. Non-HTML, robots-blocked and unavailable responses have explicit unavailable reasons. The existing 24 KiB collector and per-run evidence budgets can replace observations with unavailable markers. The extractor's `complete` flag covers its own occurrence and attribute limits only, not decoding or the full range of HTML resource references. See [offline resource observations](offline-resources.md) for its selector and limitations.
+
+Raw `srcset`, `rel`, `media`, `type` and other attributes do not identify a browser's selected or rendered resource. The existing resource collector counts decoded response body bytes; declared content length is a header observation and transfer bytes remain unknown. This is a local capture slice, not S08 completion, browser performance evidence or a delivery contract.

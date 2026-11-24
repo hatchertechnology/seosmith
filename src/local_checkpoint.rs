@@ -150,6 +150,41 @@ pub(crate) fn capture(url: &Url, page: &Page, response: Option<&Response>) -> Va
     set_url_identity(&mut value, url.as_str());
     value
 }
+// Bound both encoded input and decoded UTF-8 before building a second HTML tree.
+const REFERENCE_SOURCE_LIMIT: usize = 256 * 1024;
+
+fn resource_references(url: &Url, page: &Page, response: Option<&Response>) -> Observation {
+    let Some(response) = response else {
+        return unavailable(
+            "resource_references",
+            if page.blocked_by_robots {
+                "blocked_by_robots"
+            } else {
+                "response_unavailable"
+            },
+        );
+    };
+    if !page.html() {
+        return unavailable("resource_references", "not_html");
+    }
+    if response.body.len() > REFERENCE_SOURCE_LIMIT {
+        return unavailable("resource_references", "source_byte_limit");
+    }
+    let (body, _, errors) = crate::extract::decode(&response.body, &page.content_type);
+    if body.len() > REFERENCE_SOURCE_LIMIT {
+        return unavailable("resource_references", "decoded_source_byte_limit");
+    }
+    let references = resource_evidence::references(url.as_str(), &body);
+    let mut result = observed(
+        "resource_references",
+        &references,
+        errors || !references.complete,
+    );
+    if result.data.is_some() && errors {
+        result.reason = Some("decoding_errors");
+    }
+    result
+}
 /// Capture the decisions from the same policy bytes used by admission.
 pub(crate) fn capture_robots(
     url: &Url,
@@ -264,6 +299,10 @@ pub(crate) fn capture_robots(
         .as_array_mut()
         .unwrap()
         .push(serde_json::to_value(soft_404(page, response)).unwrap());
+    value["collectors"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::to_value(resource_references(url, page, response)).unwrap());
     value["omissions"]
         .as_array_mut()
         .unwrap()
@@ -275,7 +314,7 @@ pub(crate) fn capture_robots(
     value
 }
 pub(crate) fn budget_omission(url: &str) -> Value {
-    let mut value = json!({"version": 1, "collectors": [unavailable("html_occurrences", "run_byte_limit"), unavailable("graph", "run_byte_limit"), unavailable("resource", "run_byte_limit"), unavailable("robots", "run_byte_limit"), unavailable("http_occurrences", "run_byte_limit"), unavailable("effective_indexing", "run_byte_limit"), unavailable("soft_404", "run_byte_limit")], "omissions": ["http_occurrences_raw_headers_unavailable", "robots_provenance_not_captured", "sitemap_not_captured"]});
+    let mut value = json!({"version": 1, "collectors": [unavailable("html_occurrences", "run_byte_limit"), unavailable("graph", "run_byte_limit"), unavailable("resource", "run_byte_limit"), unavailable("robots", "run_byte_limit"), unavailable("http_occurrences", "run_byte_limit"), unavailable("effective_indexing", "run_byte_limit"), unavailable("soft_404", "run_byte_limit"), unavailable("resource_references", "run_byte_limit")], "omissions": ["http_occurrences_raw_headers_unavailable", "robots_provenance_not_captured", "sitemap_not_captured"]});
     value["url"] = Value::Null;
     value["url_omission"] = json!("run_byte_limit");
     value["url_sha256"] = json!(crate::model::digest(url.as_bytes()));
@@ -285,6 +324,41 @@ pub(crate) fn budget_omission(url: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn references_expose_limits_and_missing_sources() {
+        let url = Url::parse("https://example.test/").unwrap();
+        let page = Page {
+            status: Some(200),
+            content_type: "text/html".into(),
+            ..Page::default()
+        };
+        assert_eq!(
+            resource_references(&url, &page, None).reason,
+            Some("response_unavailable")
+        );
+        let response = Response {
+            status: 200,
+            headers: Default::default(),
+            local_http_occurrences: None,
+            body: format!("<img src='{}'>", "x".repeat(2049)).into_bytes(),
+            ttfb_ms: 0,
+        };
+        let partial = resource_references(&url, &page, Some(&response));
+        assert_eq!(partial.state, "partial");
+        assert_eq!(partial.data.unwrap()["complete"], false);
+        let large = Response {
+            body: "<img src='a'>".repeat(2000).into_bytes(),
+            ..response
+        };
+        assert_eq!(
+            resource_references(&url, &page, Some(&large)).reason,
+            Some("collector_byte_limit")
+        );
+        assert_eq!(
+            budget_omission(url.as_str())["collectors"][7]["reason"],
+            "run_byte_limit"
+        );
+    }
     #[test]
     fn detector_respects_source_and_collector_limits() {
         let page = Page {
