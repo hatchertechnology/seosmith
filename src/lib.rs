@@ -1,3 +1,5 @@
+extern crate self as seosmith;
+
 pub mod api;
 pub mod audit;
 pub mod collection_evidence;
@@ -33,3 +35,6 @@ pub mod graph_evidence;
 pub mod resource_evidence;
 
 mod local_checkpoint;
+
+/// Experimental versioned content detector.
+pub mod s06_detector;

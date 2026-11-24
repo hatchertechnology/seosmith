@@ -61,6 +61,42 @@ fn observed<T: Serialize>(collector: &'static str, value: &T, partial: bool) -> 
         data: Some(data),
     }
 }
+fn soft_404(page: &Page, response: Option<&Response>) -> Observation {
+    let Some(response) = response else {
+        return unavailable(
+            "soft_404",
+            if page.blocked_by_robots {
+                "blocked_by_robots"
+            } else {
+                "response_unavailable"
+            },
+        );
+    };
+    let result = crate::s06_detector::soft_404(&crate::s06_detector::Source {
+        bytes: Some(&response.body),
+        status: Some(response.status),
+        content_type: &page.content_type,
+        complete: true,
+    });
+    let decision = match result.decision {
+        crate::s06_detector::Decision::Candidate => "candidate",
+        crate::s06_detector::Decision::NoCandidate => "no_candidate",
+        crate::s06_detector::Decision::Unknown => "unknown",
+    };
+    let evidence = result.evidence.map(|e| {
+        json!({
+            "source_sha256": e.source_sha256, "main_sha256": e.main_sha256,
+            "title": e.title, "h1": e.h1, "excerpt": e.excerpt,
+            "template_fraction": e.template_fraction
+        })
+    });
+    observed(
+        "soft_404",
+        &json!({"semantics": crate::s06_detector::SEMANTICS,
+        "decision": decision, "reason": result.reason, "evidence": evidence}),
+        false,
+    )
+}
 /// The collector set is fixed for every page, including unavailable sources.
 pub(crate) fn capture(url: &Url, page: &Page, response: Option<&Response>) -> Value {
     let (html, graph, resource) = if let Some(response) = response {
@@ -98,7 +134,11 @@ pub(crate) fn capture(url: &Url, page: &Page, response: Option<&Response>) -> Va
             unavailable("resource", reason),
         )
     };
-    let mut value = json!({"version": 1, "collectors": [html, graph, resource], "omissions": ["http_occurrences_raw_headers_unavailable", "robots_provenance_not_captured", "sitemap_not_captured", "content_detector_not_integrated"]});
+    let mut value = json!({"version": 1, "collectors": [html, graph, resource], "omissions": ["http_occurrences_raw_headers_unavailable", "robots_provenance_not_captured", "sitemap_not_captured"]});
+    value["collectors"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::to_value(soft_404(page, response)).unwrap());
     set_url_identity(&mut value, url.as_str());
     value
 }
@@ -111,6 +151,7 @@ pub(crate) fn capture_robots(
     source: &str,
 ) -> Value {
     let mut value = capture(url, page, response);
+    let detector = value["collectors"].as_array_mut().unwrap().pop().unwrap();
     let decisions: Vec<_> = [
         "Seosmith",
         "Googlebot",
@@ -212,6 +253,7 @@ pub(crate) fn capture_robots(
         .as_array_mut()
         .unwrap()
         .push(serde_json::to_value(indexing).unwrap());
+    value["collectors"].as_array_mut().unwrap().push(detector);
     value["omissions"]
         .as_array_mut()
         .unwrap()
@@ -223,7 +265,7 @@ pub(crate) fn capture_robots(
     value
 }
 pub(crate) fn budget_omission(url: &str) -> Value {
-    let mut value = json!({"version": 1, "collectors": [unavailable("html_occurrences", "run_byte_limit"), unavailable("graph", "run_byte_limit"), unavailable("resource", "run_byte_limit"), unavailable("robots", "run_byte_limit"), unavailable("http_occurrences", "run_byte_limit"), unavailable("effective_indexing", "run_byte_limit")], "omissions": ["http_occurrences_raw_headers_unavailable", "robots_provenance_not_captured", "sitemap_not_captured", "content_detector_not_integrated"]});
+    let mut value = json!({"version": 1, "collectors": [unavailable("html_occurrences", "run_byte_limit"), unavailable("graph", "run_byte_limit"), unavailable("resource", "run_byte_limit"), unavailable("robots", "run_byte_limit"), unavailable("http_occurrences", "run_byte_limit"), unavailable("effective_indexing", "run_byte_limit"), unavailable("soft_404", "run_byte_limit")], "omissions": ["http_occurrences_raw_headers_unavailable", "robots_provenance_not_captured", "sitemap_not_captured"]});
     value["url"] = Value::Null;
     value["url_omission"] = json!("run_byte_limit");
     value["url_sha256"] = json!(crate::model::digest(url.as_bytes()));
@@ -233,6 +275,30 @@ pub(crate) fn budget_omission(url: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn detector_respects_source_and_collector_limits() {
+        let page = Page {
+            content_type: "text/html".into(),
+            ..Page::default()
+        };
+        let missing = soft_404(&page, None);
+        assert_eq!(missing.reason, Some("response_unavailable"));
+        let response = Response {
+            status: 200,
+            headers: std::collections::BTreeMap::new(),
+            local_http_occurrences: None,
+            body: format!("<title>{}</title><main>content</main>", "x".repeat(25_000)).into_bytes(),
+            ttfb_ms: 0,
+        };
+        assert_eq!(
+            soft_404(&page, Some(&response)).reason,
+            Some("collector_byte_limit")
+        );
+        assert_eq!(
+            budget_omission("https://example.test/")["collectors"][6]["reason"],
+            "run_byte_limit"
+        );
+    }
     #[test]
     fn indexing_preserves_unknown_when_headers_are_missing_invalid_or_limited() {
         use reqwest::header::{HeaderMap, HeaderValue};
