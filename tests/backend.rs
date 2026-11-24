@@ -644,7 +644,7 @@ async fn local_crawl_persists_typed_evidence_across_reopen_without_delivery() {
     for (url, value) in rows {
         let value: serde_json::Value = serde_json::from_str(&value).unwrap();
         assert_eq!(value["capture"]["url"], url);
-        assert_eq!(value["capture"]["collectors"].as_array().unwrap().len(), 7);
+        assert_eq!(value["capture"]["collectors"].as_array().unwrap().len(), 8);
         assert_eq!(value["capture"]["collectors"][3]["collector"], "robots");
         if url.ends_with("/private") {
             assert_eq!(
