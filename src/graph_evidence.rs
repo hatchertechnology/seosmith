@@ -166,6 +166,25 @@ pub struct GraphNode {
     pub unique_inlinks: usize,
     pub navigation_distance: Option<usize>,
     pub reachability: &'static str,
+    /// Page-level followability from retained directive evidence.
+    pub page_follow: &'static str,
+    /// Retained sitemap membership, kept separate from navigation.
+    pub sitemap_listed: &'static str,
+    /// Retained canonical-target declaration evidence, not discovery causation.
+    pub canonical_target: &'static str,
+}
+/// Retained evidence about one supplied page, separate from its link occurrences.
+#[derive(Clone, Debug, Default)]
+pub struct PageEvidence {
+    /// `Some(true)` retained directives permit following this page's links;
+    /// `Some(false)` a page-level restriction; `None` unknown or not retained.
+    pub page_follow: Option<bool>,
+    /// `Some(true)` the URL appears in retained sitemap evidence. Absence stays
+    /// unknown because sitemap coverage is not proven here.
+    pub sitemap_listed: Option<bool>,
+    /// `Some(true)` retained complete canonical evidence names this URL;
+    /// `Some(false)` every conclusive retained declaration names another URL.
+    pub canonical_target: Option<bool>,
 }
 /// Navigation distances use only observed followable links, never discovery depth.
 /// The seed must exactly match a fragment-free page URL.
@@ -173,6 +192,51 @@ pub fn graph(
     seed: &str,
     pages: &[LocalPageEvidence],
     coverage: &GraphCoverageInput,
+) -> Result<Vec<GraphNode>, DuplicatePageUrl> {
+    graph_impl(seed, pages, coverage, None)
+}
+/// Navigation with retained page-level evidence. Unlike `graph`, a supplied page
+/// with no conclusive followability is treated conservatively: paths through it
+/// cannot establish certain reachability and downstream states stay unknown.
+pub fn graph_with_evidence(
+    seed: &str,
+    pages: &[LocalPageEvidence],
+    coverage: &GraphCoverageInput,
+    evidence: &BTreeMap<String, PageEvidence>,
+) -> Result<Vec<GraphNode>, DuplicatePageUrl> {
+    graph_impl(seed, pages, coverage, Some(evidence))
+}
+fn forward(
+    by_url: &BTreeMap<&str, &LocalPageEvidence>,
+    seed: &str,
+    can_traverse: impl Fn(&str) -> bool,
+) -> BTreeMap<String, usize> {
+    let mut distances = BTreeMap::new();
+    if !by_url.contains_key(seed) {
+        return distances;
+    }
+    distances.insert(seed.to_owned(), 0usize);
+    let mut queue = VecDeque::from([seed]);
+    while let Some(current) = queue.pop_front() {
+        let d = distances[current];
+        if !can_traverse(current) {
+            continue;
+        }
+        for link in &by_url[current].links {
+            let target = link.fetch_url.as_str();
+            if link.followable && by_url.contains_key(target) && !distances.contains_key(target) {
+                distances.insert(target.to_owned(), d + 1);
+                queue.push_back(target);
+            }
+        }
+    }
+    distances
+}
+fn graph_impl(
+    seed: &str,
+    pages: &[LocalPageEvidence],
+    coverage: &GraphCoverageInput,
+    evidence: Option<&BTreeMap<String, PageEvidence>>,
 ) -> Result<Vec<GraphNode>, DuplicatePageUrl> {
     let by_url = unique_pages(pages)?;
     let coverage_complete = graph_coverage(coverage).complete
@@ -189,39 +253,55 @@ pub fn graph(
             }
         }
     }
-    let mut distances = BTreeMap::new();
-    let mut queue = VecDeque::new();
-    if by_url.contains_key(seed) {
-        distances.insert(seed, 0usize);
-        queue.push_back(seed);
-    }
-    while let Some(current) = queue.pop_front() {
-        let d = distances[current];
-        for link in &by_url[current].links {
-            let target = link.fetch_url.as_str();
-            if link.followable && by_url.contains_key(target) && !distances.contains_key(target) {
-                distances.insert(target, d + 1);
-                queue.push_back(target);
-            }
-        }
-    }
+    // No evidence means the legacy link-level-only contract: observed followable
+    // links are navigable and page-level followability is not evaluated.
+    let follow_of = |url: &str| -> Option<bool> {
+        evidence.map_or(Some(true), |map| {
+            map.get(url).and_then(|item| item.page_follow)
+        })
+    };
+    let distances = forward(&by_url, seed, |url| follow_of(url) == Some(true));
+    // Over-approximate reachability when page-level followability is unknown but
+    // a page-level restriction or link-level nofollow is not observed.
+    let possible = evidence.map_or_else(BTreeMap::new, |_| {
+        forward(&by_url, seed, |url| follow_of(url) != Some(false))
+    });
     Ok(pages
         .iter()
         .map(|p| {
-            let distance = distances.get(p.url.as_str()).copied();
+            let url = p.url.as_str();
+            let distance = distances.get(url).copied();
+            let reachability = if distance.is_some() {
+                "reachable"
+            } else if possible.contains_key(url) {
+                "unknown"
+            } else if coverage_complete
+                && by_url.contains_key(seed)
+                && pages.iter().all(|p| p.extraction_complete)
+            {
+                "not_observed_reachable"
+            } else {
+                "unknown"
+            };
+            let item = evidence.and_then(|map| map.get(url));
             GraphNode {
                 url: p.url.clone(),
-                unique_inlinks: incoming.get(p.url.as_str()).map_or(0, BTreeSet::len),
+                unique_inlinks: incoming.get(url).map_or(0, BTreeSet::len),
                 navigation_distance: distance,
-                reachability: if distance.is_some() {
-                    "reachable"
-                } else if coverage_complete
-                    && by_url.contains_key(seed)
-                    && pages.iter().all(|p| p.extraction_complete)
-                {
-                    "not_observed_reachable"
-                } else {
-                    "unknown"
+                reachability,
+                page_follow: match item.and_then(|i| i.page_follow) {
+                    Some(true) => "followable",
+                    Some(false) => "restricted",
+                    None => "unknown",
+                },
+                sitemap_listed: match item.and_then(|i| i.sitemap_listed) {
+                    Some(true) => "listed",
+                    _ => "unknown",
+                },
+                canonical_target: match item.and_then(|i| i.canonical_target) {
+                    Some(true) => "declared",
+                    Some(false) => "not_declared",
+                    None => "unknown",
                 },
             }
         })
@@ -277,6 +357,19 @@ pub struct CanonicalVariantLink {
     pub link_ordinal: usize,
     pub target: String,
     pub declared_canonical: String,
+    /// Retained declaration origin, for example `html_head_link`.
+    pub declaration_source: String,
+    /// Evidence semantics version for the declaration origin.
+    pub declaration_version: u8,
+}
+/// One conclusive canonical declaration retained for a supplied page. Only emitted
+/// when retained evidence resolves a single target, never as validated truth.
+#[derive(Clone, Debug)]
+pub struct CanonicalDeclaration {
+    pub page: String,
+    pub declared_canonical: String,
+    pub declaration_source: String,
+    pub declaration_version: u8,
 }
 /// Reports observed links to fetched pages declaring a different canonical; not a validation of that canonical.
 pub fn canonical_variant_links(
@@ -315,6 +408,51 @@ pub fn canonical_variant_links(
                             link_ordinal: ordinal,
                             target: link.fetch_url.clone(),
                             declared_canonical: (*target).into(),
+                            declaration_source: "model_page".into(),
+                            declaration_version: 1,
+                        })
+                })
+        })
+        .collect())
+}
+/// Reports observed links whose retained target declares a different canonical.
+/// A page that names its own URL is a retained declaration, but a self-reference
+/// is not a variant link and contributes no entry here. Duplicate local pages or
+/// duplicate non-self declaration pages require caller reconciliation.
+pub fn saved_canonical_variant_links(
+    local: &[LocalPageEvidence],
+    declarations: &[CanonicalDeclaration],
+) -> Result<Vec<CanonicalVariantLink>, DuplicatePageUrl> {
+    unique_pages(local)?;
+    let mut by_page = BTreeMap::new();
+    for declaration in declarations {
+        if declaration.declared_canonical == declaration.page {
+            continue;
+        }
+        if by_page
+            .insert(declaration.page.as_str(), declaration)
+            .is_some()
+        {
+            return Err(DuplicatePageUrl(declaration.page.clone()));
+        }
+    }
+    Ok(local
+        .iter()
+        .flat_map(|source| {
+            source
+                .links
+                .iter()
+                .enumerate()
+                .filter_map(|(ordinal, link)| {
+                    by_page
+                        .get(link.fetch_url.as_str())
+                        .map(|declaration| CanonicalVariantLink {
+                            source: source.url.clone(),
+                            link_ordinal: ordinal,
+                            target: link.fetch_url.clone(),
+                            declared_canonical: declaration.declared_canonical.clone(),
+                            declaration_source: declaration.declaration_source.clone(),
+                            declaration_version: declaration.declaration_version,
                         })
                 })
         })

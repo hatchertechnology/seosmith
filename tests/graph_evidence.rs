@@ -319,3 +319,227 @@ fn truncated_accessible_names_mark_extraction_partial() {
     assert!(!long.extraction_complete);
     assert_eq!(long.links[0].accessible_name.chars().count(), 256);
 }
+
+fn complete_coverage(pages: &[LocalPageEvidence]) -> GraphCoverageInput {
+    GraphCoverageInput {
+        discovery_complete: Some(true),
+        expected_pages: Some(pages.len()),
+        observed_pages: pages.len(),
+        unavailable_pages: 0,
+        truncated_pages: 0,
+        omitted_records: Some(0),
+        comparisons_complete: Some(true),
+    }
+}
+
+#[test]
+fn page_level_followability_gates_navigation_conservatively() {
+    use seosmith::graph_evidence::{PageEvidence, graph_with_evidence};
+    use std::collections::BTreeMap;
+    let pages = [
+        page("/", "<a href='/a'>a</a>"),
+        page("/a", "<a href='/b'>b</a>"),
+        page("/b", ""),
+    ];
+    let evidence = BTreeMap::from([
+        (
+            "https://example.test/".to_owned(),
+            PageEvidence {
+                page_follow: Some(true),
+                ..Default::default()
+            },
+        ),
+        (
+            "https://example.test/a".to_owned(),
+            PageEvidence {
+                page_follow: Some(false),
+                ..Default::default()
+            },
+        ),
+        (
+            "https://example.test/b".to_owned(),
+            PageEvidence {
+                page_follow: Some(true),
+                ..Default::default()
+            },
+        ),
+    ]);
+    let nodes = graph_with_evidence(
+        "https://example.test/",
+        &pages,
+        &complete_coverage(&pages),
+        &evidence,
+    )
+    .unwrap();
+    assert_eq!(nodes[0].page_follow, "followable");
+    assert_eq!(nodes[1].navigation_distance, Some(1));
+    assert_eq!(nodes[1].reachability, "reachable");
+    // A conclusive page-level restriction blocks the only path, so complete
+    // coverage can establish that /b was not reachable by observed navigation.
+    assert_eq!(nodes[2].page_follow, "followable");
+    assert_eq!(nodes[2].navigation_distance, None);
+    assert_eq!(nodes[2].reachability, "not_observed_reachable");
+    // Unknown page-level followability cannot establish either direction.
+    let evidence = BTreeMap::from([
+        (
+            "https://example.test/".to_owned(),
+            PageEvidence {
+                page_follow: Some(true),
+                ..Default::default()
+            },
+        ),
+        (
+            "https://example.test/a".to_owned(),
+            PageEvidence {
+                page_follow: None,
+                ..Default::default()
+            },
+        ),
+    ]);
+    let nodes = graph_with_evidence(
+        "https://example.test/",
+        &pages,
+        &complete_coverage(&pages),
+        &evidence,
+    )
+    .unwrap();
+    assert_eq!(nodes[1].reachability, "reachable");
+    assert_eq!(nodes[2].navigation_distance, None);
+    assert_eq!(nodes[2].reachability, "unknown");
+}
+
+#[test]
+fn retained_evidence_separates_discovery_from_navigation() {
+    use seosmith::graph_evidence::{
+        CanonicalDeclaration, PageEvidence, graph_with_evidence, saved_canonical_variant_links,
+    };
+    use std::collections::BTreeMap;
+    let pages = [
+        page("/", "<a href='/variant'>v</a>"),
+        page("/variant", ""),
+        page("/listed", ""),
+    ];
+    let evidence = BTreeMap::from([
+        (
+            "https://example.test/".to_owned(),
+            PageEvidence {
+                page_follow: Some(true),
+                canonical_target: Some(false),
+                ..Default::default()
+            },
+        ),
+        (
+            "https://example.test/variant".to_owned(),
+            PageEvidence {
+                page_follow: Some(true),
+                sitemap_listed: Some(true),
+                canonical_target: Some(true),
+            },
+        ),
+        (
+            "https://example.test/listed".to_owned(),
+            PageEvidence {
+                page_follow: Some(true),
+                sitemap_listed: Some(true),
+                canonical_target: None,
+            },
+        ),
+    ]);
+    let nodes = graph_with_evidence(
+        "https://example.test/",
+        &pages,
+        &complete_coverage(&pages),
+        &evidence,
+    )
+    .unwrap();
+    let variant = nodes
+        .iter()
+        .find(|node| node.url.ends_with("/variant"))
+        .unwrap();
+    assert_eq!(variant.navigation_distance, Some(1));
+    assert_eq!(variant.sitemap_listed, "listed");
+    assert_eq!(variant.canonical_target, "declared");
+    let listed = nodes
+        .iter()
+        .find(|node| node.url.ends_with("/listed"))
+        .unwrap();
+    assert_eq!(listed.navigation_distance, None);
+    assert_eq!(listed.sitemap_listed, "listed");
+    assert_eq!(listed.canonical_target, "unknown");
+    let declarations = vec![CanonicalDeclaration {
+        page: "https://example.test/variant".to_owned(),
+        declared_canonical: "https://example.test/canonical".to_owned(),
+        declaration_source: "html_head_link".to_owned(),
+        declaration_version: 1,
+    }];
+    let links = saved_canonical_variant_links(&pages, &declarations).unwrap();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].source, "https://example.test/");
+    assert_eq!(links[0].link_ordinal, 0);
+    assert_eq!(links[0].target, "https://example.test/variant");
+    assert_eq!(
+        links[0].declared_canonical,
+        "https://example.test/canonical"
+    );
+    assert_eq!(links[0].declaration_source, "html_head_link");
+    assert_eq!(links[0].declaration_version, 1);
+}
+
+#[test]
+fn saved_canonical_variants_reject_duplicate_declarations() {
+    use seosmith::graph_evidence::{CanonicalDeclaration, saved_canonical_variant_links};
+    let source = page("/", "<a href='/variant'>link</a>");
+    let declaration = CanonicalDeclaration {
+        page: "https://example.test/variant".to_owned(),
+        declared_canonical: "https://example.test/canonical".to_owned(),
+        declaration_source: "html_head_link".to_owned(),
+        declaration_version: 1,
+    };
+    assert_eq!(
+        saved_canonical_variant_links(
+            std::slice::from_ref(&source),
+            &[declaration.clone(), declaration]
+        )
+        .unwrap_err(),
+        DuplicatePageUrl("https://example.test/variant".to_owned())
+    );
+}
+
+#[test]
+fn self_canonical_declaration_is_not_a_variant_link() {
+    use seosmith::graph_evidence::{CanonicalDeclaration, saved_canonical_variant_links};
+    // A page that names itself is a retained declaration; the self reference is
+    // not a variant link even though it is conclusive declaration evidence.
+    let self_page = page("/self", "<a href='/self'>self</a>");
+    let self_declaration = CanonicalDeclaration {
+        page: "https://example.test/self".to_owned(),
+        declared_canonical: "https://example.test/self".to_owned(),
+        declaration_source: "html_head_link".to_owned(),
+        declaration_version: 1,
+    };
+    let links = saved_canonical_variant_links(
+        std::slice::from_ref(&self_page),
+        std::slice::from_ref(&self_declaration),
+    )
+    .unwrap();
+    assert!(links.is_empty());
+    // A non-self declaration still produces its variant link.
+    let variant_page = page("/variant", "<a href='/variant'>variant</a>");
+    let variant_declaration = CanonicalDeclaration {
+        page: "https://example.test/variant".to_owned(),
+        declared_canonical: "https://example.test/canonical".to_owned(),
+        declaration_source: "html_head_link".to_owned(),
+        declaration_version: 1,
+    };
+    let links = saved_canonical_variant_links(
+        std::slice::from_ref(&variant_page),
+        &[self_declaration, variant_declaration],
+    )
+    .unwrap();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].target, "https://example.test/variant");
+    assert_eq!(
+        links[0].declared_canonical,
+        "https://example.test/canonical"
+    );
+}
