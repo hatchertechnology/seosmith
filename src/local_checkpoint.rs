@@ -237,11 +237,13 @@ mod tests {
     fn indexing_preserves_unknown_when_headers_are_missing_invalid_or_limited() {
         use reqwest::header::{HeaderMap, HeaderValue};
         let url = Url::parse("https://example.test/").unwrap();
-        let mut page = Page::default();
-        page.content_type = "text/html".into();
+        let page = Page {
+            content_type: "text/html".into(),
+            ..Page::default()
+        };
         let mut response = Response {
             status: 200,
-            headers: Default::default(),
+            headers: std::collections::BTreeMap::new(),
             local_http_occurrences: None,
             body: b"<html></html>".to_vec(),
             ttfb_ms: 0,
