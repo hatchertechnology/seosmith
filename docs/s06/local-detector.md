@@ -10,4 +10,6 @@ Parsing is capped at 256 KiB input and 32 KiB extracted text; excerpts contain a
 
 No existing contracts, feature gates or deployment change in this slice. S14 semantics and compatible receiver/storage/read surfaces remain prerequisites to any separately reviewed producer integration. Deploy readers first, then gate any future producer; rollback disables new emission while retaining readers for stored evidence. No production readiness, live crawling, rendering or emission is claimed.
 
-Run `cargo test --locked --test s06_detector` and `python3 -m unittest discover -s tests/s06 -v`.
+The ordinary `seosmith saved-pair` CLI reuses this detector. Saved checkpoints can only establish identical source bytes because main text is not retained; callers that need full near-duplicate similarity supply retained HTML files explicitly. See `docs/s06/saved-pair.md` for inputs, provenance, bounds and unknowns.
+
+Run `cargo test --locked --test s06_detector`, `cargo test --locked --test s06_saved_pair`, `cargo test --locked --bin seosmith saved_pair` and `python3 -m unittest discover -s tests/s06 -v`.
