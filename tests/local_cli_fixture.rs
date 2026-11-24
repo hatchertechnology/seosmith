@@ -51,7 +51,7 @@ async fn policy_cli_fixtures_upgrade_and_reopen_without_delivery_changes() -> an
     let mut request = report.request;
     request.request_id = Uuid::new_v4();
     request.url = "https://fixture.invalid/".parse()?;
-    request.max_pages = 6;
+    request.max_pages = 9;
     request.max_resources = 0;
     request.max_duration_seconds = 30;
     request.delay_ms = 1000;
@@ -73,7 +73,7 @@ async fn policy_cli_fixtures_upgrade_and_reopen_without_delivery_changes() -> an
         ),
         (
             "https://fixture.invalid/",
-            serde_json::json!({"status":200,"header_fields":[["content-type","text/html"],["x-robots-tag","Googlebot: noindex"],["x-robots-tag","GPTBot: noindex"]],"body":format!("<html><head><meta name='robots' content='index'><link rel='canonical' href='/'></head><body><a href='/next'>{}</a><a href='/private'>Private</a><a href='/candidate'>Candidate</a><a href='/loading'>Loading</a></body></html>", "n".repeat(300))}),
+            serde_json::json!({"status":200,"header_fields":[["content-type","text/html"],["x-robots-tag","Googlebot: noindex"],["x-robots-tag","GPTBot: noindex"]],"body":format!("<html><head><meta name='robots' content='index'><link rel='canonical' href='/'></head><body><a href='/next'>{}</a><a href='/private'>Private</a><a href='/candidate'>Candidate</a><a href='/loading'>Loading</a><a href='/plain'>Plain</a><a href='/decode'>Decode</a><a href='/large'>Large</a></body></html>", "n".repeat(300))}),
         ),
         (
             "https://fixture.invalid/next",
@@ -86,6 +86,18 @@ async fn policy_cli_fixtures_upgrade_and_reopen_without_delivery_changes() -> an
         (
             "https://fixture.invalid/loading",
             serde_json::json!({"status":200,"headers":{"content-type":"text/html"},"body":"<html><body><main>Loading...</main></body></html>"}),
+        ),
+        (
+            "https://fixture.invalid/plain",
+            serde_json::json!({"status":200,"headers":{"content-type":"text/plain"},"body":"Plain text"}),
+        ),
+        (
+            "https://fixture.invalid/decode",
+            serde_json::json!({"status":200,"headers":{"content-type":"text/html; charset=utf-16le"},"body":"x"}),
+        ),
+        (
+            "https://fixture.invalid/large",
+            serde_json::json!({"status":200,"headers":{"content-type":"text/html"},"body":"x".repeat(256 * 1024 + 1)}),
         ),
     ]);
     std::fs::write(&fixture_path, serde_json::to_vec(&fixtures)?)?;
@@ -109,14 +121,14 @@ async fn policy_cli_fixtures_upgrade_and_reopen_without_delivery_changes() -> an
     );
     let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(result["request"]["request_id"], id);
-    assert_eq!(result["pages"].as_array().unwrap().len(), 5);
+    assert_eq!(result["pages"].as_array().unwrap().len(), 8);
     let store = Store::open(db.to_str().unwrap()).await?;
     let captures: Vec<(String, String)> =
         sqlx::query_as("SELECT url,evidence FROM local_page_evidence WHERE job_id=? ORDER BY url")
             .bind(&id)
             .fetch_all(&store.0)
             .await?;
-    assert_eq!(captures.len(), 5);
+    assert_eq!(captures.len(), 8);
     for (url, raw) in captures {
         let value: serde_json::Value = serde_json::from_str(&raw)?;
         assert_eq!(value["capture"]["url"], url);
@@ -127,12 +139,33 @@ async fn policy_cli_fixtures_upgrade_and_reopen_without_delivery_changes() -> an
             assert_eq!(detector["reason"], "blocked_by_robots");
         } else {
             assert_eq!(detector["data"]["semantics"], "s06-local-detector-2");
-            if url.ends_with("/candidate") {
+            if let Some(reason) = [
+                ("/plain", "not HTML"),
+                ("/decode", "decoding errors"),
+                ("/large", "source exceeds byte limit"),
+            ]
+            .iter()
+            .find_map(|(suffix, reason)| url.ends_with(suffix).then_some(reason))
+            {
+                assert_eq!(detector["state"], "unavailable");
+                assert_eq!(detector["reason"], *reason);
+                assert_eq!(detector["data"]["decision"], "unknown");
+                assert_eq!(detector["data"]["reason"], *reason);
+                assert!(detector["data"]["evidence"].is_null());
+            } else if url.ends_with("/candidate") {
+                assert_eq!(detector["state"], "observed");
                 assert_eq!(detector["data"]["decision"], "candidate");
                 assert_eq!(detector["data"]["evidence"]["h1"], "Page not found");
             } else if url.ends_with("/next") {
+                assert_eq!(detector["state"], "observed");
                 assert_eq!(detector["data"]["decision"], "no_candidate");
             } else if url.ends_with("/loading") {
+                assert_eq!(detector["state"], "partial");
+                assert_eq!(
+                    detector["reason"],
+                    "main content or rendered outcome unavailable"
+                );
+                assert!(detector["data"]["evidence"].is_object());
                 assert_eq!(detector["data"]["decision"], "unknown");
                 assert_eq!(
                     detector["data"]["reason"],

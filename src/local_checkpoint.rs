@@ -83,6 +83,13 @@ fn soft_404(page: &Page, response: Option<&Response>) -> Observation {
         crate::s06_detector::Decision::NoCandidate => "no_candidate",
         crate::s06_detector::Decision::Unknown => "unknown",
     };
+    let state = if result.evidence.is_none() {
+        "unavailable"
+    } else if result.decision == crate::s06_detector::Decision::Unknown {
+        "partial"
+    } else {
+        "observed"
+    };
     let evidence = result.evidence.map(|e| {
         json!({
             "source_sha256": e.source_sha256, "main_sha256": e.main_sha256,
@@ -90,12 +97,17 @@ fn soft_404(page: &Page, response: Option<&Response>) -> Observation {
             "template_fraction": e.template_fraction
         })
     });
-    observed(
+    let mut observation = observed(
         "soft_404",
         &json!({"semantics": crate::s06_detector::SEMANTICS,
         "decision": decision, "reason": result.reason, "evidence": evidence}),
         false,
-    )
+    );
+    if observation.data.is_some() {
+        observation.state = state;
+        observation.reason = (state != "observed").then_some(result.reason);
+    }
+    observation
 }
 /// The collector set is fixed for every page, including unavailable sources.
 pub(crate) fn capture(url: &Url, page: &Page, response: Option<&Response>) -> Value {
@@ -290,6 +302,32 @@ mod tests {
         };
         assert_eq!(
             soft_404(&page, Some(&response)).reason,
+            Some("collector_byte_limit")
+        );
+        let text_limited = Response {
+            body: format!("<main>{}</main>", "x".repeat(32 * 1024 + 1)).into_bytes(),
+            status: 200,
+            headers: std::collections::BTreeMap::new(),
+            local_http_occurrences: None,
+            ttfb_ms: 0,
+        };
+        let unavailable = soft_404(&page, Some(&text_limited));
+        assert_eq!(unavailable.state, "unavailable");
+        assert_eq!(unavailable.reason, Some("text exceeds limit"));
+        assert_eq!(
+            unavailable.data.unwrap()["semantics"],
+            crate::s06_detector::SEMANTICS
+        );
+        let partial_over_cap = Response {
+            body: format!(
+                "<title>{}</title><main>Loading...</main>",
+                "x".repeat(25_000)
+            )
+            .into_bytes(),
+            ..response
+        };
+        assert_eq!(
+            soft_404(&page, Some(&partial_over_cap)).reason,
             Some("collector_byte_limit")
         );
         assert_eq!(
