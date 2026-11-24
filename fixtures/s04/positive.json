@@ -1,0 +1,342 @@
+{
+  "schema_version": 1,
+  "engine_version": "0.2.0",
+  "ruleset_version": "2026-11-01.1",
+  "request": {
+    "request_id": "00000000-0000-4000-8000-0000000000a4",
+    "website_id": "00000000-0000-4000-8000-000000000002",
+    "binding_generation": 1,
+    "url": "https://shop.example.com/",
+    "max_pages": 500,
+    "max_duration_seconds": 1800,
+    "delay_ms": 1000,
+    "check_external_links": false,
+    "max_resources": 500
+  },
+  "started_at": "2026-11-23T12:00:00Z",
+  "finished_at": "2026-11-23T12:01:00Z",
+  "outcome": "completed",
+  "stop_reason": "frontier_exhausted",
+  "coverage_complete": true,
+  "pages": [
+    {
+      "url": "https://shop.example.com/product",
+      "depth": 0,
+      "in_sitemap": false,
+      "status": 200,
+      "error": null,
+      "blocked_by_robots": false,
+      "content_type": "text/html",
+      "bytes": 0,
+      "ttfb_ms": 0,
+      "title": "",
+      "description": "",
+      "language": "",
+      "robots": "",
+      "canonical": null,
+      "header_canonical": null,
+      "redirect": null,
+      "headings": [
+        [
+          1,
+          "Blue Widget"
+        ]
+      ],
+      "links": [],
+      "images": [],
+      "alternates": [],
+      "body_hash": "",
+      "words": 0,
+      "dom_nodes": 0,
+      "flags": [],
+      "is_resource": false,
+      "encoding": "utf-8",
+      "language_source": "",
+      "refresh_delay": null,
+      "refresh_target": null,
+      "relationships": [],
+      "structured_data": [
+        {
+          "format": "json_ld",
+          "data": {
+            "@context": "https://schema.org",
+            "@type": "Product",
+            "name": "Blue Widget",
+            "image": "/blue.png",
+            "description": "A blue widget",
+            "offers": {
+              "@type": "Offer",
+              "price": 19.99,
+              "priceCurrency": "USD"
+            }
+          },
+          "error": null
+        }
+      ],
+      "open_graph": {},
+      "twitter": {},
+      "extraction_truncated": false
+    },
+    {
+      "url": "https://shop.example.com/blog/clean",
+      "depth": 0,
+      "in_sitemap": false,
+      "status": 200,
+      "error": null,
+      "blocked_by_robots": false,
+      "content_type": "text/html",
+      "bytes": 0,
+      "ttfb_ms": 0,
+      "title": "",
+      "description": "",
+      "language": "",
+      "robots": "",
+      "canonical": null,
+      "header_canonical": null,
+      "redirect": null,
+      "headings": [
+        [
+          1,
+          "How to clean"
+        ]
+      ],
+      "links": [],
+      "images": [],
+      "alternates": [],
+      "body_hash": "",
+      "words": 0,
+      "dom_nodes": 0,
+      "flags": [],
+      "is_resource": false,
+      "encoding": "utf-8",
+      "language_source": "",
+      "refresh_delay": null,
+      "refresh_target": null,
+      "relationships": [],
+      "structured_data": [
+        {
+          "format": "json_ld",
+          "data": {
+            "@context": "https://schema.org",
+            "@type": "Article",
+            "headline": "How to clean",
+            "image": "/hero.png",
+            "datePublished": "2026-01-01",
+            "dateModified": "2026-01-02",
+            "author": {
+              "@type": "Person",
+              "name": "Jane Doe"
+            }
+          },
+          "error": null
+        }
+      ],
+      "open_graph": {},
+      "twitter": {},
+      "extraction_truncated": false
+    },
+    {
+      "url": "https://shop.example.com/bread",
+      "depth": 0,
+      "in_sitemap": false,
+      "status": 200,
+      "error": null,
+      "blocked_by_robots": false,
+      "content_type": "text/html",
+      "bytes": 0,
+      "ttfb_ms": 0,
+      "title": "",
+      "description": "",
+      "language": "",
+      "robots": "",
+      "canonical": null,
+      "header_canonical": null,
+      "redirect": null,
+      "headings": [
+        [
+          1,
+          "Breadcrumb page"
+        ]
+      ],
+      "links": [],
+      "images": [],
+      "alternates": [],
+      "body_hash": "",
+      "words": 0,
+      "dom_nodes": 0,
+      "flags": [],
+      "is_resource": false,
+      "encoding": "utf-8",
+      "language_source": "",
+      "refresh_delay": null,
+      "refresh_target": null,
+      "relationships": [],
+      "structured_data": [
+        {
+          "format": "json_ld",
+          "data": {
+            "@context": "https://schema.org",
+            "@graph": [
+              {
+                "@type": "BreadcrumbList",
+                "itemListElement": [
+                  {
+                    "@type": "ListItem",
+                    "position": 1,
+                    "name": "Home",
+                    "item": "https://shop.example.com/"
+                  },
+                  {
+                    "@type": "ListItem",
+                    "position": 2,
+                    "item": {
+                      "@id": "#page"
+                    }
+                  }
+                ]
+              },
+              {
+                "@id": "#page",
+                "@type": "WebPage",
+                "name": "Breadcrumb page"
+              }
+            ]
+          },
+          "error": null
+        }
+      ],
+      "open_graph": {},
+      "twitter": {},
+      "extraction_truncated": false
+    },
+    {
+      "url": "https://shop.example.com/store",
+      "depth": 0,
+      "in_sitemap": false,
+      "status": 200,
+      "error": null,
+      "blocked_by_robots": false,
+      "content_type": "text/html",
+      "bytes": 0,
+      "ttfb_ms": 0,
+      "title": "",
+      "description": "",
+      "language": "",
+      "robots": "",
+      "canonical": null,
+      "header_canonical": null,
+      "redirect": null,
+      "headings": [
+        [
+          1,
+          "Our store"
+        ]
+      ],
+      "links": [],
+      "images": [],
+      "alternates": [],
+      "body_hash": "",
+      "words": 0,
+      "dom_nodes": 0,
+      "flags": [],
+      "is_resource": false,
+      "encoding": "utf-8",
+      "language_source": "",
+      "refresh_delay": null,
+      "refresh_target": null,
+      "relationships": [],
+      "structured_data": [
+        {
+          "format": "json_ld",
+          "data": {
+            "@context": "https://schema.org",
+            "@type": "Store",
+            "name": "Example Store",
+            "address": {
+              "@type": "PostalAddress"
+            },
+            "url": "https://shop.example.com/store",
+            "telephone": "+1-555-0100"
+          },
+          "error": null
+        }
+      ],
+      "open_graph": {},
+      "twitter": {},
+      "extraction_truncated": false
+    },
+    {
+      "url": "https://shop.example.com/blue.png",
+      "depth": 0,
+      "in_sitemap": false,
+      "status": 200,
+      "error": null,
+      "blocked_by_robots": false,
+      "content_type": "image/png",
+      "bytes": 0,
+      "ttfb_ms": 0,
+      "title": "",
+      "description": "",
+      "language": "",
+      "robots": "",
+      "canonical": null,
+      "header_canonical": null,
+      "redirect": null,
+      "headings": [],
+      "links": [],
+      "images": [],
+      "alternates": [],
+      "body_hash": "",
+      "words": 0,
+      "dom_nodes": 0,
+      "flags": [],
+      "is_resource": true,
+      "encoding": "utf-8",
+      "language_source": "",
+      "refresh_delay": null,
+      "refresh_target": null,
+      "relationships": [],
+      "structured_data": [],
+      "open_graph": {},
+      "twitter": {},
+      "extraction_truncated": false
+    },
+    {
+      "url": "https://shop.example.com/private",
+      "depth": 0,
+      "in_sitemap": false,
+      "status": null,
+      "error": null,
+      "blocked_by_robots": true,
+      "content_type": "text/html",
+      "bytes": 0,
+      "ttfb_ms": 0,
+      "title": "",
+      "description": "",
+      "language": "",
+      "robots": "",
+      "canonical": null,
+      "header_canonical": null,
+      "redirect": null,
+      "headings": [],
+      "links": [],
+      "images": [],
+      "alternates": [],
+      "body_hash": "",
+      "words": 0,
+      "dom_nodes": 0,
+      "flags": [],
+      "is_resource": false,
+      "encoding": "utf-8",
+      "language_source": "",
+      "refresh_delay": null,
+      "refresh_target": null,
+      "relationships": [],
+      "structured_data": [],
+      "open_graph": {},
+      "twitter": {},
+      "extraction_truncated": false
+    }
+  ],
+  "findings": []
+}
