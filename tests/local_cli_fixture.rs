@@ -532,6 +532,22 @@ async fn saved_graph_reads_real_crawl_without_mutating_store() -> anyhow::Result
         .bind("https://fixture.invalid/next")
         .execute(&pool)
         .await?;
+    for (path, digest_source) in [("hidden", "hidden"), ("private", "other")] {
+        let url = format!("https://fixture.invalid/{path}");
+        let digest_url = format!("https://fixture.invalid/{digest_source}");
+        let marker = serde_json::json!({"capture":{
+            "version":1, "url":null, "url_omission":"run_byte_limit",
+            "url_sha256":seosmith::model::digest(digest_url.as_bytes())
+        }});
+        let changed =
+            sqlx::query("UPDATE local_page_evidence SET evidence=? WHERE job_id=? AND url=?")
+                .bind(marker.to_string())
+                .bind(request.request_id.to_string())
+                .bind(url)
+                .execute(&pool)
+                .await?;
+        assert_eq!(changed.rows_affected(), 1);
+    }
     pool.close().await;
     let output = Command::new(env!("CARGO_BIN_EXE_seosmith"))
         .env_clear()
@@ -555,6 +571,18 @@ async fn saved_graph_reads_real_crawl_without_mutating_store() -> anyhow::Result
             .iter()
             .any(|o| o["reason"] == "duplicate_graph_collector")
     );
+    let omitted = result["omitted"].as_array().unwrap();
+    for (path, reason) in [
+        ("hidden", "run_byte_limit"),
+        ("private", "unsupported_or_unbound_capture"),
+    ] {
+        let url = format!("https://fixture.invalid/{path}");
+        assert!(
+            omitted
+                .iter()
+                .any(|o| o["url"] == url && o["reason"] == reason)
+        );
+    }
     // Exercise the aggregate budget with individually valid, bounded envelopes.
     let pool = SqlitePool::connect_with(
         SqliteConnectOptions::new()

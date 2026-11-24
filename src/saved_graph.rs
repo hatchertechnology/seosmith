@@ -112,6 +112,14 @@ pub async fn run(path: &Path, id: &str) -> Result<()> {
             continue;
         };
         let capture = &value["capture"];
+        if capture["version"].as_u64() == Some(1)
+            && capture.get("url") == Some(&Value::Null)
+            && capture["url_omission"] == "run_byte_limit"
+            && capture["url_sha256"].as_str() == Some(&seosmith::model::digest(url.as_bytes()))
+        {
+            omitted.push(json!({"url":url,"reason":"run_byte_limit"}));
+            continue;
+        }
         let collectors = capture["collectors"].as_array();
         if capture["version"].as_u64() != Some(1)
             || capture["url"].as_str() != Some(&url)
