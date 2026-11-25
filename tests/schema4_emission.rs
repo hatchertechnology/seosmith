@@ -54,7 +54,7 @@ fn fixture_form_stays_evidence_free() -> Result<()> {
 }
 
 #[test]
-fn findings_equal_the_audit_and_policy_population() -> Result<()> {
+fn wire_and_prototype_serialisers_emit_the_same_findings() -> Result<()> {
     for case in CASES {
         let (_, with) = wire(case)?;
         let mut base = fixture_input(case)?;
@@ -132,6 +132,24 @@ async fn store_keeps_the_generated_bytes_and_their_digest() -> Result<()> {
 }
 
 #[tokio::test]
+async fn finish_bytes_requires_the_evidence_contract() -> Result<()> {
+    let (_dir, store) = store().await?;
+    let mut report = fixture_input("complete-missing-h1")?;
+    let id = running_job(&store, &mut report).await?;
+    let bytes = finding_coverage_prototype::generate(&mut report, &AdvisoryPolicy::default())?;
+    let value: Value = serde_json::from_slice(&bytes)?;
+    assert_eq!(value["schema_version"], 4);
+    assert!(value.get("evidence_contract").is_none());
+    assert!(
+        store
+            .finish_bytes(&id, &report.outcome, &bytes)
+            .await
+            .is_err()
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn schema_4_cannot_use_the_reserialising_finish_or_foreign_bytes() -> Result<()> {
     let (_dir, store) = store().await?;
     let mut report = fixture_input("complete-missing-h1")?;
@@ -160,29 +178,35 @@ async fn schema_4_cannot_use_the_reserialising_finish_or_foreign_bytes() -> Resu
     Ok(())
 }
 
-async fn mock_htp(status: StatusCode) -> Result<(url::Url, tokio::task::JoinHandle<()>)> {
-    let app = Router::new().route(
-        "/integrations/seosmith/policy-audits",
-        post(move || async move { (status, "{}") }),
-    );
+async fn mock_htp(
+    status: StatusCode,
+    path: &'static str,
+) -> Result<(url::Url, tokio::task::JoinHandle<()>)> {
+    let app = Router::new().route(path, post(move || async move { (status, "{}") }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let endpoint = format!(
-        "http://{}/integrations/seosmith/policy-audits",
-        listener.local_addr()?
-    )
-    .parse()?;
+    let endpoint = format!("http://{}{path}", listener.local_addr()?).parse()?;
     let handle = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     Ok((endpoint, handle))
 }
 
+const NEW_ROUTE: &str = "/integrations/seosmith/policy-audits";
+const LEGACY_ROUTE: &str = "/integrations/seosmith/audits";
+
 async fn deliver_with(status: StatusCode) -> Result<(String, Option<String>, i64)> {
+    deliver_to(status, NEW_ROUTE).await
+}
+
+async fn deliver_to(
+    status: StatusCode,
+    path: &'static str,
+) -> Result<(String, Option<String>, i64)> {
     let (_dir, store) = store().await?;
     let mut report = fixture_input("complete-missing-h1")?;
     let id = running_job(&store, &mut report).await?;
     let bytes =
         finding_coverage_prototype::generate_wire_v1(&mut report, &AdvisoryPolicy::default())?;
     store.finish_bytes(&id, &report.outcome, &bytes).await?;
-    let (endpoint, server) = mock_htp(status).await?;
+    let (endpoint, server) = mock_htp(status, path).await?;
     Delivery::new(endpoint, "t".repeat(32))?
         .tick(&store)
         .await?;
@@ -201,6 +225,19 @@ async fn htp_422_and_409_are_terminal_with_their_codes() -> Result<()> {
         deliver_with(StatusCode::CONFLICT).await?,
         ("rejected".into(), Some("htp_delivery_conflict".into()), 1)
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn legacy_route_422_and_409_keep_retrying() -> Result<()> {
+    // axum's `Json` extractor answers 422 on the legacy route: never terminal there.
+    for status in [StatusCode::UNPROCESSABLE_ENTITY, StatusCode::CONFLICT] {
+        assert_eq!(
+            deliver_to(status, LEGACY_ROUTE).await?,
+            ("pending".into(), Some("htp_delivery_failed".into()), 1),
+            "{status}"
+        );
+    }
     Ok(())
 }
 

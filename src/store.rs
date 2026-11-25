@@ -537,6 +537,13 @@ impl Store {
                     == Some(id),
             "finish_bytes persists only schema-4 bytes of this job"
         );
+        ensure!(
+            header
+                .pointer("/evidence_contract/version")
+                .and_then(serde_json::Value::as_u64)
+                == Some(1),
+            "finish_bytes requires the schema-4 evidence contract (version 1)"
+        );
         let body = std::str::from_utf8(bytes)?;
         let mode: Option<String> = sqlx::query_scalar("SELECT execution_mode FROM jobs WHERE id=?")
             .bind(id)

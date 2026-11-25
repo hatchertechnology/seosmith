@@ -45,6 +45,10 @@ pub struct Delivery {
     client: Client,
     endpoint: Url,
     token: String,
+    /// True only for the schema 4 route (`.../policy-audits`). The legacy
+    /// `/audits` route can return 422 from axum's `Json` extractor, so there
+    /// 409/422 stay retryable as before.
+    terminal_rejections: bool,
 }
 impl Delivery {
     pub fn new(endpoint: Url, token: String) -> Result<Self> {
@@ -52,6 +56,10 @@ impl Delivery {
             token.len() >= 32,
             "HTP token must be at least 32 characters"
         );
+        let terminal_rejections = endpoint
+            .path()
+            .trim_end_matches('/')
+            .ends_with("/policy-audits");
         Ok(Self {
             client: Client::builder()
                 .redirect(Policy::none())
@@ -61,6 +69,7 @@ impl Delivery {
                 .build()?,
             endpoint,
             token,
+            terminal_rejections,
         })
     }
     pub async fn send(&self, id: &str, body: String, sha: &str) -> Result<()> {
@@ -84,7 +93,9 @@ impl Delivery {
         }
         match response.status() {
             status if status.is_success() => {}
-            status @ (StatusCode::UNPROCESSABLE_ENTITY | StatusCode::CONFLICT) => {
+            status @ (StatusCode::UNPROCESSABLE_ENTITY | StatusCode::CONFLICT)
+                if self.terminal_rejections =>
+            {
                 return Err(HtpTerminal(status).into());
             }
             status => return Err(HtpStatus(status).into()),

@@ -553,6 +553,12 @@ fn loopback_http_allowed(value: &str) -> bool {
         })
 }
 
+async fn fail_logged(store: &Store, id: &str) {
+    if let Err(error) = store.fail(id).await {
+        tracing::error!(run_id=%id, %error, "could not mark the job failed");
+    }
+}
+
 /// Finalise one crawled job. Every generation, cap, equality and evidence error is
 /// converted to a failed job here and returns `Ok(false)`: `process_jobs`
 /// propagates `Err` with `?`, which would stop the worker.
@@ -567,28 +573,27 @@ async fn finalize_job(
         let bytes = match seosmith::finding_coverage_prototype::generate_wire_v1(report, policy) {
             Ok(bytes) => bytes,
             Err(error) => {
-                store.fail(&id).await?;
+                fail_logged(store, &id).await;
                 tracing::error!(run_id=%id, %error, "schema-4 generation failed");
                 return Ok(false);
             }
         };
-        return match store.finish_bytes(&id, &report.outcome, &bytes).await {
-            Ok(()) => Ok(true),
-            Err(error) if error.is::<seosmith::store::ReportTooLarge>() => {
-                store.fail(&id).await?;
-                tracing::error!(run_id=%id, %error, "report finalization failed");
-                Ok(false)
-            }
-            Err(error) => {
-                if store.cancelled(&id).await? {
-                    Ok(false)
-                } else {
-                    store.fail(&id).await?;
+        // Nothing below may return `Err`: that would stop the worker (m-g).
+        return Ok(
+            match store.finish_bytes(&id, &report.outcome, &bytes).await {
+                Ok(()) => true,
+                Err(error) => {
+                    if !error.is::<seosmith::store::ReportTooLarge>()
+                        && store.cancelled(&id).await.unwrap_or(false)
+                    {
+                        return Ok(false);
+                    }
+                    fail_logged(store, &id).await;
                     tracing::error!(run_id=%id, %error, "schema-4 persistence failed");
-                    Ok(false)
+                    false
                 }
-            }
-        };
+            },
+        );
     }
     if v2 && let Err(error) = seosmith::contract::enable_v2(report) {
         store.fail(&report.request.request_id.to_string()).await?;
@@ -640,6 +645,13 @@ mod tests {
             .await?
             .unwrap();
         assert_eq!(failed.state, "failed");
+        // The cause is a size cap (string, report-size or byte limit), not another generation error.
+        let mut again = seosmith::finding_coverage_prototype::fixture_input("complete-missing-h1")?;
+        again.pages[0].title = "x".repeat(5_000_000);
+        let cause = seosmith::finding_coverage_prototype::generate_wire_v1(&mut again, &policy)
+            .unwrap_err()
+            .to_string();
+        assert!(cause.contains("limit") || cause.contains("size"), "{cause}");
         assert!(store.pending().await?.is_none());
         assert!(finalize_job(&store, &mut ok, false, Some(&policy)).await?);
         let (id, body, sha, _) = store.pending().await?.unwrap();

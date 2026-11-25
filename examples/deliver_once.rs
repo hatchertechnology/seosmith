@@ -22,7 +22,8 @@ async fn main() -> Result<()> {
     let token = std::env::var("HTP_INGEST_TOKEN").context("HTP_INGEST_TOKEN is required")?;
     let body = std::fs::read_to_string(path)?;
     let sha = digest(body.as_bytes());
-    // Plain HTTP is allowed here only for local receivers; this example is never shipped.
+    // Plain HTTP is allowed to ANY host here (a dev tool for the local e2e; never shipped,
+    // and not subject to the serve-path loopback-literal gate). Use it only against local receivers.
     let delivery = Delivery::new(service_url(&endpoint, true)?, token)?;
     let id = uuid::Uuid::new_v4().to_string();
     match delivery.send(&id, body, &sha).await {
