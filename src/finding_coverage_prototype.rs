@@ -27,7 +27,7 @@ use crate::{
     policy::AdvisoryPolicy,
     policy_wire_prototype,
 };
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
@@ -368,11 +368,20 @@ pub fn validate_emitted_full_catalogue(value: &Value) -> Result<()> {
 /// unobserved external edge. Public so the generator example and the
 /// reproducibility test share exactly one recipe.
 ///
+/// The base fixture is read from the source tree at run time, not embedded with
+/// `include_str!`: this is a test and generator helper, and an embed would put a
+/// test fixture in the release binary and require it in the Docker build context.
+///
 /// # Errors
-/// Returns a parse error if the embedded base fixture is malformed.
+/// Returns an error if the base fixture is missing or malformed.
 pub fn fixture_input(case: &str) -> Result<Report> {
-    let mut report: Report =
-        serde_json::from_str(include_str!("../fixtures/policies/v3-local-complete.json"))?;
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/fixtures/policies/v3-local-complete.json"
+    );
+    let mut report: Report = serde_json::from_str(
+        &std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?,
+    )?;
     report.schema_version = 1;
     report.policy_guidance = None;
     report.evidence_contract = None;
