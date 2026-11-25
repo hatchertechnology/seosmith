@@ -30,6 +30,10 @@ struct Cli {
     /// Experimental S14 policy JSON; requires compatible H04 display before activation.
     #[arg(long, env = "SEOSMITH_ADVISORY_POLICY")]
     advisory_policy: Option<std::path::PathBuf>,
+    /// Emit production schema-4 (`s14-wire-1`) reports with S01 evidence. Requires
+    /// `--advisory-policy`; incompatible with `--evidence-contract-v2`.
+    #[arg(long, env = "SEOSMITH_POLICY_WIRE_V1", default_value_t = false)]
+    policy_wire_v1: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -134,6 +138,14 @@ async fn main() -> Result<()> {
         .init();
     let cli = Cli::parse();
     ensure!(
+        !(cli.policy_wire_v1 && cli.evidence_contract_v2),
+        "the schema-4 wire carries its own evidence; disable SEOSMITH_EVIDENCE_CONTRACT_V2"
+    );
+    ensure!(
+        !cli.policy_wire_v1 || cli.advisory_policy.is_some(),
+        "--policy-wire-v1 requires --advisory-policy"
+    );
+    ensure!(
         !(cli.evidence_contract_v2 && cli.advisory_policy.is_some()),
         "S14 and S01 cannot be combined until their wire contract is agreed"
     );
@@ -152,8 +164,8 @@ async fn main() -> Result<()> {
         })
         .transpose()?;
     ensure!(
-        !(policy.is_some() && matches!(cli.command, Command::Serve { .. })),
-        "S14 policy reports cannot be delivered until H04 and receiver support are ready"
+        !(policy.is_some() && matches!(cli.command, Command::Serve { .. }) && !cli.policy_wire_v1),
+        "S14 policy reports are delivered only with --policy-wire-v1"
     );
     if let Command::ValidateStructured { ref report } = cli.command {
         ensure!(
@@ -356,35 +368,51 @@ async fn main() -> Result<()> {
             } else {
                 crawler::crawl(&store, &job).await?
             };
+            let mut wire_bytes = None;
             if let Some(policy) = &policy {
-                let result = seosmith::policy::apply_with_evidence(&mut report, policy);
+                // Under --policy-wire-v1 the job stays local-only: this prints the exact
+                // bytes the worker would store and deliver, and delivers nothing.
+                let result = if cli.policy_wire_v1 {
+                    seosmith::finding_coverage_prototype::generate_wire_v1(&mut report, policy)
+                        .map(|bytes| wire_bytes = Some(bytes))
+                } else {
+                    seosmith::policy::apply_with_evidence(&mut report, policy)
+                };
                 if result.is_ok() {
                     store.finish_local_only(&job.request_id.to_string()).await?;
                 } else {
                     store.fail(&job.request_id.to_string()).await?;
                 }
                 result?;
-            } else if !finalize_job(&store, &mut report, cli.evidence_contract_v2).await? {
+            } else if !finalize_job(&store, &mut report, cli.evidence_contract_v2, None).await? {
                 anyhow::bail!("report finalization failed");
             }
-            println!("{}", serde_json::to_string_pretty(&report)?);
+            if let Some(bytes) = wire_bytes {
+                std::io::stdout().write_all(&bytes)?;
+            } else {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            }
         }
         Command::Serve { bind } => {
             let app = App {
                 store: store.clone(),
                 token: secret("SEOSMITH_API_TOKEN")?,
             };
-            let endpoint = service_url(
-                &std::env::var("HTP_INGEST_URL").context("HTP_INGEST_URL is required")?,
-                false,
-            )?;
+            let ingest = std::env::var("HTP_INGEST_URL").context("HTP_INGEST_URL is required")?;
+            let endpoint = service_url(&ingest, loopback_http_allowed(&ingest))?;
             let delivery = Delivery::new(endpoint, secret("HTP_INGEST_TOKEN")?)?;
             let (stop, mut stopped) = watch::channel(false);
             let crawl_store = store.clone();
             let worker_stop = stop.clone();
+            let wire_policy = cli.policy_wire_v1.then(|| policy.clone()).flatten();
             let worker = tokio::spawn(async move {
-                let result =
-                    process_jobs(crawl_store, &mut stopped, cli.evidence_contract_v2).await;
+                let result = process_jobs(
+                    crawl_store,
+                    &mut stopped,
+                    cli.evidence_contract_v2,
+                    wire_policy.as_ref(),
+                )
+                .await;
                 let _ = worker_stop.send(true);
                 result
             });
@@ -425,6 +453,7 @@ async fn process_jobs(
     store: Store,
     stopped: &mut watch::Receiver<bool>,
     evidence_contract_v2: bool,
+    wire_policy: Option<&seosmith::policy::AdvisoryPolicy>,
 ) -> Result<()> {
     loop {
         if *stopped.borrow() {
@@ -437,7 +466,7 @@ async fn process_jobs(
                 _ = stopped.changed() => return Ok(()),
             };
             if let Ok(mut report) = result {
-                finalize_job(&store, &mut report, evidence_contract_v2).await?;
+                finalize_job(&store, &mut report, evidence_contract_v2, wire_policy).await?;
             } else {
                 store.fail(&request.request_id.to_string()).await?;
                 tracing::error!(run_id=%request.request_id, "crawl failed");
@@ -511,11 +540,61 @@ impl seosmith::fetch::Transport for FixtureTransport {
     }
 }
 
+/// Test-only escape hatch for plain-HTTP delivery to a loopback IP literal
+/// (`127.0.0.1` or `::1`). Always false unless built with `local-e2e`, which does
+/// not compile in release builds.
+fn loopback_http_allowed(value: &str) -> bool {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    cfg!(feature = "local-e2e")
+        && url::Url::parse(value).is_ok_and(|u| match u.host() {
+            Some(url::Host::Ipv4(ip)) => ip == Ipv4Addr::LOCALHOST,
+            Some(url::Host::Ipv6(ip)) => ip == Ipv6Addr::LOCALHOST,
+            _ => false,
+        })
+}
+
+async fn fail_logged(store: &Store, id: &str) {
+    if let Err(error) = store.fail(id).await {
+        tracing::error!(run_id=%id, %error, "could not mark the job failed");
+    }
+}
+
+/// Finalise one crawled job. Every generation, cap, equality and evidence error is
+/// converted to a failed job here and returns `Ok(false)`: `process_jobs`
+/// propagates `Err` with `?`, which would stop the worker.
 async fn finalize_job(
     store: &Store,
     report: &mut seosmith::model::Report,
     v2: bool,
+    wire_policy: Option<&seosmith::policy::AdvisoryPolicy>,
 ) -> Result<bool> {
+    if let Some(policy) = wire_policy {
+        let id = report.request.request_id.to_string();
+        let bytes = match seosmith::finding_coverage_prototype::generate_wire_v1(report, policy) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                fail_logged(store, &id).await;
+                tracing::error!(run_id=%id, %error, "schema-4 generation failed");
+                return Ok(false);
+            }
+        };
+        // Nothing below may return `Err`: that would stop the worker (m-g).
+        return Ok(
+            match store.finish_bytes(&id, &report.outcome, &bytes).await {
+                Ok(()) => true,
+                Err(error) => {
+                    if !error.is::<seosmith::store::ReportTooLarge>()
+                        && store.cancelled(&id).await.unwrap_or(false)
+                    {
+                        return Ok(false);
+                    }
+                    fail_logged(store, &id).await;
+                    tracing::error!(run_id=%id, %error, "schema-4 persistence failed");
+                    false
+                }
+            },
+        );
+    }
     if v2 && let Err(error) = seosmith::contract::enable_v2(report) {
         store.fail(&report.request.request_id.to_string()).await?;
         tracing::error!(run_id=%report.request.request_id, %error, "evidence finalization failed");
@@ -544,6 +623,76 @@ async fn finalize_job(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn wire_generation_failure_fails_the_job_and_the_next_job_finalizes() -> Result<()> {
+        use seosmith::finding_coverage_prototype::fixture_input;
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(dir.path().join("w.sqlite").to_str().unwrap()).await?;
+        let policy = seosmith::policy::AdvisoryPolicy::default();
+        // Many pages with strings just under the per-string limit: the final bytes
+        // exceed the HTP byte cap without tripping the string limit.
+        let mut oversized = fixture_input("complete-missing-h1")?;
+        let template = oversized.pages[0].clone();
+        oversized.pages = (0..400)
+            .map(|i| {
+                let mut page = template.clone();
+                page.url = format!("https://example.com/p{i}");
+                page.title = format!("{i:05}{}", "t".repeat(12_000));
+                page.description = format!("{i:05}{}", "d".repeat(12_000));
+                page
+            })
+            .collect();
+        let mut ok = fixture_input("complete-missing-h1")?;
+        for report in [&mut oversized, &mut ok] {
+            report.request.request_id = uuid::Uuid::new_v4();
+            store.submit(&report.request).await?;
+            store.claim().await?.unwrap();
+        }
+        // The cap error is a failed job (`Ok(false)`), never an `Err` that would stop the worker.
+        assert!(!finalize_job(&store, &mut oversized, false, Some(&policy)).await?);
+        let failed = store
+            .view(&oversized.request.request_id.to_string())
+            .await?
+            .unwrap();
+        assert_eq!(failed.state, "failed");
+        // The cause is the HTP byte cap, not the string limit or another error.
+        let mut again = oversized.clone();
+        again.findings.clear();
+        again.schema_version = 1;
+        again.policy_guidance = None;
+        again.evidence_contract = None;
+        let cause = seosmith::finding_coverage_prototype::generate_wire_v1(&mut again, &policy)
+            .unwrap_err()
+            .to_string();
+        assert!(cause.contains("byte limit"), "{cause}");
+        assert!(store.pending().await?.is_none());
+        assert!(finalize_job(&store, &mut ok, false, Some(&policy)).await?);
+        let (id, body, sha, _) = store.pending().await?.unwrap();
+        assert_eq!(id, ok.request.request_id.to_string());
+        assert_eq!(sha, seosmith::model::digest(body.as_bytes()));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body)?["schema_version"],
+            4
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn loopback_http_is_only_for_ip_literals_under_local_e2e() {
+        let enabled = cfg!(feature = "local-e2e");
+        assert_eq!(loopback_http_allowed("http://127.0.0.1:3000/x"), enabled);
+        assert_eq!(loopback_http_allowed("http://[::1]:3000/x"), enabled);
+        for refused in [
+            "http://localhost:3000/x",
+            "http://127.0.0.2/x",
+            "http://10.0.0.1/x",
+            "http://example.com/x",
+            "not a url",
+        ] {
+            assert!(!loopback_http_allowed(refused), "{refused}");
+        }
+    }
 
     #[tokio::test]
     async fn local_jobs_never_recover_into_delivery() -> Result<()> {
@@ -727,7 +876,7 @@ mod tests {
                 data: None,
                 error: None,
             });
-        assert!(!finalize_job(&store, &mut bad, false).await?);
+        assert!(!finalize_job(&store, &mut bad, false, None).await?);
         drop(store);
         let store = Store::open(path.to_str().unwrap()).await?;
         store.recover().await?;
@@ -745,7 +894,7 @@ mod tests {
         good.request.request_id = uuid::Uuid::new_v4();
         store.submit(&good.request).await?;
         store.claim().await?.unwrap();
-        assert!(finalize_job(&store, &mut good, false).await?);
+        assert!(finalize_job(&store, &mut good, false, None).await?);
         let (_, body, hash, _) = store.pending().await?.unwrap();
         assert_eq!(hash, seosmith::model::digest(body.as_bytes()));
         assert_eq!(body, serde_json::to_string(&good)?);
@@ -762,7 +911,11 @@ mod tests {
         store.submit(&report.request).await?;
         store.claim().await?.unwrap();
         sqlx::query("CREATE TRIGGER reject_finish BEFORE UPDATE OF report ON jobs BEGIN SELECT RAISE(FAIL, 'storage unavailable'); END").execute(&store.0).await?;
-        assert!(finalize_job(&store, &mut report, false).await.is_err());
+        assert!(
+            finalize_job(&store, &mut report, false, None)
+                .await
+                .is_err()
+        );
         assert_eq!(
             store
                 .view(&report.request.request_id.to_string())
@@ -776,7 +929,7 @@ mod tests {
             .await?;
         store.recover().await?;
         assert!(store.claim().await?.is_some());
-        assert!(finalize_job(&store, &mut report, false).await?);
+        assert!(finalize_job(&store, &mut report, false, None).await?);
         Ok(())
     }
 
@@ -800,7 +953,7 @@ mod tests {
                 data: Some(value),
                 error: None,
             });
-        finalize_job(&store, &mut bad, true).await?;
+        finalize_job(&store, &mut bad, true, None).await?;
         let id = bad.request.request_id.to_string();
         assert_eq!(store.view(&id).await?.unwrap().state, "failed");
         assert!(store.report(&id).await?.is_none());
@@ -811,7 +964,7 @@ mod tests {
         good.request.request_id = uuid::Uuid::new_v4();
         store.submit(&good.request).await?;
         store.claim().await?.unwrap();
-        finalize_job(&store, &mut good, true).await?;
+        finalize_job(&store, &mut good, true, None).await?;
         assert!(
             store
                 .report(&good.request.request_id.to_string())

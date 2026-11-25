@@ -517,6 +517,59 @@ impl Store {
         ensure!(updated == 1, "job is not running or already finalized");
         Ok(())
     }
+    /// Persist already-serialised schema-4 bytes exactly as generated. The stored
+    /// text and `report_hash` are the delivered bytes and their digest; nothing
+    /// is re-serialised. `finish` stays the only path for schema 1/2.
+    pub async fn finish_bytes(&self, id: &str, outcome: &str, bytes: &[u8]) -> Result<()> {
+        ensure!(
+            bytes.len() <= crate::delivery::HTP_MAX_REPORT_BYTES,
+            ReportTooLarge
+        );
+        let header: serde_json::Value = serde_json::from_slice(bytes)?;
+        ensure!(
+            header
+                .get("schema_version")
+                .and_then(serde_json::Value::as_u64)
+                == Some(4)
+                && header
+                    .pointer("/request/request_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(id),
+            "finish_bytes persists only schema-4 bytes of this job"
+        );
+        ensure!(
+            header
+                .pointer("/evidence_contract/version")
+                .and_then(serde_json::Value::as_u64)
+                == Some(1),
+            "finish_bytes requires the schema-4 evidence contract (version 1)"
+        );
+        ensure!(
+            header
+                .get("finding_coverage")
+                .is_some_and(serde_json::Value::is_object),
+            "finish_bytes requires the schema-4 finding_coverage extension"
+        );
+        let body = std::str::from_utf8(bytes)?;
+        let mode: Option<String> = sqlx::query_scalar("SELECT execution_mode FROM jobs WHERE id=?")
+            .bind(id)
+            .fetch_optional(&self.0)
+            .await?
+            .flatten();
+        ensure!(
+            mode.as_deref() == Some("standard"),
+            "local or ambiguous job cannot be persisted for delivery"
+        );
+        let updated = sqlx::query("UPDATE jobs SET report=?,report_hash=?,state=? WHERE id=? AND state='running' AND execution_mode='standard' AND report IS NULL")
+            .bind(body)
+            .bind(digest(bytes))
+            .bind(outcome)
+            .bind(id)
+            .execute(&self.0)
+            .await?.rows_affected();
+        ensure!(updated == 1, "job is not running or already finalized");
+        Ok(())
+    }
     pub async fn finish_local_only(&self, id: &str) -> Result<()> {
         let updated = sqlx::query(
             "UPDATE jobs SET state='local_only',error=NULL,local_finalization='completed' WHERE id=? AND state='local_running' AND execution_mode='local'",
@@ -581,7 +634,12 @@ impl Store {
         Ok(())
     }
     pub async fn delivery_too_large(&self, id: &str, sha: &str) -> Result<()> {
-        let n = sqlx::query("UPDATE jobs SET delivery_state='rejected',error='htp_report_limit',attempts=attempts+1 WHERE id=? AND report_hash=? AND delivery_state='pending'")
+        self.delivery_rejected(id, sha, "htp_report_limit").await
+    }
+    /// Terminal receiver rejection. `error` is one of a fixed set of codes.
+    pub async fn delivery_rejected(&self, id: &str, sha: &str, error: &str) -> Result<()> {
+        let n = sqlx::query("UPDATE jobs SET delivery_state='rejected',error=?,attempts=attempts+1 WHERE id=? AND report_hash=? AND delivery_state='pending'")
+            .bind(error)
             .bind(id)
             .bind(sha)
             .execute(&self.0)

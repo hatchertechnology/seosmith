@@ -1,4 +1,4 @@
-//! Local-only schema-4 finding-coverage experiment. Never used for delivery.
+//! Schema-4 `finding_coverage` extension and the production serialiser.
 //!
 //! The top-level `finding_coverage` extension is a *declaration*, not proof. It
 //! states which pinned checks were evaluated completely over the retained
@@ -27,7 +27,7 @@ use crate::{
     policy::AdvisoryPolicy,
     policy_wire_prototype,
 };
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
@@ -368,11 +368,20 @@ pub fn validate_emitted_full_catalogue(value: &Value) -> Result<()> {
 /// unobserved external edge. Public so the generator example and the
 /// reproducibility test share exactly one recipe.
 ///
+/// The base fixture is read from the source tree at run time, not embedded with
+/// `include_str!`: this is a test and generator helper, and an embed would put a
+/// test fixture in the release binary and require it in the Docker build context.
+///
 /// # Errors
-/// Returns a parse error if the embedded base fixture is malformed.
+/// Returns an error if the base fixture is missing or malformed.
 pub fn fixture_input(case: &str) -> Result<Report> {
-    let mut report: Report =
-        serde_json::from_str(include_str!("../fixtures/policies/v3-local-complete.json"))?;
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/fixtures/policies/v3-local-complete.json"
+    );
+    let mut report: Report = serde_json::from_str(
+        &std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?,
+    )?;
     report.schema_version = 1;
     report.policy_guidance = None;
     report.evidence_contract = None;
@@ -410,12 +419,42 @@ pub fn fixture_input(case: &str) -> Result<Report> {
 /// extension. Full recomputation is a fail-closed contradiction check; source
 /// adequacy then decides complete versus partial per rule.
 pub fn generate(report: &mut Report, policy: &AdvisoryPolicy) -> Result<Vec<u8>> {
+    generate_with(report, policy, false)
+}
+
+/// Production serialiser: audit, policy, S01 evidence over the final findings,
+/// then `finding_coverage`, serialised last. The bytes are stored and delivered
+/// unchanged.
+pub fn generate_wire_v1(report: &mut Report, policy: &AdvisoryPolicy) -> Result<Vec<u8>> {
+    generate_with(report, policy, true)
+}
+
+fn generate_with(report: &mut Report, policy: &AdvisoryPolicy, evidence: bool) -> Result<Vec<u8>> {
+    generate_capped(
+        report,
+        policy,
+        evidence,
+        crate::delivery::HTP_MAX_REPORT_BYTES,
+    )
+}
+
+/// `cap` bounds the final serialisation, after `finding_coverage` is added.
+fn generate_capped(
+    report: &mut Report,
+    policy: &AdvisoryPolicy,
+    evidence: bool,
+    cap: usize,
+) -> Result<Vec<u8>> {
     ensure!(
         report.schema_version == 1 && report.policy_guidance.is_none(),
         "base report required"
     );
     report.findings = audit::analyze(&report.pages, &report.request.url);
-    let bytes = policy_wire_prototype::generate(report, policy)?;
+    let bytes = if evidence {
+        policy_wire_prototype::generate_wire_v1(report, policy)?
+    } else {
+        policy_wire_prototype::generate(report, policy)?
+    };
     let expected = expected_findings(report, policy)?;
     let retained = report
         .findings
@@ -450,16 +489,35 @@ pub fn generate(report: &mut Report, policy: &AdvisoryPolicy) -> Result<Vec<u8>>
     validate_extension(&value)?;
     validate_emitted_full_catalogue(&value)?;
     let bytes = serde_json::to_vec(&value)?;
-    ensure!(
-        bytes.len() <= crate::delivery::HTP_MAX_REPORT_BYTES,
-        "prototype exceeds report byte limit"
-    );
+    ensure!(bytes.len() <= cap, "prototype exceeds report byte limit");
     Ok(bytes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn byte_cap_applies_after_finding_coverage() -> Result<()> {
+        let policy = AdvisoryPolicy::default();
+        let mut base = fixture_input("complete-missing-h1")?;
+        base.findings = audit::analyze(&base.pages, &base.request.url);
+        let before = policy_wire_prototype::generate_wire_v1(&mut base, &policy)?.len();
+        let mut report = fixture_input("complete-missing-h1")?;
+        let after = generate_capped(&mut report, &policy, true, usize::MAX)?.len();
+        assert!(after > before, "finding_coverage adds bytes");
+        // Pre-coverage bytes fit the cap; the final bytes exceed it by one.
+        let mut report = fixture_input("complete-missing-h1")?;
+        let error = generate_capped(&mut report, &policy, true, after - 1).unwrap_err();
+        assert!(error.to_string().contains("report byte limit"), "{error}");
+        assert!(after > before);
+        let mut report = fixture_input("complete-missing-h1")?;
+        assert_eq!(
+            generate_capped(&mut report, &policy, true, after)?.len(),
+            after
+        );
+        Ok(())
+    }
 
     fn generate_value(case: &str) -> Value {
         let mut report = fixture_input(case).unwrap();

@@ -23,9 +23,10 @@ pub mod policy_candidate;
 
 pub mod structured_validation;
 
-#[cfg(feature = "policy-wire-prototype")]
+#[cfg(all(feature = "local-e2e", not(debug_assertions)))]
+compile_error!("the local-e2e feature is test-only and cannot be built without debug assertions");
+
 pub mod finding_coverage_prototype;
-#[cfg(feature = "policy-wire-prototype")]
 pub mod policy_wire_prototype;
 
 /// Experimental offline link graph analysis.

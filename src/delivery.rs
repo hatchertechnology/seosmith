@@ -19,11 +19,36 @@ impl std::fmt::Display for HtpReportLimit {
 }
 impl std::error::Error for HtpReportLimit {}
 
+/// A non-success HTP response that is not retried: the receiver judged these exact
+/// bytes (422 semantic mismatch or evidence failure, 409 delivery conflict).
+#[derive(Debug)]
+pub struct HtpTerminal(pub StatusCode);
+impl std::fmt::Display for HtpTerminal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "HTP rejected delivery ({})", self.0.as_u16())
+    }
+}
+impl std::error::Error for HtpTerminal {}
+
+/// Any other non-success status. Retried, as before.
+#[derive(Debug)]
+pub struct HtpStatus(pub StatusCode);
+impl std::fmt::Display for HtpStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "HTP rejected delivery ({})", self.0.as_u16())
+    }
+}
+impl std::error::Error for HtpStatus {}
+
 #[derive(Clone)]
 pub struct Delivery {
     client: Client,
     endpoint: Url,
     token: String,
+    /// True only for the schema 4 route (`.../policy-audits`). The legacy
+    /// `/audits` route can return 422 from axum's `Json` extractor, so there
+    /// 409/422 stay retryable as before.
+    terminal_rejections: bool,
 }
 impl Delivery {
     pub fn new(endpoint: Url, token: String) -> Result<Self> {
@@ -31,6 +56,10 @@ impl Delivery {
             token.len() >= 32,
             "HTP token must be at least 32 characters"
         );
+        let terminal_rejections = endpoint
+            .path()
+            .trim_end_matches('/')
+            .ends_with("/policy-audits");
         Ok(Self {
             client: Client::builder()
                 .redirect(Policy::none())
@@ -40,6 +69,7 @@ impl Delivery {
                 .build()?,
             endpoint,
             token,
+            terminal_rejections,
         })
     }
     pub async fn send(&self, id: &str, body: String, sha: &str) -> Result<()> {
@@ -61,7 +91,15 @@ impl Delivery {
         if oversized && response.status() == StatusCode::PAYLOAD_TOO_LARGE {
             return Err(HtpReportLimit.into());
         }
-        ensure!(response.status().is_success(), "HTP rejected delivery");
+        match response.status() {
+            status if status.is_success() => {}
+            status @ (StatusCode::UNPROCESSABLE_ENTITY | StatusCode::CONFLICT)
+                if self.terminal_rejections =>
+            {
+                return Err(HtpTerminal(status).into());
+            }
+            status => return Err(HtpStatus(status).into()),
+        }
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await? {
             ensure!(bytes.len() + chunk.len() <= 4096, "oversized receipt");
@@ -86,6 +124,14 @@ impl Delivery {
             Err(error) if error.is::<HtpReportLimit>() => {
                 store.delivery_too_large(&id, &sha).await?;
                 tracing::warn!(run_id=%id,"HTP report exceeds receiver limit");
+            }
+            Err(error) if error.is::<HtpTerminal>() => {
+                let code = match error.downcast_ref::<HtpTerminal>() {
+                    Some(HtpTerminal(StatusCode::CONFLICT)) => "htp_delivery_conflict",
+                    _ => "htp_semantic_mismatch",
+                };
+                store.delivery_rejected(&id, &sha, code).await?;
+                tracing::warn!(run_id=%id, code, "HTP rejected the report; not retrying");
             }
             Err(_) => {
                 store.retry(&id, attempt).await?;

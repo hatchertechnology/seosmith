@@ -58,3 +58,14 @@ For the local byte checker, `coverage_complete` and `check_external_links` are J
 ## Numeric-token interoperability boundary
 
 Canonical policy bytes use the lexical integer grammar above and are checked byte-for-byte. For numeric fields elsewhere in a report, the Node checker checks the parsed value as a safe integer, rather than enforcing a lexical integer token. It may therefore accept `200.0` or `200e0` as the same integral value as `200`, while Rust typed deserialization may reject those raw spellings. This local freeze is value-semantic for those Node checks and does not claim raw lexical parity with Rust or receiver acceptance.
+
+## Production emission (schema 4)
+
+With `--policy-wire-v1` (`SEOSMITH_POLICY_WIRE_V1=true`, default off; requires `--advisory-policy`, refused together with `SEOSMITH_EVIDENCE_CONTRACT_V2`) the worker emits `s14-wire-1` schema-4 reports with S01 evidence v1 and `finding_coverage`, and delivers them to the policy route (`HTP_INGEST_URL`).
+
+- `finding_coverage_prototype::generate_wire_v1` is the production serialiser, in this order: `audit::analyze`; `policy::apply_with_evidence` (findings are now final); policy validation and edge reconciliation; `contract::attach_v1_schema4` over the final findings; canonical policy; `schema_version = 4`; the byte caps; the equality check against the pinned population; `finding_coverage`; the last serialisation. `generate` is the evidence-free fixture form and is unchanged.
+- The returned bytes are stored by `Store::finish_bytes` and delivered byte for byte. `Store::finish` still handles schema 1/2 only and refuses schema 4.
+- Any generation, cap, equality or evidence error fails the job (`state = failed`, nothing delivered) inside `finalize_job`; the worker continues with the next job. The remedy for an oversize report is a lower `max_pages`.
+- On the `/policy-audits` route (decided by the path suffix of `HTP_INGEST_URL`), HTP `422` and `409` are terminal (`delivery_state = rejected`, `error = htp_semantic_mismatch` / `htp_delivery_conflict`). `400`, `5xx`, `429` and `503` retry as before. The legacy `/audits` route keeps retrying `422`/`409`: its `Json` extractor can return 422.
+- `crawl --request <file> --policy-wire-v1 --advisory-policy <file>` prints the exact wire bytes and delivers nothing. The advisory policy used in production is `fixtures/policies/production-default.json` (`{}`).
+- The test-only `local-e2e` Cargo feature lets `serve` use plain HTTP to `127.0.0.1` or `::1` only. It does not compile without debug assertions.
