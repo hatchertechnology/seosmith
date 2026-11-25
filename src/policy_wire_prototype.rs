@@ -4,13 +4,12 @@
 //! over the final findings. [`generate`] is the evidence-free fixture form kept
 //! for the pinned review fixtures and local tools. Neither is a delivery gate;
 //! the receiver independently recomputes the population.
+use crate::contract::attach_v1_schema4;
 use crate::{
     delivery::HTP_MAX_REPORT_BYTES,
     model::{Report, digest},
     policy::{self, AdvisoryPolicy},
 };
-// TEMPORARY (S1): switch to `crate::contract::attach_v1_schema4` after E-p lands.
-use crate::contract_stub_ep::attach_v1_schema4;
 use anyhow::{Result, ensure};
 use std::collections::{HashMap, HashSet};
 
@@ -203,13 +202,11 @@ fn generate_with(report: &mut Report, config: &AdvisoryPolicy, evidence: bool) -
     reconcile_wire_edges(report)?;
     if evidence {
         // `report.findings` is final here; evidence must not run earlier.
-        // `apply_with_evidence` leaves the local schema number (3) on the report;
-        // `attach_v1_schema4` requires the unversioned 1 and never sets a version.
-        // The schema is set to 4 below.
-        report.schema_version = 1;
+        // `apply_with_evidence` leaves the local schema number (3), which is what
+        // `attach_v1_schema4` requires; it never changes it. The schema becomes 4 below.
         attach_v1_schema4(report)?;
         ensure!(
-            report.schema_version == 1,
+            report.schema_version == 3,
             "evidence attachment must not set the schema version"
         );
         ensure!(

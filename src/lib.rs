@@ -29,10 +29,6 @@ compile_error!("the local-e2e feature is test-only and cannot be built without d
 pub mod finding_coverage_prototype;
 pub mod policy_wire_prototype;
 
-// TEMPORARY STUB (S1): drop this module, and switch the single `use` in
-// `policy_wire_prototype`, when rebasing onto E-p (`contract::attach_v1_schema4`).
-pub mod contract_stub_ep;
-
 /// Experimental offline link graph analysis.
 pub mod graph_evidence;
 

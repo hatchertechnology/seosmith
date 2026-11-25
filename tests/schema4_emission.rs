@@ -1,9 +1,8 @@
 //! S1: production schema-4 emission, exact-byte storage, terminal HTP rejections
 //! and the test-only loopback transport.
 //!
-//! Tests marked `needs E-p` exercise evidence semantics that only the real
-//! `contract::attach_v1_schema4` defines; with the temporary stub they check only
-//! what is stable across both (shape, byte identity, pointer resolution).
+//! Evidence semantics and ID equality are E-p's (`tests/schema4_evidence.rs`);
+//! these tests check shape, byte identity and pointer resolution in the bytes.
 use anyhow::Result;
 use axum::{Router, http::StatusCode, routing::post};
 use seosmith::{
