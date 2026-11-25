@@ -188,12 +188,17 @@ pub fn enable_v2(report: &mut Report) -> Result<()> {
     Ok(())
 }
 
-/// Attach S01 evidence v1 to a schema-4 candidate. At the call site (after
-/// `policy::apply_with_evidence`, before the wire sets `schema_version = 4`)
-/// the report is still labelled with the experimental schema 3. Call it over the final (post-policy) findings array: every
+/// Attach S01 evidence v1 to a schema-4 candidate.
+///
+/// At the call site (after `policy::apply_with_evidence`, before the wire sets
+/// `schema_version = 4`) the report is still labelled with the experimental
+/// schema 3. Call it over the final (post-policy) findings array: every
 /// `/findings/N` pointer refers to that exact array, so nothing may add,
 /// remove or reorder findings afterwards. It never sets `schema_version`; the
 /// caller does that when it builds the wire.
+///
+/// Every delivered finding of an `audit::rules()` rule that is not dropped by
+/// `MAX_OBSERVATIONS` / `MAX_EVALUATIONS` gets a `fail` evaluation pointing at it.
 pub fn attach_v1_schema4(report: &mut Report) -> Result<()> {
     ensure!(
         report.schema_version == 3
@@ -227,7 +232,7 @@ fn build_contract(report: &Report) -> Result<EvidenceContract> {
     let base_size = serialized_size(report)?;
     ensure!(
         base_size < MAX_REPORT_BYTES,
-        "report exceeds delivery limit"
+        "report exceeds the 16 MiB report limit"
     );
     let r = &report.request;
     // BTreeMap-backed serde_json objects serialize keys in lexical order, no whitespace.
@@ -301,24 +306,24 @@ fn build_contract(report: &Report) -> Result<EvidenceContract> {
             unknown: 0,
             unknown_reasons: std::collections::BTreeMap::new(),
         };
-        // At most one legacy finding per rule/URL. Borrow evidence; never duplicate raw strings.
-        let findings: std::collections::HashMap<_, _> = report
+        // At most one finding per rule/URL; a duplicate would make the pointer ambiguous.
+        let mut findings = std::collections::HashMap::new();
+        for (i, f) in report
             .findings
             .iter()
             .enumerate()
             .filter(|(_, f)| f.rule == rule.id)
-            .map(|(i, f)| (f.url.as_str(), (i, f)))
-            .collect();
+        {
+            ensure!(
+                findings.insert(f.url.as_str(), (i, f)).is_none(),
+                "duplicate finding for rule/URL"
+            );
+        }
         for (i, page) in report.pages.iter().enumerate() {
             let limited = i >= MAX_OBSERVATIONS || contract.evaluations.len() >= MAX_EVALUATIONS;
             let instrumented = rule.id == "missing_title";
-            let finding = findings.get(page.url.as_str()).filter(|_| {
-                !instrumented
-                    || !(page.blocked_by_robots
-                        || page.error.is_some()
-                        || page.status.is_none()
-                        || page.extraction_truncated)
-            });
+            // A delivered finding always gets its pointer, whatever the page state.
+            let finding = findings.get(page.url.as_str());
             if limited || (finding.is_none() && !instrumented) {
                 c.eligibility_unknown += 1;
                 c.attempt_unknown += 1;
@@ -436,7 +441,7 @@ fn build_contract(report: &Report) -> Result<EvidenceContract> {
     // Reject oversized final reports before changing the original or allocating serialized bytes.
     ensure!(
         base_size + serialized_size(&contract)? + 32 <= MAX_REPORT_BYTES,
-        "versioned report exceeds delivery limit"
+        "versioned report exceeds the 16 MiB report limit"
     );
     Ok(contract)
 }
