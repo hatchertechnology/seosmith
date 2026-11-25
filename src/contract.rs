@@ -182,6 +182,32 @@ pub fn enable_v2(report: &mut Report) -> Result<()> {
         report.schema_version == 1 && report.evidence_contract.is_none(),
         "expected legacy report"
     );
+    let contract = build_contract(report)?;
+    report.schema_version = 2;
+    report.evidence_contract = Some(contract);
+    Ok(())
+}
+
+/// Attach S01 evidence v1 to a schema-4 candidate. At the call site (after
+/// `policy::apply_with_evidence`, before the wire sets `schema_version = 4`)
+/// the report is still labelled with the experimental schema 3. Call it over the final (post-policy) findings array: every
+/// `/findings/N` pointer refers to that exact array, so nothing may add,
+/// remove or reorder findings afterwards. It never sets `schema_version`; the
+/// caller does that when it builds the wire.
+pub fn attach_v1_schema4(report: &mut Report) -> Result<()> {
+    ensure!(
+        report.schema_version == 3
+            && report.policy_guidance.is_some()
+            && report.evidence_contract.is_none(),
+        "expected policy report awaiting schema 4"
+    );
+    let contract = build_contract(report)?;
+    report.evidence_contract = Some(contract);
+    Ok(())
+}
+
+/// Shared evidence builder. Reads `report`, never mutates it.
+fn build_contract(report: &Report) -> Result<EvidenceContract> {
     ensure!(
         report.pages.len() <= 40_000 && report.findings.len() <= 400_000,
         "report record limit"
@@ -412,7 +438,5 @@ pub fn enable_v2(report: &mut Report) -> Result<()> {
         base_size + serialized_size(&contract)? + 32 <= MAX_REPORT_BYTES,
         "versioned report exceeds delivery limit"
     );
-    report.schema_version = 2;
-    report.evidence_contract = Some(contract);
-    Ok(())
+    Ok(contract)
 }
