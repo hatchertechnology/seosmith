@@ -23,10 +23,15 @@ pub mod policy_candidate;
 
 pub mod structured_validation;
 
-#[cfg(feature = "policy-wire-prototype")]
+#[cfg(all(feature = "local-e2e", not(debug_assertions)))]
+compile_error!("the local-e2e feature is test-only and cannot be built without debug assertions");
+
 pub mod finding_coverage_prototype;
-#[cfg(feature = "policy-wire-prototype")]
 pub mod policy_wire_prototype;
+
+// TEMPORARY STUB (S1): drop this module, and switch the single `use` in
+// `policy_wire_prototype`, when rebasing onto E-p (`contract::attach_v1_schema4`).
+pub mod contract_stub_ep;
 
 /// Experimental offline link graph analysis.
 pub mod graph_evidence;

@@ -1,11 +1,21 @@
-//! Provisional, local-only fixture generation. This module is not a delivery gate.
+//! Schema-4 (`s14-wire-1`) report generation.
+//!
+//! [`generate_wire_v1`] is the production serialiser: it attaches S01 evidence
+//! over the final findings. [`generate`] is the evidence-free fixture form kept
+//! for the pinned review fixtures and local tools. Neither is a delivery gate;
+//! the receiver independently recomputes the population.
 use crate::{
     delivery::HTP_MAX_REPORT_BYTES,
     model::{Report, digest},
     policy::{self, AdvisoryPolicy},
 };
+// TEMPORARY (S1): switch to `crate::contract::attach_v1_schema4` after E-p lands.
+use crate::contract_stub_ep::attach_v1_schema4;
 use anyhow::{Result, ensure};
 use std::collections::{HashMap, HashSet};
+
+/// Maximum serialised size of one top-level extension (`MAX_EXTENSION_BYTES`).
+const MAX_EXTENSION_BYTES: usize = 1_048_576;
 
 fn no_nul(value: &serde_json::Value) -> bool {
     match value {
@@ -141,9 +151,20 @@ fn reconcile_wire_edges(report: &mut Report) -> Result<()> {
     Ok(())
 }
 
-/// Construct a schema-4 candidate for local conformance tests only.
-/// Never submit this candidate to an outbox or production receiver.
+/// Evidence-free schema-4 form, used by the pinned review fixtures and local
+/// tools. The production path is [`generate_wire_v1`].
 pub fn generate(report: &mut Report, config: &AdvisoryPolicy) -> Result<Vec<u8>> {
+    generate_with(report, config, false)
+}
+
+/// Production schema-4 serialisation: `s14-wire-1` plus S01 evidence v1 over the
+/// final (post-policy) findings. The returned bytes are what is stored and
+/// delivered, byte for byte.
+pub fn generate_wire_v1(report: &mut Report, config: &AdvisoryPolicy) -> Result<Vec<u8>> {
+    generate_with(report, config, true)
+}
+
+fn generate_with(report: &mut Report, config: &AdvisoryPolicy, evidence: bool) -> Result<Vec<u8>> {
     ensure!(
         report.schema_version == 1
             && report.evidence_contract.is_none()
@@ -180,6 +201,22 @@ pub fn generate(report: &mut Report, config: &AdvisoryPolicy) -> Result<Vec<u8>>
         }
     }
     reconcile_wire_edges(report)?;
+    if evidence {
+        // `report.findings` is final here; evidence must not run earlier.
+        // `apply_with_evidence` leaves the local schema number (3) on the report;
+        // `attach_v1_schema4` requires the unversioned 1 and never sets a version.
+        // The schema is set to 4 below.
+        report.schema_version = 1;
+        attach_v1_schema4(report)?;
+        ensure!(
+            report.schema_version == 1,
+            "evidence attachment must not set the schema version"
+        );
+        ensure!(
+            serde_json::to_vec(&report.evidence_contract)?.len() <= MAX_EXTENSION_BYTES,
+            "evidence extension exceeds byte limit"
+        );
+    }
     let policy = serde_json::json!({"catalog_version":"s14-1","collection":{"check_external_links":report.request.check_external_links,"delay_ms":report.request.delay_ms,"max_duration_seconds":report.request.max_duration_seconds,"max_pages":report.request.max_pages,"max_resources":report.request.max_resources,"seed_url":report.request.url},"engine_version":report.engine_version,"policy":config,"ruleset_version":report.ruleset_version,"schema_version":4,"validator_version":"s14-wire-1","wire_contract_version":"s14-wire-1"});
     // This typed object has a fixed two-container shape; it is not an untrusted JSON parser.
     let canonical = serde_json::to_string(&policy)?;

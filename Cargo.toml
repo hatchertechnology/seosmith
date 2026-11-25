@@ -7,7 +7,12 @@ license = "MIT"
 description = "Headless technical SEO audits with durable delivery to HTP"
 
 [features]
+# Kept for the fixture example generators and test helpers; the wire modules
+# themselves are always compiled for the production schema-4 path.
 policy-wire-prototype = []
+# Test-only: lets `serve` talk plain HTTP to a loopback IP literal. Compilation
+# fails without debug assertions, so it can never be part of a release image.
+local-e2e = []
 # Explicitly enabled only for offline CLI acceptance tests.
 local-cli-fixtures = []
 

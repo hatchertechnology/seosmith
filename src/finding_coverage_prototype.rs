@@ -1,4 +1,4 @@
-//! Local-only schema-4 finding-coverage experiment. Never used for delivery.
+//! Schema-4 `finding_coverage` extension and the production serialiser.
 //!
 //! The top-level `finding_coverage` extension is a *declaration*, not proof. It
 //! states which pinned checks were evaluated completely over the retained
@@ -410,12 +410,27 @@ pub fn fixture_input(case: &str) -> Result<Report> {
 /// extension. Full recomputation is a fail-closed contradiction check; source
 /// adequacy then decides complete versus partial per rule.
 pub fn generate(report: &mut Report, policy: &AdvisoryPolicy) -> Result<Vec<u8>> {
+    generate_with(report, policy, false)
+}
+
+/// Production serialiser: audit, policy, S01 evidence over the final findings,
+/// then `finding_coverage`, serialised last. The bytes are stored and delivered
+/// unchanged.
+pub fn generate_wire_v1(report: &mut Report, policy: &AdvisoryPolicy) -> Result<Vec<u8>> {
+    generate_with(report, policy, true)
+}
+
+fn generate_with(report: &mut Report, policy: &AdvisoryPolicy, evidence: bool) -> Result<Vec<u8>> {
     ensure!(
         report.schema_version == 1 && report.policy_guidance.is_none(),
         "base report required"
     );
     report.findings = audit::analyze(&report.pages, &report.request.url);
-    let bytes = policy_wire_prototype::generate(report, policy)?;
+    let bytes = if evidence {
+        policy_wire_prototype::generate_wire_v1(report, policy)?
+    } else {
+        policy_wire_prototype::generate(report, policy)?
+    };
     let expected = expected_findings(report, policy)?;
     let retained = report
         .findings
