@@ -166,6 +166,25 @@ async fn finish_bytes_requires_the_evidence_contract() -> Result<()> {
 }
 
 #[tokio::test]
+async fn finish_bytes_requires_finding_coverage() -> Result<()> {
+    let (_dir, store) = store().await?;
+    let mut report = fixture_input("complete-missing-h1")?;
+    let id = running_job(&store, &mut report).await?;
+    report.findings = seosmith::audit::analyze(&report.pages, &report.request.url);
+    let bytes =
+        seosmith::policy_wire_prototype::generate_wire_v1(&mut report, &AdvisoryPolicy::default())?;
+    let value: Value = serde_json::from_slice(&bytes)?;
+    assert!(value.get("evidence_contract").is_some());
+    assert!(value.get("finding_coverage").is_none());
+    let error = store
+        .finish_bytes(&id, &report.outcome, &bytes)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("finding_coverage"), "{error}");
+    Ok(())
+}
+
+#[tokio::test]
 async fn schema_4_cannot_use_the_reserialising_finish_or_foreign_bytes() -> Result<()> {
     let (_dir, store) = store().await?;
     let mut report = fixture_input("complete-missing-h1")?;
@@ -293,17 +312,45 @@ fn serve(url: &str, dir: &std::path::Path, extra: &[&str]) -> std::io::Result<st
         .spawn()
 }
 
+/// `Some(stderr)` when the server exits (refuses); `None` once it logs readiness.
 fn refused_with(url: &str) -> Result<Option<String>> {
+    use std::io::Read;
     let dir = tempfile::tempdir()?;
     let mut child = serve(url, dir.path(), &[])?;
-    std::thread::sleep(std::time::Duration::from_millis(1500));
-    if child.try_wait()?.is_none() {
-        child.kill()?;
-        child.wait()?;
-        return Ok(None);
+    let mut stderr = child.stderr.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut text = String::new();
+        let mut chunk = [0u8; 512];
+        while let Ok(n) = stderr.read(&mut chunk) {
+            if n == 0 {
+                break;
+            }
+            text.push_str(&String::from_utf8_lossy(&chunk[..n]));
+            if tx.send(text.clone()).is_err() {
+                break;
+            }
+        }
+        let _ = tx.send(format!("\u{0}EOF{text}"));
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while std::time::Instant::now() < deadline {
+        match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(text) if text.starts_with('\u{0}') => {
+                child.wait()?;
+                return Ok(Some(text.trim_start_matches("\u{0}EOF").to_owned()));
+            }
+            Ok(text) if text.contains("Seosmith ready") => {
+                child.kill()?;
+                child.wait()?;
+                return Ok(None);
+            }
+            _ => {}
+        }
     }
-    let output = child.wait_with_output()?;
-    Ok(Some(String::from_utf8_lossy(&output.stderr).into_owned()))
+    child.kill()?;
+    child.wait()?;
+    anyhow::bail!("server neither became ready nor exited within 20s")
 }
 
 #[test]

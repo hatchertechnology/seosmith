@@ -13,8 +13,7 @@ use crate::{
 use anyhow::{Result, ensure};
 use std::collections::{HashMap, HashSet};
 
-/// Maximum serialised size of one top-level extension (`MAX_EXTENSION_BYTES`).
-const MAX_EXTENSION_BYTES: usize = 1_048_576;
+use crate::contract::MAX_EXTENSION_BYTES;
 
 fn no_nul(value: &serde_json::Value) -> bool {
     match value {
@@ -238,7 +237,7 @@ fn generate_with(report: &mut Report, config: &AdvisoryPolicy, evidence: bool) -
     }
     report.schema_version = 4;
     ensure!(
-        serde_json::to_vec(&report.policy_guidance)?.len() <= 1_048_576,
+        serde_json::to_vec(&report.policy_guidance)?.len() <= MAX_EXTENSION_BYTES,
         "prototype policy extension exceeds byte limit"
     );
     let bytes = serde_json::to_vec(report)?;

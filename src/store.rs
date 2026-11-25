@@ -544,6 +544,12 @@ impl Store {
                 == Some(1),
             "finish_bytes requires the schema-4 evidence contract (version 1)"
         );
+        ensure!(
+            header
+                .get("finding_coverage")
+                .is_some_and(serde_json::Value::is_object),
+            "finish_bytes requires the schema-4 finding_coverage extension"
+        );
         let body = std::str::from_utf8(bytes)?;
         let mode: Option<String> = sqlx::query_scalar("SELECT execution_mode FROM jobs WHERE id=?")
             .bind(id)

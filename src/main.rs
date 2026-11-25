@@ -630,8 +630,19 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let store = Store::open(dir.path().join("w.sqlite").to_str().unwrap()).await?;
         let policy = seosmith::policy::AdvisoryPolicy::default();
+        // Many pages with strings just under the per-string limit: the final bytes
+        // exceed the HTP byte cap without tripping the string limit.
         let mut oversized = fixture_input("complete-missing-h1")?;
-        oversized.pages[0].title = "x".repeat(5_000_000);
+        let template = oversized.pages[0].clone();
+        oversized.pages = (0..400)
+            .map(|i| {
+                let mut page = template.clone();
+                page.url = format!("https://example.com/p{i}");
+                page.title = format!("{i:05}{}", "t".repeat(12_000));
+                page.description = format!("{i:05}{}", "d".repeat(12_000));
+                page
+            })
+            .collect();
         let mut ok = fixture_input("complete-missing-h1")?;
         for report in [&mut oversized, &mut ok] {
             report.request.request_id = uuid::Uuid::new_v4();
@@ -645,13 +656,16 @@ mod tests {
             .await?
             .unwrap();
         assert_eq!(failed.state, "failed");
-        // The cause is a size cap (string, report-size or byte limit), not another generation error.
-        let mut again = seosmith::finding_coverage_prototype::fixture_input("complete-missing-h1")?;
-        again.pages[0].title = "x".repeat(5_000_000);
+        // The cause is the HTP byte cap, not the string limit or another error.
+        let mut again = oversized.clone();
+        again.findings.clear();
+        again.schema_version = 1;
+        again.policy_guidance = None;
+        again.evidence_contract = None;
         let cause = seosmith::finding_coverage_prototype::generate_wire_v1(&mut again, &policy)
             .unwrap_err()
             .to_string();
-        assert!(cause.contains("limit") || cause.contains("size"), "{cause}");
+        assert!(cause.contains("byte limit"), "{cause}");
         assert!(store.pending().await?.is_none());
         assert!(finalize_job(&store, &mut ok, false, Some(&policy)).await?);
         let (id, body, sha, _) = store.pending().await?.unwrap();
