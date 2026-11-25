@@ -132,6 +132,22 @@ async fn store_keeps_the_generated_bytes_and_their_digest() -> Result<()> {
 }
 
 #[tokio::test]
+async fn final_bytes_over_the_htp_cap_are_refused_by_the_store() -> Result<()> {
+    // The cap is enforced on the final serialisation (after `finding_coverage`):
+    // `generate_with` checks the last `to_vec`, and the store checks again.
+    let (_dir, store) = store().await?;
+    let mut report = fixture_input("complete-missing-h1")?;
+    let id = running_job(&store, &mut report).await?;
+    let bytes = vec![b' '; seosmith::delivery::HTP_MAX_REPORT_BYTES + 1];
+    let error = store
+        .finish_bytes(&id, &report.outcome, &bytes)
+        .await
+        .unwrap_err();
+    assert!(error.is::<seosmith::store::ReportTooLarge>());
+    Ok(())
+}
+
+#[tokio::test]
 async fn finish_bytes_requires_the_evidence_contract() -> Result<()> {
     let (_dir, store) = store().await?;
     let mut report = fixture_input("complete-missing-h1")?;
