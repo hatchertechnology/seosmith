@@ -39,5 +39,6 @@ pub mod resource_impact;
 
 mod local_checkpoint;
 
+pub mod s06_batch;
 /// Experimental versioned content detector.
 pub mod s06_detector;
