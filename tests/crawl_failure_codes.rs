@@ -289,11 +289,13 @@ mod serve {
             out.stderr
         );
         // The worker survived and finalized the next job.
+        // The ingest URL points at a closed port, so the delivery loop may already have
+        // recorded `htp_delivery_failed` on the completed job by the time we look: the
+        // job state is what shows the worker survived.
         let (state, error) = &out.jobs[&ids[1]];
-        assert_eq!(
-            (state.as_str(), error.as_deref()),
-            ("completed", None),
-            "{}",
+        assert!(
+            state == "completed" && matches!(error.as_deref(), None | Some("htp_delivery_failed")),
+            "{state} {error:?}\n{}",
             out.stderr
         );
         // The code is logged, with no request data, secrets or error chains.
