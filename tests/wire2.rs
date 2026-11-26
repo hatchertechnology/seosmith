@@ -659,11 +659,11 @@ fn a_missing_family_is_filled_as_unavailable() -> Result<()> {
 #[test]
 fn unbound_and_relationship_and_link_locators_resolve() -> Result<()> {
     let mut report = base_report(20, 2);
-    let mut a = item_at(&report, 1, "broken_fragment", Outcome::Issue);
-    a.locator = Some("/pages/1/links/0".into());
-    let mut b = item_at(&report, 1, "resource_link", Outcome::Issue);
-    b.locator = Some("/pages/1/relationships/0".into());
-    let c = FamilyItem {
+    let mut fragment = item_at(&report, 1, "broken_fragment", Outcome::Issue);
+    fragment.locator = Some("/pages/1/links/0".into());
+    let mut resource = item_at(&report, 1, "resource_link", Outcome::Issue);
+    resource.locator = Some("/pages/1/relationships/0".into());
+    let unbound = FamilyItem {
         entity_id: None,
         locator: None,
         kind: "sitemap_not_crawled".into(),
@@ -675,8 +675,10 @@ fn unbound_and_relationship_and_link_locators_resolve() -> Result<()> {
             .clone(),
     };
     let mut set = unavailable("capture_mode_changed");
-    set.0
-        .insert(FamilyKey::S03, section(FamilyKey::S03, vec![a, b, c]));
+    set.0.insert(
+        FamilyKey::S03,
+        section(FamilyKey::S03, vec![fragment, resource, unbound]),
+    );
     let v = generate_v2(&mut report, set)?;
     let s = &v["evidence_families"]["families"]["s03_integrity"];
     assert_eq!(s["state"], "complete");

@@ -151,13 +151,13 @@ async fn main() -> Result<()> {
         !cli.policy_wire_v1 || cli.advisory_policy.is_some(),
         "--policy-wire-v1 requires --advisory-policy"
     );
-    check_wire2_flags(
-        cli.policy_wire_v2,
-        cli.policy_wire_v1,
-        cli.evidence_contract_v2,
-        cli.advisory_policy.is_some(),
-        matches!(cli.command, Command::Crawl { .. }),
-    )?;
+    check_wire2_flags(Wire2Flags {
+        v2: cli.policy_wire_v2,
+        v1: cli.policy_wire_v1,
+        evidence_contract_v2: cli.evidence_contract_v2,
+        has_policy: cli.advisory_policy.is_some(),
+        local_crawl: matches!(cli.command, Command::Crawl { .. }),
+    })?;
     ensure!(
         !(cli.evidence_contract_v2 && cli.advisory_policy.is_some()),
         "S14 and S01 cannot be combined until their wire contract is agreed"
@@ -494,13 +494,24 @@ async fn main() -> Result<()> {
 /// requires wire-1 rather than replacing it. The names are spelled in full:
 /// `SEOSMITH_EVIDENCE_CONTRACT_V2` is the older schema-2 evidence gate and has
 /// nothing to do with wire-2.
-fn check_wire2_flags(
+#[derive(Clone, Copy, Debug, Default)]
+#[allow(clippy::struct_excessive_bools)] // one bool per independent flag or subcommand fact
+struct Wire2Flags {
     v2: bool,
     v1: bool,
     evidence_contract_v2: bool,
     has_policy: bool,
     local_crawl: bool,
-) -> Result<()> {
+}
+
+fn check_wire2_flags(flags: Wire2Flags) -> Result<()> {
+    let Wire2Flags {
+        v2,
+        v1,
+        evidence_contract_v2,
+        has_policy,
+        local_crawl,
+    } = flags;
     if !v2 {
         return Ok(());
     }
@@ -548,6 +559,7 @@ struct JobModes {
 /// body with `seosmith::families::build_all(store, id, report, stored, &SystemClock).await`
 /// when 8b-2's builders land. A job whose stored mode is `none` is labelled
 /// `capture_mode_changed`, as `build_all` will.
+#[allow(clippy::unused_async)] // the real `build_all` awaits the store
 async fn build_families(
     _store: &Store,
     _id: &str,
@@ -595,13 +607,10 @@ async fn process_jobs(
             tracing::info!(run_id=%request.request_id, "crawl started");
             let id = request.request_id.to_string();
             // A recovered job keeps the mode it was first claimed with.
-            let stored = match store.capture_mode(&id).await {
-                Ok(mode) => mode,
-                Err(_) => {
-                    fail_logged(&store, &id, JobErrorCode::StoreError).await;
-                    tracing::error!(run_id=%id, code=JobErrorCode::StoreError.as_str(), "capture mode unavailable");
-                    continue;
-                }
+            let Ok(stored) = store.capture_mode(&id).await else {
+                fail_logged(&store, &id, JobErrorCode::StoreError).await;
+                tracing::error!(run_id=%id, code=JobErrorCode::StoreError.as_str(), "capture mode unavailable");
+                continue;
             };
             let result = tokio::select! {
                 result = crawl_job(&store, &request, stored) => result,
@@ -1002,24 +1011,49 @@ mod tests {
 
     #[test]
     fn wire2_flag_refusals() {
-        let ok = |v2, v1, ev2, policy, crawl| check_wire2_flags(v2, v1, ev2, policy, crawl);
+        let on = Wire2Flags {
+            v2: true,
+            v1: true,
+            has_policy: true,
+            ..Wire2Flags::default()
+        };
+        let refusal = |flags| check_wire2_flags(flags).unwrap_err().to_string();
         // Off: anything goes (the existing checks handle the rest).
-        assert!(ok(false, false, false, false, false).is_ok());
-        assert!(ok(false, true, false, true, true).is_ok());
+        assert!(check_wire2_flags(Wire2Flags::default()).is_ok());
+        assert!(
+            check_wire2_flags(Wire2Flags {
+                v2: false,
+                local_crawl: true,
+                ..on
+            })
+            .is_ok()
+        );
         // On with v1 and a policy: accepted.
-        assert!(ok(true, true, false, true, false).is_ok());
+        assert!(check_wire2_flags(on).is_ok());
         // v2 without v1.
-        let e = ok(true, false, false, true, false).unwrap_err().to_string();
-        assert!(e.contains("SEOSMITH_POLICY_WIRE_V1"), "{e}");
+        assert!(refusal(Wire2Flags { v1: false, ..on }).contains("SEOSMITH_POLICY_WIRE_V1"));
         // v2 with the schema-2 evidence gate.
-        let e = ok(true, true, true, true, false).unwrap_err().to_string();
+        let e = refusal(Wire2Flags {
+            evidence_contract_v2: true,
+            ..on
+        });
         assert!(e.contains("SEOSMITH_EVIDENCE_CONTRACT_V2"), "{e}");
         // v2 without a policy.
-        let e = ok(true, true, false, false, false).unwrap_err().to_string();
-        assert!(e.contains("--advisory-policy"), "{e}");
+        assert!(
+            refusal(Wire2Flags {
+                has_policy: false,
+                ..on
+            })
+            .contains("--advisory-policy")
+        );
         // v2 on the local crawl subcommand.
-        let e = ok(true, true, false, true, true).unwrap_err().to_string();
-        assert!(e.contains("local crawl"), "{e}");
+        assert!(
+            refusal(Wire2Flags {
+                local_crawl: true,
+                ..on
+            })
+            .contains("local crawl")
+        );
     }
 
     #[test]

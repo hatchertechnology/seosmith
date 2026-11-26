@@ -207,11 +207,7 @@ fn check_item(report: &Report, item: &FamilyItem) -> Result<(), &'static str> {
 }
 
 /// Every section invariant of design 3.2 that the producer can break.
-fn check_section(
-    report: &Report,
-    key: FamilyKey,
-    section: &FamilySection,
-) -> Result<(), &'static str> {
+fn check_section(report: &Report, section: &FamilySection) -> Result<(), &'static str> {
     if section.section_version != 1 || section.semantics.is_empty() || section.semantics.len() > 64
     {
         return Err("section header");
@@ -395,14 +391,15 @@ fn assemble(
         let section = families.0.remove(&key).unwrap_or_else(|| {
             FamilySection::unavailable(key, placeholder_semantics(key), "analyzer_error")
         });
-        let section = match check_section(report, key, &section) {
+        let section = match check_section(report, &section) {
             Ok(()) => section,
             Err(_) => degraded(key, &section, "analyzer_error"),
         };
         checked.insert(key, section);
     }
     // Wrapper bytes: the object with six `null` sections.
-    let nulls: BTreeMap<FamilyKey, ()> = FamilyKey::ALL.iter().map(|k| (*k, ())).collect();
+    let nulls: BTreeMap<FamilyKey, Option<u8>> =
+        FamilyKey::ALL.iter().map(|k| (*k, None)).collect();
     let overhead = object_len(&nulls, plan.state)?.saturating_sub(6 * 4);
     let total = plan.budget.saturating_sub(overhead);
     let max_sum: usize = FAMILY_LIMITS.iter().map(|(_, l)| l.max_bytes).sum();
@@ -438,7 +435,7 @@ fn assemble(
         let section = set.0.get(&key).ok_or_else(|| invariant("family missing"))?;
         ensure_invariant!(
             section.items.len() <= limits_for(key).max_items
-                && check_section(report, key, section).is_ok(),
+                && check_section(report, section).is_ok(),
             "assembled family violates the contract"
         );
     }
