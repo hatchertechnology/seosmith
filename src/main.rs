@@ -460,6 +460,26 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// A fixed, redacted label for a crawl failure: the kind of the first recognisable
+/// cause in the chain, never its message (which can carry a URL or stored content).
+fn crawl_failure_reason(error: &anyhow::Error) -> &'static str {
+    for cause in error.chain() {
+        if cause.is::<reqwest::Error>() {
+            return "http_client_error";
+        }
+        if cause.is::<sqlx::Error>() {
+            return "store_error";
+        }
+        if cause.is::<serde_json::Error>() {
+            return "decode_error";
+        }
+        if cause.is::<std::io::Error>() {
+            return "io_error";
+        }
+    }
+    "unclassified"
+}
+
 async fn process_jobs(
     store: Store,
     stopped: &mut watch::Receiver<bool>,
@@ -485,9 +505,10 @@ async fn process_jobs(
                     store
                         .fail_with(&request.request_id.to_string(), code)
                         .await?;
-                    // The code and the top-level message only: never the `{:#}` chain
-                    // (see the no-diagnostics rule in the operations handler above).
-                    tracing::error!(run_id=%request.request_id, code=code.as_str(), %error, "crawl failed");
+                    // The code and a fixed reason only: never the error's `Display` (a
+                    // reqwest error appends the request URL) or its `{:#}` chain (see the
+                    // no-diagnostics rule in the operations handler above).
+                    tracing::error!(run_id=%request.request_id, code=code.as_str(), reason=crawl_failure_reason(&error), "crawl failed");
                 }
             }
         } else {
@@ -682,6 +703,27 @@ async fn finalize_job(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn crawl_failure_reason_never_carries_a_url_or_message() {
+        // A real reqwest error: its Display appends " for url (...)".
+        let error = reqwest::Client::new()
+            .get("http://127.0.0.1:1/private-path?token=SECRET")
+            .send()
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("SECRET"), "premise: {error}");
+        let wrapped = anyhow::Error::new(error).context("fetching https://secret.example/");
+        let reason = crawl_failure_reason(&wrapped);
+        assert_eq!(reason, "http_client_error");
+        assert!(!reason.contains("SECRET") && !reason.contains("secret"));
+        let decode = serde_json::from_str::<u8>("\"yyy-secret\"").unwrap_err();
+        assert_eq!(crawl_failure_reason(&decode.into()), "decode_error");
+        assert_eq!(
+            crawl_failure_reason(&anyhow::anyhow!("path /secret")),
+            "unclassified"
+        );
+    }
 
     #[tokio::test]
     async fn wire_generation_failure_fails_the_job_and_the_next_job_finalizes() -> Result<()> {

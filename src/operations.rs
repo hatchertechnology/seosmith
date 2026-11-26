@@ -444,6 +444,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_failed_crawl_stores_crawl_internal_error_not_the_deadline_code() {
+        let (_dir, store, r) = fixture().await;
+        run_bounded(&store, &r, async {
+            anyhow::bail!("boom with https://secret.example/")
+        })
+        .await
+        .unwrap();
+        let view = store
+            .view(&r.request_id.to_string())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(view.state, "failed");
+        assert_eq!(view.error.as_deref(), Some("crawl_internal_error"));
+    }
+
+    #[tokio::test]
     async fn cancellation_winning_finish_race_cannot_commit_clean_report() {
         let (_dir, store, r) = fixture().await;
         let report: model::Report = serde_json::from_value(json!({

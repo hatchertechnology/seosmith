@@ -2080,9 +2080,12 @@ mod tests {
     }
 
     #[test]
-    fn hashmap_universe_is_not_quadratic() {
+    fn hashmap_universe_has_one_entry_per_entity_and_logs_timing() {
         // 1,024 entities and about 11,000 candidate ids, the wire-2 geometry. The
-        // pairwise check does 11 M SHA-256 hashes here; print both for the record.
+        // pairwise check hashes a candidate per page per id here (millions of SHA-256). The
+        // timing is logged for the record only: a wall-clock comparison would flake, so
+        // the assertions below are on results (`hashmap_universe_equals_the_pairwise_check`
+        // is the correctness test) and the F15 evidence is `wire_scale`.
         let mut report: Report =
             serde_json::from_str(include_str!("../fixtures/contracts/legacy.json")).unwrap();
         let template = report.pages[0].clone();
@@ -2103,6 +2106,7 @@ mod tests {
             .collect();
         let started = std::time::Instant::now();
         let universe = candidate_universe(&report);
+        assert_eq!(universe.len(), 1_024, "one entry per entity");
         assert!(ids.iter().all(|id| in_universe(&universe, id)));
         let fast = started.elapsed();
         let started = std::time::Instant::now();
@@ -2112,6 +2116,5 @@ mod tests {
             "F15: HashMap check over {} ids: {fast:?}; pairwise check over the first 300 ids alone: {slow_300:?}",
             ids.len()
         );
-        assert!(fast < slow_300, "{fast:?} vs {slow_300:?}");
     }
 }
