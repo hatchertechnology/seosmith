@@ -627,7 +627,7 @@ impl Store {
     pub async fn pending(&self) -> Result<Option<(String, String, String, i64)>> {
         // Pick the id first: the ORDER BY sorter then carries only the key, never the
         // multi-megabyte report, so it cannot outgrow its memory budget and spill.
-        let Some(id): Option<String> = sqlx::query_scalar("SELECT id FROM jobs WHERE report IS NOT NULL AND (execution_mode='standard' OR execution_mode IS NULL) AND delivery_state='pending' AND next_attempt<=unixepoch() ORDER BY created LIMIT 1").fetch_optional(&self.0).await? else {
+        let Some(id): Option<String> = sqlx::query_scalar("SELECT id FROM jobs WHERE report IS NOT NULL AND (execution_mode='standard' OR execution_mode IS NULL) AND delivery_state='pending' AND next_attempt<=unixepoch() ORDER BY created,id LIMIT 1").fetch_optional(&self.0).await? else {
             return Ok(None);
         };
         let row = sqlx::query("SELECT id,report,report_hash,attempts FROM jobs WHERE id=? AND report IS NOT NULL AND delivery_state='pending'")
