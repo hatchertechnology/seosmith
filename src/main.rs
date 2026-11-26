@@ -11,6 +11,7 @@ use seosmith::{
     crawler,
     delivery::Delivery,
     fetch::service_url,
+    generation_error::{GenerationError, JobErrorCode},
     model::CrawlRequest,
     store::Store,
 };
@@ -372,16 +373,23 @@ async fn main() -> Result<()> {
             if let Some(policy) = &policy {
                 // Under --policy-wire-v1 the job stays local-only: this prints the exact
                 // bytes the worker would store and deliver, and delivers nothing.
+                let mut failure = JobErrorCode::CrawlInternalError;
                 let result = if cli.policy_wire_v1 {
                     seosmith::finding_coverage_prototype::generate_wire_v1(&mut report, policy)
                         .map(|bytes| wire_bytes = Some(bytes))
+                        .map_err(|error| {
+                            failure = error.code;
+                            anyhow::Error::from(error)
+                        })
                 } else {
                     seosmith::policy::apply_with_evidence(&mut report, policy)
                 };
                 if result.is_ok() {
                     store.finish_local_only(&job.request_id.to_string()).await?;
                 } else {
-                    store.fail(&job.request_id.to_string()).await?;
+                    store
+                        .fail_with(&job.request_id.to_string(), failure)
+                        .await?;
                 }
                 result?;
             } else if !finalize_job(&store, &mut report, cli.evidence_contract_v2, None).await? {
@@ -462,14 +470,22 @@ async fn process_jobs(
         if let Some(request) = store.claim().await? {
             tracing::info!(run_id=%request.request_id, "crawl started");
             let result = tokio::select! {
-                result = crawler::crawl(&store, &request) => result,
+                result = crawl_job(&store, &request) => result,
                 _ = stopped.changed() => return Ok(()),
             };
-            if let Ok(mut report) = result {
-                finalize_job(&store, &mut report, evidence_contract_v2, wire_policy).await?;
-            } else {
-                store.fail(&request.request_id.to_string()).await?;
-                tracing::error!(run_id=%request.request_id, "crawl failed");
+            match result {
+                Ok(mut report) => {
+                    finalize_job(&store, &mut report, evidence_contract_v2, wire_policy).await?;
+                }
+                Err(error) => {
+                    let code = JobErrorCode::CrawlInternalError;
+                    store
+                        .fail_with(&request.request_id.to_string(), code)
+                        .await?;
+                    // The code and the top-level message only: never the `{:#}` chain
+                    // (see the no-diagnostics rule in the operations handler above).
+                    tracing::error!(run_id=%request.request_id, code=code.as_str(), %error, "crawl failed");
+                }
             }
         } else {
             tokio::select! {
@@ -480,21 +496,46 @@ async fn process_jobs(
     }
 }
 
+/// The standard worker's crawl. Offline acceptance builds
+/// (`local-cli-fixtures`) answer from `SEOSMITH_LOCAL_FIXTURES` when it is set,
+/// so a test can drive the whole `serve` worker without a network. Without the
+/// feature, or with the variable unset, this is exactly `crawler::crawl`.
+async fn crawl_job(store: &Store, request: &CrawlRequest) -> Result<seosmith::model::Report> {
+    #[cfg(feature = "local-cli-fixtures")]
+    if let Some(fixtures) = load_fixtures()? {
+        // A fixture transport touches no origin, so the per-fetch politeness
+        // delay is skipped; the report keeps the request's real delay.
+        let mut unpaced = request.clone();
+        unpaced.delay_ms = 0;
+        let mut report = crawler::crawl_with(store, &unpaced, &FixtureTransport(fixtures)).await?;
+        report.request.delay_ms = request.delay_ms;
+        return Ok(report);
+    }
+    crawler::crawl(store, request).await
+}
+
 // The optional fixture transport is compiled only for offline acceptance. It never
-// falls back to the network and is only consulted by the local policy-mode CLI.
+// falls back to the network and is only consulted by the local policy-mode CLI
+// and, through `crawl_job`, by an offline-acceptance `serve`.
 async fn local_crawl(store: &Store, request: &CrawlRequest) -> Result<seosmith::model::Report> {
     #[cfg(feature = "local-cli-fixtures")]
-    if let Some(path) = std::env::var_os("SEOSMITH_LOCAL_FIXTURES") {
-        let mut bytes = Vec::new();
-        std::fs::File::open(path)?
-            .take(1024 * 1024 + 1)
-            .read_to_end(&mut bytes)?;
-        ensure!(bytes.len() <= 1024 * 1024, "fixture file exceeds limit");
-        let fixtures: std::collections::BTreeMap<String, FixtureResponse> =
-            serde_json::from_slice(&bytes)?;
+    if let Some(fixtures) = load_fixtures()? {
         return crawler::crawl_local_with(store, request, &FixtureTransport(fixtures)).await;
     }
     crawler::crawl_local(store, request).await
+}
+
+#[cfg(feature = "local-cli-fixtures")]
+fn load_fixtures() -> Result<Option<std::collections::BTreeMap<String, FixtureResponse>>> {
+    let Some(path) = std::env::var_os("SEOSMITH_LOCAL_FIXTURES") else {
+        return Ok(None);
+    };
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(1024 * 1024 + 1)
+        .read_to_end(&mut bytes)?;
+    ensure!(bytes.len() <= 1024 * 1024, "fixture file exceeds limit");
+    Ok(Some(serde_json::from_slice(&bytes)?))
 }
 
 #[cfg(feature = "local-cli-fixtures")]
@@ -553,8 +594,8 @@ fn loopback_http_allowed(value: &str) -> bool {
         })
 }
 
-async fn fail_logged(store: &Store, id: &str) {
-    if let Err(error) = store.fail(id).await {
+async fn fail_logged(store: &Store, id: &str, code: JobErrorCode) {
+    if let Err(error) = store.fail_with(id, code).await {
         tracing::error!(run_id=%id, %error, "could not mark the job failed");
     }
 }
@@ -573,8 +614,10 @@ async fn finalize_job(
         let bytes = match seosmith::finding_coverage_prototype::generate_wire_v1(report, policy) {
             Ok(bytes) => bytes,
             Err(error) => {
-                fail_logged(store, &id).await;
-                tracing::error!(run_id=%id, %error, "schema-4 generation failed");
+                fail_logged(store, &id, error.code).await;
+                // Code and fixed detail only: `detail` is a literal, so it cannot
+                // carry request data (the no-diagnostics rule).
+                tracing::error!(run_id=%id, code=error.code.as_str(), detail=error.detail, "schema-4 generation failed");
                 return Ok(false);
             }
         };
@@ -588,23 +631,36 @@ async fn finalize_job(
                     {
                         return Ok(false);
                     }
-                    fail_logged(store, &id).await;
-                    tracing::error!(run_id=%id, %error, "schema-4 persistence failed");
+                    let code = if error.is::<seosmith::store::ReportTooLarge>() {
+                        JobErrorCode::ReportByteLimit
+                    } else {
+                        JobErrorCode::StoreError
+                    };
+                    fail_logged(store, &id, code).await;
+                    tracing::error!(run_id=%id, code=code.as_str(), %error, "schema-4 persistence failed");
                     false
                 }
             },
         );
     }
     if v2 && let Err(error) = seosmith::contract::enable_v2(report) {
-        store.fail(&report.request.request_id.to_string()).await?;
-        tracing::error!(run_id=%report.request.request_id, %error, "evidence finalization failed");
+        let error = GenerationError::from(error);
+        store
+            .fail_with(&report.request.request_id.to_string(), error.code)
+            .await?;
+        tracing::error!(run_id=%report.request.request_id, code=error.code.as_str(), detail=error.detail, "evidence finalization failed");
         return Ok(false);
     }
     match store.finish(report).await {
         Ok(()) => Ok(true),
         Err(error) if error.is::<seosmith::store::ReportTooLarge>() => {
-            store.fail(&report.request.request_id.to_string()).await?;
-            tracing::error!(run_id=%report.request.request_id, %error, "report finalization failed");
+            store
+                .fail_with(
+                    &report.request.request_id.to_string(),
+                    JobErrorCode::ReportByteLimit,
+                )
+                .await?;
+            tracing::error!(run_id=%report.request.request_id, code=JobErrorCode::ReportByteLimit.as_str(), %error, "report finalization failed");
             Ok(false)
         }
         Err(error) => {
@@ -634,7 +690,7 @@ mod tests {
         // exceed the HTP byte cap without tripping the string limit.
         let mut oversized = fixture_input("complete-missing-h1")?;
         let template = oversized.pages[0].clone();
-        oversized.pages = (0..400)
+        oversized.pages = (0..230)
             .map(|i| {
                 let mut page = template.clone();
                 page.url = format!("https://example.com/p{i}");
@@ -656,6 +712,9 @@ mod tests {
             .await?
             .unwrap();
         assert_eq!(failed.state, "failed");
+        // Named, not the untyped fallback: the cause is the HTP byte cap (230 pages
+        // keep the S14 manifest well under its own limit; 400 would trip that first).
+        assert_eq!(failed.error.as_deref(), Some("report_byte_limit"));
         // The cause is the HTP byte cap, not the string limit or another error.
         let mut again = oversized.clone();
         again.findings.clear();
@@ -675,6 +734,58 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&body)?["schema_version"],
             4
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn persistence_failure_is_store_error_and_the_next_job_finalizes() -> Result<()> {
+        use seosmith::finding_coverage_prototype::fixture_input;
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(dir.path().join("w.sqlite").to_str().unwrap()).await?;
+        let policy = seosmith::policy::AdvisoryPolicy::default();
+        let mut stuck = fixture_input("complete-missing-h1")?;
+        let mut ok = fixture_input("complete-clean-h1")?;
+        for report in [&mut stuck, &mut ok] {
+            report.request.request_id = uuid::Uuid::new_v4();
+            store.submit(&report.request).await?;
+            store.claim().await?.unwrap();
+        }
+        // The job row already holds a report, so persisting a second one cannot succeed.
+        sqlx::query("UPDATE jobs SET report='{}' WHERE id=?")
+            .bind(stuck.request.request_id.to_string())
+            .execute(&store.0)
+            .await?;
+        assert!(!finalize_job(&store, &mut stuck, false, Some(&policy)).await?);
+        let view = store
+            .view(&stuck.request.request_id.to_string())
+            .await?
+            .unwrap();
+        assert_eq!(
+            (view.state.as_str(), view.error.as_deref()),
+            ("failed", Some("store_error"))
+        );
+        assert!(finalize_job(&store, &mut ok, false, Some(&policy)).await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_invariant_failure_is_generation_invariant() -> Result<()> {
+        use seosmith::finding_coverage_prototype::fixture_input;
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(dir.path().join("w.sqlite").to_str().unwrap()).await?;
+        let policy = seosmith::policy::AdvisoryPolicy::default();
+        let mut report = fixture_input("complete-missing-h1")?;
+        let again = report.pages[0].clone();
+        report.pages.push(again); // a duplicate source entity
+        report.request.request_id = uuid::Uuid::new_v4();
+        store.submit(&report.request).await?;
+        store.claim().await?.unwrap();
+        assert!(!finalize_job(&store, &mut report, false, Some(&policy)).await?);
+        let view = store
+            .view(&report.request.request_id.to_string())
+            .await?
+            .unwrap();
+        assert_eq!(view.error.as_deref(), Some("generation_invariant"));
         Ok(())
     }
 

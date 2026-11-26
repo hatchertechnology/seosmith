@@ -116,8 +116,28 @@ fabricated clean audit.
 
 The adapter adds a hard timeout around the entire crawler future, including
 initial discovery. Deadline exhaustion records `failed` with
-`adapter_deadline_exceeded`; internal crawl failure records `crawl_internal_error`.
-Checkpoints remain, but these failures may have no final report. A host kill can
+`adapter_deadline_exceeded`; internal crawl failure records `crawl_internal_error`;
+a report over the byte limit records `report_byte_limit`.
+Checkpoints remain, but these failures may have no final report.
+
+`jobs.error` takes one of a fixed set of codes (`src/generation_error.rs`,
+`JobErrorCode`). Hosted `serve` jobs can also record the schema-4 generation codes:
+
+| Code | Meaning |
+|---|---|
+| `crawl_internal_error` | The crawl future returned an error. Also the fallback of `Store::fail`. |
+| `report_byte_limit` | The report is over a byte bound (16 MiB report, or the 4,952,756 B HTP cap). |
+| `policy_manifest_limit` | The S14 manifest is over 262,144 B (it grows with crawled entities and with out-of-scope links). |
+| `evidence_extension_limit` | `evidence_contract` is over its 1 MiB extension limit. |
+| `policy_extension_limit` | `policy_guidance` or its canonical policy is over its limit. |
+| `population_mismatch` | A recomputed population (findings, edges, candidate contract) differs from the retained one. |
+| `generation_invariant` | Any other generation check, including an unclassified generation error. |
+| `store_error` | Persisting the finished report failed. |
+| `adapter_deadline_exceeded` | The operations adapter ran out of time. |
+
+The worker logs the code, and for generation failures a fixed detail, never the
+error chain, a request body or a token. Codes are only ever added; the stored text
+is a contract with the status API. A host kill can
 leave execution unknown. Never interpret zero findings, missing report, partial
 coverage, a process exit, or accepted cancellation as a clean audit.
 

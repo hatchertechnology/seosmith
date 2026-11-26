@@ -1,9 +1,12 @@
 //! Local candidate validation only. This is not a receiver or a frozen wire contract.
+use crate::generation_error::{
+    GenerationError, JobErrorCode, ensure_coded, ensure_invariant, invariant,
+};
 use crate::{
     contract,
     model::{Report, digest},
 };
-use anyhow::{Result, ensure};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 
@@ -168,15 +171,47 @@ fn canonical_policy(report: &Report, policy: &crate::policy::AdvisoryPolicy) -> 
         &serde_json::json!({"catalog_version":"s14-1","policy":policy,"collection":{"seed_url":report.request.url,"max_pages":report.request.max_pages,"max_resources":report.request.max_resources,"check_external_links":report.request.check_external_links},"schema_version":3,"validator_version":"s14-1"}),
     )?)
 }
+/// Entity id of every report page, mapped to the most links any page with that
+/// id has. Built once per `validate`: the check used to hash every page for
+/// every candidate id (ids x pages SHA-256 computations, run three times per
+/// job), which is quadratic in the crawl size (F15).
+fn candidate_universe(report: &Report) -> std::collections::HashMap<String, usize> {
+    let mut universe = std::collections::HashMap::new();
+    for page in &report.pages {
+        let links = universe
+            .entry(contract::entity_id(&page.url, page.is_resource))
+            .or_insert(0);
+        *links = (*links).max(page.links.len());
+    }
+    universe
+}
+
+/// A candidate id is a page's entity id, or `<entity id>|edge:<i>` with a
+/// canonical decimal `i` below that page's link count.
+fn in_universe(universe: &std::collections::HashMap<String, usize>, id: &str) -> bool {
+    if universe.contains_key(id) {
+        return true;
+    }
+    id.split_once("|edge:").is_some_and(|(entity, n)| {
+        universe.get(entity).is_some_and(|links| {
+            n.parse::<usize>()
+                .ok()
+                .filter(|i| i.to_string() == n)
+                .is_some_and(|i| i < *links)
+        })
+    })
+}
+
 /// Validates bounded, local candidate vectors against their original report. Not suitable for accepting external bytes.
 #[allow(clippy::items_after_statements)]
 fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]) -> Result<()> {
-    ensure!(
+    ensure_invariant!(
         candidate.observed_at.started_at == report.started_at
             && candidate.observed_at.finished_at == report.finished_at,
         "observation interval mismatch"
     );
-    ensure!(
+    ensure_coded!(
+        JobErrorCode::PolicyExtensionLimit,
         candidate.policy_canonical_json.len() <= 65536,
         "policy limit"
     );
@@ -191,8 +226,8 @@ fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]) ->
             _ => true,
         }
     }
-    ensure!(bounded_strings(&value), "policy string limit");
-    ensure!(
+    ensure_invariant!(bounded_strings(&value), "policy string limit");
+    ensure_invariant!(
         value.is_object()
             && integers(&value)
             && serde_json::to_string(&value)? == candidate.policy_canonical_json,
@@ -202,22 +237,23 @@ fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]) ->
         value
             .get("policy")
             .cloned()
-            .ok_or_else(|| anyhow::anyhow!("policy missing"))?,
+            .ok_or_else(|| invariant("policy missing"))?,
     )?;
     config.validate()?;
-    ensure!(
+    ensure_invariant!(
         canonical_policy(report, &config)? == candidate.policy_canonical_json,
         "policy fields or request mismatch"
     );
-    ensure!(
+    ensure_coded!(
+        JobErrorCode::ReportByteLimit,
         contract::serialized_size(report)? <= contract::MAX_REPORT_BYTES,
         "report size or depth"
     );
-    ensure!(
+    ensure_invariant!(
         bounded_strings(&serde_json::to_value(report)?),
         "report string limit"
     );
-    ensure!(
+    ensure_invariant!(
         candidate.policy_digest
             == format!(
                 "sha256:{}",
@@ -225,7 +261,7 @@ fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]) ->
             ),
         "policy digest"
     );
-    ensure!(
+    ensure_invariant!(
         candidate
             .records
             .iter()
@@ -234,24 +270,26 @@ fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]) ->
             <= 128,
         "observation limit"
     );
-    ensure!(
+    ensure_invariant!(
         manifest.len() <= 256
             && candidate.coverage.len() == manifest.len()
             && candidate.records.len() <= 512,
         "count limit"
     );
-    ensure!(
+    ensure_coded!(
+        JobErrorCode::PolicyManifestLimit,
         serde_json::to_vec(manifest)?.len() <= 262_144,
         "manifest byte limit"
     );
-    ensure!(
+    ensure_invariant!(
         candidate.scope_digest == scope_digest(report)
             && candidate.manifest_digest == manifest_digest(manifest),
         "scope or manifest digest"
     );
+    let universe = candidate_universe(report);
     let mut manifest_keys = HashSet::new();
     for row in manifest {
-        ensure!(
+        ensure_invariant!(
             component(&row.category)
                 && component(&row.rule_id)
                 && component(&row.rule_version)
@@ -259,17 +297,10 @@ fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]) ->
             "invalid manifest"
         );
         let mut unique = HashSet::new();
-        ensure!(
-            row.candidates.iter().all(|id| unique.insert(id)
-                && report.pages.iter().any(|p| {
-                    let entity = contract::entity_id(&p.url, p.is_resource);
-                    if *id == entity {
-                        return true;
-                    }
-                    id.strip_prefix(&(entity + "|edge:"))
-                        .and_then(|n| n.parse::<usize>().ok().filter(|i| i.to_string() == n))
-                        .is_some_and(|i| i < p.links.len())
-                })),
+        ensure_invariant!(
+            row.candidates
+                .iter()
+                .all(|id| unique.insert(id) && in_universe(&universe, id)),
             "invalid candidate universe"
         );
     }
@@ -277,11 +308,11 @@ fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]) ->
         serde_json::from_str(include_str!("../fixtures/policies/state-matrix.json"))?;
     let tuples = matrix["tuples"]
         .as_array()
-        .ok_or_else(|| anyhow::anyhow!("invalid matrix"))?;
+        .ok_or_else(|| invariant("invalid matrix"))?;
     let mut ids = HashSet::new();
     let original = serde_json::to_value(report)?;
     for r in &candidate.records {
-        ensure!(
+        ensure_invariant!(
             [
                 &r.category,
                 &r.rule_id,
@@ -293,14 +324,14 @@ fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]) ->
             .all(|s| component(s)),
             "invalid identity component"
         );
-        ensure!(
+        ensure_invariant!(
             r.record_id == record_id(r) && ids.insert(&r.record_id),
             "record identity"
         );
         let rule = manifest
             .iter()
             .find(|m| m.category == r.category && m.rule_id == r.rule_id)
-            .ok_or_else(|| anyhow::anyhow!("unknown rule"))?;
+            .ok_or_else(|| invariant("unknown rule"))?;
         let binding = match r.rule_id.as_str() {
             "short_title" => Some(("title_min", "title")),
             "long_title" => Some(("title_max", "title")),
@@ -319,28 +350,28 @@ fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]) ->
                 "noindex" => "robots",
                 "http_redirect" | "external_target" => "status",
                 "alternates_observed" => "alternates",
-                _ => anyhow::bail!("unknown observation rule"),
+                _ => return Err(invariant("unknown observation rule").into()),
             };
             if let Some(pointer) = &r.source_locator {
-                ensure!(
+                ensure_invariant!(
                     pointer.ends_with(&format!("/{field}")) && pointer.split('/').count() == 4,
                     "wrong observation source field"
                 );
             }
         }
         if let Some((key, field)) = binding {
-            ensure!(
+            ensure_invariant!(
                 rule.expected_pointer.as_deref() == Some(format!("/policy/{key}").as_str()),
                 "wrong rule policy source"
             );
             if let Some(pointer) = &r.source_locator {
-                ensure!(
+                ensure_invariant!(
                     pointer.ends_with(&format!("/{field}")) && pointer.split('/').count() == 4,
                     "wrong rule source field"
                 );
             }
         }
-        ensure!(
+        ensure_invariant!(
             rule.rule_version == r.rule_version
                 && rule.candidates.contains(&if r.discriminator == "self" {
                     r.entity_id.clone()
@@ -350,7 +381,7 @@ fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]) ->
                 && (r.attempt != "completed" || r.expected == rule.expected_pointer),
             "rule or scope mismatch"
         );
-        ensure!(
+        ensure_invariant!(
             r.discriminator == "self"
                 || (r.category == "observation"
                     && r.rule_id == "external_link"
@@ -358,26 +389,26 @@ fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]) ->
             "invalid edge scope"
         );
         if r.discriminator == "self" {
-            ensure!(
+            ensure_invariant!(
                 r.target_locator.is_none() && r.context_locator.is_none(),
                 "unexpected self provenance"
             );
         } else {
-            ensure!(r.context_locator.is_some(), "edge context required");
+            ensure_invariant!(r.context_locator.is_some(), "edge context required");
             let edge = r
                 .context_locator
                 .as_ref()
                 .and_then(|p| original.pointer(p))
                 .and_then(|v| v.get("url"))
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| anyhow::anyhow!("edge target absent"))?;
+                .ok_or_else(|| invariant("edge target absent"))?;
             if r.outcome == "observed" {
                 let target = r
                     .target_locator
                     .as_deref()
-                    .ok_or_else(|| anyhow::anyhow!("target provenance required"))?;
+                    .ok_or_else(|| invariant("target provenance required"))?;
                 let parts: Vec<_> = target.split('/').collect();
-                ensure!(
+                ensure_invariant!(
                     parts.len() == 4
                         && parts[0].is_empty()
                         && parts[1] == "pages"
@@ -385,7 +416,7 @@ fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]) ->
                     "target pointer"
                 );
                 let n: usize = parts[2].parse()?;
-                ensure!(
+                ensure_invariant!(
                     parts[2] == n.to_string()
                         && report.pages.get(n).is_some_and(|p| p.url == edge
                             && p.status.is_some()
@@ -394,7 +425,7 @@ fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]) ->
                     "target mismatch"
                 );
             } else {
-                ensure!(r.target_locator.is_none(), "unknown target provenance");
+                ensure_invariant!(r.target_locator.is_none(), "unknown target provenance");
             }
         }
         let row = tuples
@@ -406,14 +437,14 @@ fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]) ->
                     && t["outcome"] == r.outcome
                     && t["actual"] == r.actual
             })
-            .ok_or_else(|| anyhow::anyhow!("invalid tuple"))?;
-        ensure!(
+            .ok_or_else(|| invariant("invalid tuple"))?;
+        ensure_invariant!(
             row["confidence"] == r.confidence
                 && r.interval_ref == "candidate.observed_at"
                 && r.policy_ref == candidate.policy_digest,
             "confidence or inheritance"
         );
-        ensure!(
+        ensure_invariant!(
             if row["expected"] == "policy_source" {
                 r.expected
                     .as_ref()
@@ -423,12 +454,12 @@ fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]) ->
             },
             "expected policy source"
         );
-        ensure!(
+        ensure_invariant!(
             (r.category == "observation" && r.attempt == "completed") == r.observed_fact.is_some(),
             "observation fact state"
         );
         let needs_reason = row["reason"] == "required";
-        ensure!(
+        ensure_invariant!(
             if needs_reason {
                 r.reason.as_ref().is_some_and(|s| component(s)) && r.source_locator.is_none()
             } else {
@@ -437,23 +468,23 @@ fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]) ->
             "invalid provenance"
         );
         for pointer in r.source_locator.iter().chain(r.context_locator.iter()) {
-            ensure!(valid_pointer(pointer), "invalid source pointer");
+            ensure_invariant!(valid_pointer(pointer), "invalid source pointer");
             let parts: Vec<_> = pointer.split('/').collect();
-            ensure!(
+            ensure_invariant!(
                 parts.len() >= 3 && parts[0].is_empty() && parts[1] == "pages",
                 "source pointer"
             );
             let i: usize = parts[2].parse()?;
-            ensure!(parts[2] == i.to_string(), "noncanonical index");
+            ensure_invariant!(parts[2] == i.to_string(), "noncanonical index");
             let page = report
                 .pages
                 .get(i)
-                .ok_or_else(|| anyhow::anyhow!("page absent"))?;
-            ensure!(
+                .ok_or_else(|| invariant("page absent"))?;
+            ensure_invariant!(
                 r.entity_id == contract::entity_id(&page.url, page.is_resource),
                 "source entity mismatch"
             );
-            ensure!(original.pointer(pointer).is_some(), "source missing");
+            ensure_invariant!(original.pointer(pointer).is_some(), "source missing");
             if r.category == "observation" && r.attempt == "completed" {
                 let expected_fact = match r.rule_id.as_str() {
                     "noindex" => serde_json::json!(page.noindex()),
@@ -469,18 +500,18 @@ fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]) ->
                             .target_locator
                             .as_deref()
                             .and_then(|p| original.pointer(p))
-                            .ok_or_else(|| anyhow::anyhow!("target status missing"))?;
+                            .ok_or_else(|| invariant("target status missing"))?;
                         target.clone()
                     }
-                    _ => anyhow::bail!("unknown observation"),
+                    _ => return Err(invariant("unknown observation").into()),
                 };
-                ensure!(
+                ensure_invariant!(
                     r.observed_fact.as_ref() == Some(&expected_fact),
                     "observation fact mismatch"
                 );
             }
 
-            ensure!(
+            ensure_invariant!(
                 r.discriminator == "self"
                     || (parts.len() >= 5
                         && parts[3] == "links"
@@ -489,13 +520,13 @@ fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]) ->
             );
         }
     }
-    ensure!(
+    ensure_invariant!(
         serde_json::to_vec(&candidate.coverage)?.len() <= 262_144,
         "coverage byte limit"
     );
     let mut covered = HashSet::new();
     for c in &candidate.coverage {
-        ensure!(
+        ensure_invariant!(
             manifest.iter().any(|m| m.category == c.category
                 && m.rule_id == c.rule_id
                 && m.candidates.len() == c.candidates)
@@ -507,14 +538,14 @@ fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]) ->
             .iter()
             .filter(|r| r.category == c.category && r.rule_id == c.rule_id)
             .collect();
-        ensure!(
+        ensure_invariant!(
             !c.complete
                 || (report.coverage_complete
                     && c.omitted == 0
                     && *c.outcomes.get("unknown").unwrap_or(&0) == 0),
             "invalid completeness"
         );
-        ensure!(
+        ensure_invariant!(
             (c.omitted == 0 && c.omission_reason.is_none())
                 || (c.omitted > 0
                     && matches!(
@@ -523,7 +554,7 @@ fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]) ->
                     )),
             "omission reason"
         );
-        ensure!(
+        ensure_invariant!(
             selected.len() == c.emitted && c.emitted.checked_add(c.omitted) == Some(c.candidates),
             "coverage total"
         );
@@ -537,7 +568,7 @@ fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]) ->
                 &["completed", "not_attempted", "unknown"][..],
             ),
         ] {
-            ensure!(
+            ensure_invariant!(
                 counts.keys().all(|k| allowed.contains(&k.as_str()))
                     && counts.values().try_fold(0usize, |a, b| a.checked_add(*b))
                         == Some(c.candidates),
@@ -551,13 +582,13 @@ fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]) ->
                     .entry(if get == 0 { &r.eligibility } else { &r.attempt })
                     .or_default() += 1;
             }
-            ensure!(
+            ensure_invariant!(
                 seen.iter()
                     .all(|(k, v)| counts.get(*k).is_some_and(|n| n >= v)),
                 "coverage state reconciliation"
             );
         }
-        ensure!(
+        ensure_invariant!(
             c.outcomes
                 .values()
                 .try_fold(0usize, |a, b| a.checked_add(*b))
@@ -568,23 +599,23 @@ fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]) ->
         for r in &selected {
             *counts.entry(&r.outcome).or_default() += 1;
         }
-        ensure!(
+        ensure_invariant!(
             counts
                 .iter()
                 .all(|(k, v)| c.outcomes.get(*k).is_some_and(|n| n >= v)),
             "outcome reconciliation"
         );
-        ensure!(
+        ensure_invariant!(
             c.outcomes.keys().all(|outcome| tuples
                 .iter()
                 .any(|t| t["category"] == c.category && t["outcome"] == *outcome)),
             "unknown outcome"
         );
-        ensure!(
+        ensure_invariant!(
             c.unknown_reasons.values().all(|count| *count > 0),
             "zero unknown reason count"
         );
-        ensure!(
+        ensure_invariant!(
             c.unknown_reasons.len() <= 64
                 && c.unknown_reasons
                     .keys()
@@ -599,14 +630,14 @@ fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]) ->
                 *emitted_reasons.entry(reason).or_default() += 1;
             }
         }
-        ensure!(
+        ensure_invariant!(
             emitted_reasons.iter().all(|(key, count)| c
                 .unknown_reasons
                 .get(*key)
                 .is_some_and(|total| total >= count)),
             "unknown reason reconciliation"
         );
-        ensure!(
+        ensure_invariant!(
             c.unknown_reasons
                 .values()
                 .try_fold(0usize, |a, b| a.checked_add(*b))
@@ -704,10 +735,33 @@ pub(crate) fn source_unavailable(page: &crate::model::Page) -> bool {
 pub fn generate(
     report: &Report,
     policy: &crate::policy::AdvisoryPolicy,
+) -> Result<(Candidate, Vec<ManifestRow>), GenerationError> {
+    let (contract, manifest) = build(report, policy)?;
+    validate(&contract, report, &manifest)?;
+    Ok((contract, manifest))
+}
+
+/// [`generate`] without the final [`validate`]: the candidate and manifest
+/// exactly as the generator built them, even when they are over a limit.
+///
+/// A measurement helper. The manifest is the first limit seosmith#64 hits, and
+/// its size cannot be read from a report that fails generation; `wire_scale`
+/// and the 8e acceptance record use this to print it. Nothing delivers its
+/// output.
+pub fn generate_unvalidated(
+    report: &Report,
+    policy: &crate::policy::AdvisoryPolicy,
+) -> Result<(Candidate, Vec<ManifestRow>), GenerationError> {
+    Ok(build(report, policy)?)
+}
+
+fn build(
+    report: &Report,
+    policy: &crate::policy::AdvisoryPolicy,
 ) -> Result<(Candidate, Vec<ManifestRow>)> {
-    report.request.validate()?;
-    policy.validate()?;
-    ensure!(
+    ensure_invariant!(report.request.validate().is_ok(), "invalid crawl request");
+    ensure_invariant!(policy.validate().is_ok(), "invalid advisory policy");
+    ensure_invariant!(
         report.request.binding_generation <= 9_007_199_254_740_991,
         "binding generation exceeds safe integer range"
     );
@@ -1104,7 +1158,6 @@ pub fn generate(
     contract.coverage.push(edge_coverage);
     manifest.push(edge_manifest);
     contract.manifest_digest = manifest_digest(&manifest);
-    validate(&contract, report, &manifest)?;
     Ok((contract, manifest))
 }
 
@@ -1114,11 +1167,17 @@ pub fn validate_generated(
     manifest: &[ManifestRow],
     report: &Report,
     policy: &crate::policy::AdvisoryPolicy,
-) -> Result<()> {
+) -> Result<(), GenerationError> {
     let (expected, expected_manifest) = generate(report, policy)?;
-    ensure!(
-        serde_json::to_value(candidate)? == serde_json::to_value(expected)?
-            && serde_json::to_value(manifest)? == serde_json::to_value(expected_manifest)?,
+    let same = (|| -> Result<bool> {
+        Ok(
+            serde_json::to_value(candidate)? == serde_json::to_value(expected)?
+                && serde_json::to_value(manifest)? == serde_json::to_value(expected_manifest)?,
+        )
+    })()?;
+    ensure_coded!(
+        JobErrorCode::PopulationMismatch,
+        same,
         "generated contract differs from authoritative rules or request scope"
     );
     Ok(())
@@ -1942,5 +2001,117 @@ mod tests {
         let mut invalid = c;
         invalid.coverage.clear();
         assert!(validate(&invalid, &r, &manifest).is_err());
+    }
+
+    /// The pre-F15 check, verbatim: the oracle the `HashMap` form must match.
+    fn universe_oracle(report: &Report, id: &str) -> bool {
+        report.pages.iter().any(|p| {
+            let entity = contract::entity_id(&p.url, p.is_resource);
+            if id == entity {
+                return true;
+            }
+            id.strip_prefix(&(entity + "|edge:"))
+                .and_then(|n| n.parse::<usize>().ok().filter(|i| i.to_string() == n))
+                .is_some_and(|i| i < p.links.len())
+        })
+    }
+
+    #[test]
+    fn hashmap_universe_equals_the_pairwise_check() {
+        let mut report: Report =
+            serde_json::from_str(include_str!("../fixtures/contracts/legacy.json")).unwrap();
+        let mut page = report.pages[0].clone();
+        page.links = vec![crate::model::Link::default(); 3];
+        report.pages = (0..40)
+            .map(|i| {
+                let mut p = page.clone();
+                p.url = format!("https://example.com/p{i}");
+                p.is_resource = i % 5 == 0;
+                p.links.truncate(i % 4);
+                p
+            })
+            .collect();
+        // A duplicate entity with more links: the larger link count must win.
+        let mut dup = report.pages[1].clone();
+        dup.links = vec![crate::model::Link::default(); 6];
+        report.pages.push(dup);
+        let universe = candidate_universe(&report);
+        let mut ids = vec![
+            String::new(),
+            "x".into(),
+            "sha256:00|edge:0".into(),
+            "|edge:".into(),
+        ];
+        for p in &report.pages {
+            let e = contract::entity_id(&p.url, p.is_resource);
+            ids.push(e.clone());
+            for suffix in [
+                "0",
+                "1",
+                "2",
+                "3",
+                "5",
+                "6",
+                "01",
+                "+1",
+                "-0",
+                "1x",
+                "",
+                "00",
+                "18446744073709551616",
+            ] {
+                ids.push(format!("{e}|edge:{suffix}"));
+            }
+            ids.push(format!("{e}|edge:0|edge:0"));
+            ids.push(format!("{e}x"));
+            ids.push(contract::entity_id(&p.url, !p.is_resource));
+        }
+        let mut accepted = 0;
+        for id in &ids {
+            let expected = universe_oracle(&report, id);
+            accepted += usize::from(expected);
+            assert_eq!(in_universe(&universe, id), expected, "{id}");
+        }
+        assert!(
+            accepted > 40 && accepted < ids.len(),
+            "{accepted}/{}",
+            ids.len()
+        );
+    }
+
+    #[test]
+    fn hashmap_universe_is_not_quadratic() {
+        // 1,024 entities and about 11,000 candidate ids, the wire-2 geometry. The
+        // pairwise check does 11 M SHA-256 hashes here; print both for the record.
+        let mut report: Report =
+            serde_json::from_str(include_str!("../fixtures/contracts/legacy.json")).unwrap();
+        let template = report.pages[0].clone();
+        report.pages = (0..1_024)
+            .map(|i| {
+                let mut p = template.clone();
+                p.url = format!("https://example.com/p{i}");
+                p
+            })
+            .collect();
+        let ids: Vec<String> = report
+            .pages
+            .iter()
+            .flat_map(|p| {
+                let e = contract::entity_id(&p.url, p.is_resource);
+                (0..11).map(move |_| e.clone())
+            })
+            .collect();
+        let started = std::time::Instant::now();
+        let universe = candidate_universe(&report);
+        assert!(ids.iter().all(|id| in_universe(&universe, id)));
+        let fast = started.elapsed();
+        let started = std::time::Instant::now();
+        assert!(ids.iter().take(300).all(|id| universe_oracle(&report, id)));
+        let slow_300 = started.elapsed();
+        println!(
+            "F15: HashMap check over {} ids: {fast:?}; pairwise check over the first 300 ids alone: {slow_300:?}",
+            ids.len()
+        );
+        assert!(fast < slow_300, "{fast:?} vs {slow_300:?}");
     }
 }

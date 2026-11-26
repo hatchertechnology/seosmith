@@ -21,6 +21,7 @@
 //! mean the report has no findings (a complete check may contain expected
 //! findings). `unknown` is never clean.
 
+use crate::generation_error::{GenerationError, JobErrorCode, ensure_coded, ensure_invariant};
 use crate::{
     audit,
     model::{Link, Page, Report},
@@ -418,15 +419,18 @@ pub fn fixture_input(case: &str) -> Result<Report> {
 /// Run the actual audit and policy pipeline before adding the experimental
 /// extension. Full recomputation is a fail-closed contradiction check; source
 /// adequacy then decides complete versus partial per rule.
-pub fn generate(report: &mut Report, policy: &AdvisoryPolicy) -> Result<Vec<u8>> {
-    generate_with(report, policy, false)
+pub fn generate(report: &mut Report, policy: &AdvisoryPolicy) -> Result<Vec<u8>, GenerationError> {
+    Ok(generate_with(report, policy, false)?)
 }
 
 /// Production serialiser: audit, policy, S01 evidence over the final findings,
 /// then `finding_coverage`, serialised last. The bytes are stored and delivered
 /// unchanged.
-pub fn generate_wire_v1(report: &mut Report, policy: &AdvisoryPolicy) -> Result<Vec<u8>> {
-    generate_with(report, policy, true)
+pub fn generate_wire_v1(
+    report: &mut Report,
+    policy: &AdvisoryPolicy,
+) -> Result<Vec<u8>, GenerationError> {
+    Ok(generate_with(report, policy, true)?)
 }
 
 fn generate_with(report: &mut Report, policy: &AdvisoryPolicy, evidence: bool) -> Result<Vec<u8>> {
@@ -445,7 +449,7 @@ fn generate_capped(
     evidence: bool,
     cap: usize,
 ) -> Result<Vec<u8>> {
-    ensure!(
+    ensure_invariant!(
         report.schema_version == 1 && report.policy_guidance.is_none(),
         "base report required"
     );
@@ -461,7 +465,8 @@ fn generate_capped(
         .iter()
         .map(serde_json::to_value)
         .collect::<Result<Vec<_>, serde_json::Error>>()?;
-    ensure!(
+    ensure_coded!(
+        JobErrorCode::PopulationMismatch,
         multiset(retained) == multiset(expected),
         "retained findings differ from the pinned population"
     );
@@ -489,7 +494,11 @@ fn generate_capped(
     validate_extension(&value)?;
     validate_emitted_full_catalogue(&value)?;
     let bytes = serde_json::to_vec(&value)?;
-    ensure!(bytes.len() <= cap, "prototype exceeds report byte limit");
+    ensure_coded!(
+        JobErrorCode::ReportByteLimit,
+        bytes.len() <= cap,
+        "prototype exceeds report byte limit"
+    );
     Ok(bytes)
 }
 

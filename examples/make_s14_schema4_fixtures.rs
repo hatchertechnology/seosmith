@@ -136,7 +136,7 @@ fn exact_cap(policy: &AdvisoryPolicy, target: usize) -> Result<Vec<u8>> {
             })
             .collect();
         let mut report = with_pages("complete-clean-h1", pages)?;
-        generate_wire_v1(&mut report, policy)
+        Ok(generate_wire_v1(&mut report, policy)?)
     };
     let mut pads = vec![12_000; PAGES * KEYS];
     for _ in 0..4 {

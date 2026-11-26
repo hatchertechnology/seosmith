@@ -1,3 +1,4 @@
+use crate::generation_error::JobErrorCode;
 use crate::model::{CrawlRequest, Report, digest};
 use anyhow::{Context, Result, ensure};
 use sqlx::{
@@ -580,8 +581,18 @@ impl Store {
         ensure!(updated == 1, "local job was not running at finalization");
         Ok(())
     }
+    /// Fails a running job with the untyped fallback code. Prefer [`Self::fail_with`].
     pub async fn fail(&self, id: &str) -> Result<()> {
-        sqlx::query("UPDATE jobs SET state='failed',error='crawl_internal_error' WHERE id=? AND state IN ('running','local_running')").bind(id).execute(&self.0).await?;
+        self.fail_with(id, JobErrorCode::CrawlInternalError).await
+    }
+    /// Fails a running job and stores `code` in `jobs.error`. The code set is
+    /// fixed by [`JobErrorCode`], so the stored text can only be one of them.
+    pub async fn fail_with(&self, id: &str, code: JobErrorCode) -> Result<()> {
+        sqlx::query("UPDATE jobs SET state='failed',error=? WHERE id=? AND state IN ('running','local_running')")
+            .bind(code.as_str())
+            .bind(id)
+            .execute(&self.0)
+            .await?;
         Ok(())
     }
     pub async fn view(&self, id: &str) -> Result<Option<JobView>> {

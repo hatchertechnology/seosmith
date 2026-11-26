@@ -1,4 +1,5 @@
 //! Opt-in evidence metadata. Original observations/findings remain authoritative.
+use crate::generation_error::{JobErrorCode, ensure_coded, ensure_invariant};
 use crate::{
     audit,
     model::{Report, digest},
@@ -200,7 +201,7 @@ pub fn enable_v2(report: &mut Report) -> Result<()> {
 /// Every delivered finding of an `audit::rules()` rule that is not dropped by
 /// `MAX_OBSERVATIONS` / `MAX_EVALUATIONS` gets a `fail` evaluation pointing at it.
 pub fn attach_v1_schema4(report: &mut Report) -> Result<()> {
-    ensure!(
+    ensure_invariant!(
         report.schema_version == 3
             && report.policy_guidance.is_some()
             && report.evidence_contract.is_none(),
@@ -213,11 +214,11 @@ pub fn attach_v1_schema4(report: &mut Report) -> Result<()> {
 
 /// Shared evidence builder. Reads `report`, never mutates it.
 fn build_contract(report: &Report) -> Result<EvidenceContract> {
-    ensure!(
+    ensure_invariant!(
         report.pages.len() <= 40_000 && report.findings.len() <= 400_000,
         "report record limit"
     );
-    ensure!(
+    ensure_invariant!(
         report.engine_version.len() <= 128
             && report.ruleset_version.len() <= 128
             && report.started_at.len() <= 64
@@ -230,7 +231,8 @@ fn build_contract(report: &Report) -> Result<EvidenceContract> {
         "metadata scalar limit"
     );
     let base_size = serialized_size(report)?;
-    ensure!(
+    ensure_coded!(
+        JobErrorCode::ReportByteLimit,
         base_size < MAX_REPORT_BYTES,
         "report exceeds the 16 MiB report limit"
     );
@@ -264,7 +266,7 @@ fn build_contract(report: &Report) -> Result<EvidenceContract> {
     };
     let mut identities = std::collections::HashSet::new();
     for page in &report.pages {
-        ensure!(
+        ensure_invariant!(
             identities.insert(entity_id(&page.url, page.is_resource)),
             "duplicate entity identity"
         );
@@ -314,7 +316,7 @@ fn build_contract(report: &Report) -> Result<EvidenceContract> {
             .enumerate()
             .filter(|(_, f)| f.rule == rule.id)
         {
-            ensure!(
+            ensure_invariant!(
                 findings.insert(f.url.as_str(), (i, f)).is_none(),
                 "duplicate finding for rule/URL"
             );
@@ -434,12 +436,14 @@ fn build_contract(report: &Report) -> Result<EvidenceContract> {
     contract.evaluation_coverage_complete = report.coverage_complete
         && !contract.truncated
         && contract.coverage.iter().all(|c| c.unknown == 0);
-    ensure!(
+    ensure_coded!(
+        JobErrorCode::EvidenceExtensionLimit,
         serialized_size(&contract)? <= MAX_EXTENSION_BYTES,
         "evidence extension exceeds limit"
     );
     // Reject oversized final reports before changing the original or allocating serialized bytes.
-    ensure!(
+    ensure_coded!(
+        JobErrorCode::ReportByteLimit,
         base_size + serialized_size(&contract)? + 32 <= MAX_REPORT_BYTES,
         "versioned report exceeds the 16 MiB report limit"
     );
