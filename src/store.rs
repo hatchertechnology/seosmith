@@ -36,6 +36,10 @@ impl Store {
             .filename(path)
             .create_if_missing(true)
             .journal_mode(SqliteJournalMode::Wal)
+            // Sorters and temp tables stay in memory. The worker runs on a read-only
+            // root filesystem with no /tmp, where a spill to a temp file fails with
+            // SQLITE_IOERR_GETTEMPPATH (6410). Per connection, so set it here.
+            .pragma("temp_store", "MEMORY")
             .busy_timeout(Duration::from_secs(10));
         let pool = SqlitePoolOptions::new()
             .max_connections(4)
@@ -621,7 +625,15 @@ impl Store {
         )
     }
     pub async fn pending(&self) -> Result<Option<(String, String, String, i64)>> {
-        let row=sqlx::query("SELECT id,report,report_hash,attempts FROM jobs WHERE report IS NOT NULL AND (execution_mode='standard' OR execution_mode IS NULL) AND delivery_state='pending' AND next_attempt<=unixepoch() ORDER BY created LIMIT 1").fetch_optional(&self.0).await?;
+        // Pick the id first: the ORDER BY sorter then carries only the key, never the
+        // multi-megabyte report, so it cannot outgrow its memory budget and spill.
+        let Some(id): Option<String> = sqlx::query_scalar("SELECT id FROM jobs WHERE report IS NOT NULL AND (execution_mode='standard' OR execution_mode IS NULL) AND delivery_state='pending' AND next_attempt<=unixepoch() ORDER BY created LIMIT 1").fetch_optional(&self.0).await? else {
+            return Ok(None);
+        };
+        let row = sqlx::query("SELECT id,report,report_hash,attempts FROM jobs WHERE id=? AND report IS NOT NULL AND delivery_state='pending'")
+            .bind(&id)
+            .fetch_optional(&self.0)
+            .await?;
         row.map(|r| {
             Ok((
                 r.try_get("id")?,

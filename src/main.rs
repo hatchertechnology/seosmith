@@ -431,11 +431,14 @@ async fn main() -> Result<()> {
                     if *push_stop.borrow() {
                         break;
                     }
-                    if delivery.tick(&push_store).await.is_err() {
-                        tracing::error!("delivery queue unavailable");
+                    // Log the cause: a swallowed storage error (SQLITE_IOERR_GETTEMPPATH on
+                    // thor) left the queue wedged with no trace. These are storage and
+                    // delivery-queue errors, not crawl or request data.
+                    if let Err(error) = delivery.tick(&push_store).await {
+                        tracing::error!(error=%format!("{error:#}"), "delivery queue unavailable");
                     }
-                    if push_store.prune().await.is_err() {
-                        tracing::error!("retention failed");
+                    if let Err(error) = push_store.prune().await {
+                        tracing::error!(error=%format!("{error:#}"), "retention failed");
                     }
                     tokio::select! {()=tokio::time::sleep(Duration::from_secs(5))=>{},_=push_stop.changed()=>break}
                 }
