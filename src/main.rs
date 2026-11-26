@@ -7,7 +7,7 @@ use seosmith::{
     api::{self, App},
     crawler,
     delivery::Delivery,
-    families::types::{CaptureMode, FamilySet},
+    families::types::CaptureMode,
     fetch::service_url,
     generation_error::{GenerationError, JobErrorCode},
     model::CrawlRequest,
@@ -554,24 +554,6 @@ struct JobModes {
     stored: CaptureMode,
 }
 
-/// The six evidence families of a job. TEMPORARY, written against the 8b-2 stubs
-/// (`src/families/` has types only): every family is `unavailable`. Replace the
-/// body with `seosmith::families::build_all(store, id, report, stored, &SystemClock).await`
-/// when 8b-2's builders land. A job whose stored mode is `none` is labelled
-/// `capture_mode_changed`, as `build_all` will.
-#[allow(clippy::unused_async)] // the real `build_all` awaits the store
-async fn build_families(
-    _store: &Store,
-    _id: &str,
-    _report: &seosmith::model::Report,
-    stored: CaptureMode,
-) -> FamilySet {
-    seosmith::wire2::unavailable_families(match stored {
-        CaptureMode::None => "capture_mode_changed",
-        CaptureMode::Wire2 => "analyzer_error",
-    })
-}
-
 /// A fixed, redacted label for a crawl failure: the kind of the first recognisable
 /// cause in the chain, never its message (which can carry a URL or stored content).
 fn crawl_failure_reason(error: &anyhow::Error) -> &'static str {
@@ -666,7 +648,9 @@ async fn crawl_job(
         // delay is skipped; the report keeps the request's real delay.
         let mut unpaced = request.clone();
         unpaced.delay_ms = 0;
-        let mut report = crawler::crawl_with(store, &unpaced, &FixtureTransport(fixtures)).await?;
+        let mut report =
+            crawler::crawl_captured_with(store, &unpaced, stored, &FixtureTransport(fixtures))
+                .await?;
         report.request.delay_ms = request.delay_ms;
         return Ok(report);
     }
@@ -776,7 +760,14 @@ async fn finalize_job(
         // stored mode, and the bytes are today's wire-1 bytes.
         let generated = match modes.process {
             CaptureMode::Wire2 => {
-                let families = build_families(store, &id, report, modes.stored).await;
+                let families = seosmith::families::build_all(
+                    store,
+                    &id,
+                    report,
+                    modes.stored,
+                    &seosmith::families::types::SystemClock,
+                )
+                .await;
                 seosmith::wire2::generate_wire_v2(report, policy, families)
             }
             CaptureMode::None => {
