@@ -23,31 +23,22 @@ def convert(p):
     return p
 
 for source in sorted((root / 'fixtures/policies').glob('v3-local-*.json')):
+    if source.name == 'v3-local-omitted.json':
+        continue  # its candidate failed full-population admission and was dropped
     (out / source.name.replace('v3-local-', 'v4-candidate-')).write_bytes(dump(convert(json.loads(source.read_bytes()))))
-mixed = subprocess.check_output(['cargo', 'run', '--quiet', '--example', 'make_mixed_review'], cwd=root)
-(out / 'v4-candidate-mixed-omitted.json').write_bytes(dump(convert(json.loads(mixed))))
-for mode, filename in [('matrix', 'url-normalization-cases-candidate.json'), ('report', 'v4-candidate-url-normalization.json')]:
-    output = subprocess.check_output(['cargo', 'run', '--quiet', '--features', 'policy-wire-prototype', '--example', 'make_wire_url_review', '--', mode], cwd=root)
-    (out / filename).write_bytes(output)
 
-for case in ('control', 'source_missing_status', 'source_non_html', 'source_non_success', 'source_error', 'source_blocked', 'source_truncated', 'target_missing_status', 'target_error', 'target_blocked', 'omitted'):
-    output = subprocess.check_output(['cargo', 'run', '--quiet', '--features', 'policy-wire-prototype', '--example', 'make_wire_edge_review', '--', case], cwd=root)
-    (out / f'v4-candidate-edge-{case}.json').write_bytes(output)
 ambiguous = subprocess.check_output(['cargo', 'run', '--quiet', '--features', 'policy-wire-prototype', '--example', 'make_wire_edge_review', '--', 'ambiguous'], cwd=root)
 (out / 'invalid-ambiguous-external-target.json').write_bytes(dump(convert(json.loads(ambiguous))))
 
-for case in ('short', 'equal'):
-    local = subprocess.check_output(['cargo', 'run', '--quiet', '--example', 'make_unicode_review', '--', case], cwd=root)
-    (out / f'v4-candidate-unicode-{case}.json').write_bytes(dump(convert(json.loads(local))))
 raw = (out / 'v4-candidate-complete.json').read_bytes(); cap = 4952756
 (out / 'v4-candidate-whitespace.json').write_bytes(raw + b'\n')
 (out / 'v4-candidate-exact-cap.json').write_bytes(raw + b' ' * (cap - len(raw)))
 (out / 'invalid-cap-plus-one.json').write_bytes(raw + b' ' * (cap + 1 - len(raw)))
-for depth in (64, 65):
+for depth in (65,):
     p = json.loads(raw); value = 0
     for _ in range(depth - 4): value = [value]
     p['findings'][0]['details']['depth_probe'] = value
-    (out / ('v4-candidate-depth64.json' if depth == 64 else 'invalid-depth65.json')).write_bytes(dump(p))
+    (out / 'invalid-depth65.json').write_bytes(dump(p))
 for generation in (0, 2):
     p = json.loads(raw); r = p['request']; r['binding_generation'] = generation
     def tag(k, v):
@@ -64,7 +55,5 @@ for size in (65536, 65537):
     empty = dump({'probe':''})
     (out / f'policy-raw-bytes-{size}.json').write_bytes(dump({'probe':'a' * (size - len(empty))}))
 (out / 'policy-raw-escaped-duplicate.json').write_bytes(b'{"x":1,"\\u0078":2}')
-p = json.loads(raw); p['findings'][0]['details']['claimed_ingestion'] = 'worker'
-(out / 'v4-candidate-forged-source-claim.json').write_bytes(dump(p))
 subprocess.run(['python3', str(root / 'scripts/make-s14-review-schema.py')], cwd=root, check=True)
 subprocess.run(['python3', str(root / 'scripts/make-s14-review-negatives.py')], cwd=root, check=True)

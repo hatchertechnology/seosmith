@@ -1,0 +1,152 @@
+{
+  "files": [
+    {
+      "bytes": 51041,
+      "evaluations": 6,
+      "evidence_truncated": false,
+      "finding_coverage_audit": "complete",
+      "findings": 5,
+      "note": "complete audit, H1 present",
+      "path": "complete-clean.json",
+      "schema_version": 4,
+      "sha256": "e277325f0a2226bbc44a7e6a0971afc91d39b4402e61d9a474cf521a1068e6b5",
+      "admit": {
+        "validator_revision": "s14-wire-1/full-population-1/evidence-v1",
+        "summary_sha256": "sha256:0c6f6f0c330519143078dc2c1d8db27a8eade7bddad6d2d6eecfaa806b198612",
+        "summary_bytes": 7852
+      }
+    },
+    {
+      "bytes": 51835,
+      "evaluations": 7,
+      "evidence_truncated": false,
+      "finding_coverage_audit": "complete",
+      "findings": 6,
+      "note": "complete audit, H1 missing",
+      "path": "complete-missing-h1.json",
+      "schema_version": 4,
+      "sha256": "8dbc16edfa631a899a20eb472584e7fd1bab84f022e9033b7e29dbede43df282",
+      "admit": {
+        "validator_revision": "s14-wire-1/full-population-1/evidence-v1",
+        "summary_sha256": "sha256:284b0faac82212ed6283faf51c839a8d5e25b71fd581cd278b319458e2eb5b4d",
+        "summary_bytes": 7867
+      }
+    },
+    {
+      "bytes": 50298,
+      "evaluations": 5,
+      "evidence_truncated": false,
+      "finding_coverage_audit": "partial",
+      "findings": 4,
+      "note": "partial audit: extraction truncated, page limit",
+      "path": "partial-sources.json",
+      "schema_version": 4,
+      "sha256": "f7b3c81d997eec9d4308d8cf001ef377f261e54593fdc8e08cd8a87f347e9a5c",
+      "admit": {
+        "validator_revision": "s14-wire-1/full-population-1/evidence-v1",
+        "summary_sha256": "sha256:66f45477014a183ac13bcafdc892aa84e1e14ce4f44c18e1b2182a82de3a97c7",
+        "summary_bytes": 7650
+      }
+    },
+    {
+      "bytes": 51083,
+      "evaluations": 5,
+      "evidence_truncated": false,
+      "finding_coverage_audit": "partial",
+      "findings": 4,
+      "note": "external link present but not fetched",
+      "path": "external-links-unchecked.json",
+      "schema_version": 4,
+      "sha256": "9f083eb494f0bd49c125f42d0800b961b56c6ba31225a223e6dc4dc60b581a89",
+      "admit": {
+        "validator_revision": "s14-wire-1/full-population-1/evidence-v1",
+        "summary_sha256": "sha256:572efbada7fec9f67920ea2a4def1bfec61c51d7c35f95724415af6d393fbc9c",
+        "summary_bytes": 7790
+      }
+    },
+    {
+      "bytes": 79967,
+      "evaluations": 14,
+      "evidence_truncated": false,
+      "finding_coverage_audit": "partial",
+      "findings": 11,
+      "note": "external resource fetched (check_external_links)",
+      "path": "external-links-checked.json",
+      "schema_version": 4,
+      "sha256": "f7de85ebea9fab4c090d033a0b6d4a856aa9dea8b6321325d665bfdbba533c0d",
+      "admit": {
+        "validator_revision": "s14-wire-1/full-population-1/evidence-v1",
+        "summary_sha256": "sha256:a7a0961a5cbac0d4cfc51bacf2d597f4181c3a183e3b8fd0cb3002694ac45796",
+        "summary_bytes": 7837
+      }
+    },
+    {
+      "bytes": 1037447,
+      "evaluations": 375,
+      "evidence_truncated": true,
+      "finding_coverage_audit": "partial",
+      "findings": 516,
+      "note": "200 pages, mixed source states, observation/evaluation caps exceeded",
+      "path": "mixed-caps-exceeded.json",
+      "schema_version": 4,
+      "sha256": "cdfa83c5a430f02307930822df421830595497d883bf61d5dd8e1ae766f02eb1",
+      "admit": {
+        "validator_revision": "s14-wire-1/full-population-1/evidence-v1",
+        "summary_sha256": "sha256:01058dcc7a3f84e068082e503be8e08a806531759abfbee9c5708bcb3a12c369",
+        "summary_bytes": 7759
+      }
+    },
+    {
+      "bytes": 104482,
+      "evaluations": 21,
+      "evidence_truncated": false,
+      "finding_coverage_audit": "complete",
+      "findings": 16,
+      "note": "non-BMP, combining and percent-encoded inputs",
+      "path": "unicode.json",
+      "schema_version": 4,
+      "sha256": "d4503df1b89b2ca086ee8ebc754d72165f4e08aca84424f403436dcaa6d154ba",
+      "admit": {
+        "validator_revision": "s14-wire-1/full-population-1/evidence-v1",
+        "summary_sha256": "sha256:a3a8fddc73aee97b028243ee0cacf6051dc9fdc11e45730bcb6fd0d79d334f92",
+        "summary_bytes": 7851
+      }
+    },
+    {
+      "bytes": 4952756,
+      "evaluations": 180,
+      "evidence_truncated": false,
+      "finding_coverage_audit": "partial",
+      "findings": 120,
+      "note": "largest valid report: exactly HTP_MAX_REPORT_BYTES",
+      "path": "exact-cap.json",
+      "schema_version": 4,
+      "sha256": "ea554393c0860d6fbeb425044492294b88e3805a02089bda98747bd3c53058cb",
+      "admit": {
+        "validator_revision": "s14-wire-1/full-population-1/evidence-v1",
+        "summary_sha256": "sha256:f3f181dc7af66ded0c5e7442d30aa9fbba49c39bfc904919c37b513a0598addf",
+        "summary_bytes": 7641
+      }
+    },
+    {
+      "bytes": 427646,
+      "evaluations": 224,
+      "evidence_truncated": false,
+      "finding_coverage_audit": "partial",
+      "findings": 206,
+      "note": "real `seosmith crawl --policy-wire-v1` over an offline fixture site",
+      "path": "crawl.json",
+      "schema_version": 4,
+      "sha256": "cc909b3c90c4357325ad06c533c058f9cd297a027268e2087b69825e88373366",
+      "admit": {
+        "validator_revision": "s14-wire-1/full-population-1/evidence-v1",
+        "summary_sha256": "sha256:4aec67f4189c990f22ac5c8429a56c6a804605ee309bfd52d2564d5468bf02cc",
+        "summary_bytes": 8025
+      }
+    }
+  ],
+  "max_report_bytes": 4952756,
+  "note": "Generated by examples/make_s14_schema4_fixtures.rs with generate_wire_v1. Receiver admit results are recorded by scripts/verify-s14-schema4.py --admit.",
+  "status": "local-only-not-frozen",
+  "admit_receiver_commit": "eaffd9806502816b29b368da45aa2c0cef536d39"
+}
