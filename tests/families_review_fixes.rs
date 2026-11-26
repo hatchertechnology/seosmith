@@ -229,3 +229,146 @@ async fn s08_never_passes_a_resource_with_unknown_dimensions() {
         s08.items
     );
 }
+
+fn sitemap_origin_site(entries: &[&str]) -> Site {
+    let urls: String = entries
+        .iter()
+        .map(|u| format!("<url><loc>https://site.invalid{u}</loc></url>"))
+        .collect();
+    Site::default()
+        .robots("User-agent: *\nAllow: /\nSitemap: https://site.invalid/sitemap.xml\n")
+        .raw(
+            "https://site.invalid/sitemap.xml",
+            200,
+            &[("content-type", "application/xml")],
+            format!("<urlset>{urls}</urlset>").as_bytes(),
+        )
+        .html("https://site.invalid/", &page(&["/a"]))
+        .html("https://site.invalid/a", &page(&[]))
+        .html("https://site.invalid/orphan", &page(&[]))
+}
+
+/// A wire2 job that resumed with a changed sitemap keeps the frontier's sticky
+/// `in_sitemap` flag for a page the retained sitemap no longer lists. The families
+/// output must say so: S03 is `partial` with a named reason, the page's item is
+/// `unknown` (never a pass or an issue), and the summary counts the mismatch.
+#[tokio::test]
+async fn resumed_job_with_a_changed_sitemap_reports_the_mismatch_in_s03() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = seosmith::store::Store::open(dir.path().join("s.sqlite").to_str().unwrap())
+        .await
+        .unwrap();
+    let r = support::site::request(10, 0);
+    store.submit(&r).await.unwrap();
+    store.claim_with(CaptureMode::Wire2).await.unwrap().unwrap();
+    seosmith::crawler::crawl_captured_with(
+        &store,
+        &support::site::unpaced(&r),
+        CaptureMode::Wire2,
+        &sitemap_origin_site(&["/", "/a", "/orphan"]),
+    )
+    .await
+    .unwrap();
+    store.recover().await.unwrap();
+    store.claim_with(CaptureMode::None).await.unwrap().unwrap();
+    let id = r.request_id.to_string();
+    let stored = store.capture_mode(&id).await.unwrap();
+    let report = seosmith::crawler::crawl_captured_with(
+        &store,
+        &support::site::unpaced(&r),
+        stored,
+        &sitemap_origin_site(&["/", "/a"]),
+    )
+    .await
+    .unwrap();
+    let set = families::build_all(&store, &id, &report, stored, &SystemClock).await;
+    let job = support::Job {
+        _dir: dir,
+        store,
+        id,
+        report,
+    };
+    check_invariants(&set, &job.report);
+    let s03 = section(&set, FamilyKey::S03);
+    assert_eq!(s03.state, SectionState::Partial, "{s03:#?}");
+    assert_eq!(s03.reason.as_deref(), Some("sitemap_evidence_mismatch"));
+    assert_eq!(s03.summary["sitemap_flag_mismatch_pages"], 1);
+    let mismatched: Vec<_> = s03
+        .items
+        .iter()
+        .filter(|i| i.kind == "sitemap_origin_unavailable")
+        .collect();
+    assert_eq!(mismatched.len(), 1, "{:?}", s03.items);
+    assert_eq!(mismatched[0].outcome, Outcome::Unknown);
+    let orphan = job
+        .report
+        .pages
+        .iter()
+        .position(|p| p.url == "https://site.invalid/orphan")
+        .unwrap();
+    assert_eq!(
+        mismatched[0].locator.as_deref(),
+        Some(format!("/pages/{orphan}").as_str())
+    );
+    // Pages the retained sitemap still lists get their normal origin item.
+    assert!(
+        s03.items
+            .iter()
+            .any(|i| i.kind == "sitemap_origin" && i.outcome != Outcome::Issue)
+    );
+}
+
+/// R1: a page whose links were truncated has unknown outgoing edges too, so another
+/// page's depth is only an upper bound and `deep_page` is `unknown`, never an issue.
+#[tokio::test]
+async fn s05_deep_page_is_unknown_when_another_page_is_link_truncated() {
+    let site = Site::default()
+        .robots("User-agent: *\nAllow: /\n")
+        .html("https://site.invalid/", &page(&["/c1", "/x"]))
+        .html("https://site.invalid/c1", &page(&["/c2"]))
+        .html("https://site.invalid/c2", &page(&["/c3"]))
+        .html("https://site.invalid/c3", &page(&["/c4"]))
+        .html("https://site.invalid/c4", &page(&[]))
+        .html("https://site.invalid/x", &page(&[]));
+    let job = crawl(&site, 20, 0, CaptureMode::Wire2).await;
+    allow_follow(&job).await;
+    let deep = |set: &families::types::FamilySet| -> Vec<(Outcome, Option<String>)> {
+        section(set, FamilyKey::S05)
+            .items
+            .iter()
+            .filter(|i| i.kind == "deep_page")
+            .map(|i| (i.outcome, i.reason.clone()))
+            .collect()
+    };
+    let full = build(&job).await;
+    assert_eq!(deep(&full), vec![(Outcome::Issue, None)]);
+    // Mark /x's extracted links as truncated.
+    let raw: String =
+        sqlx::query_scalar("SELECT evidence FROM local_page_evidence WHERE job_id=? AND url=?")
+            .bind(&job.id)
+            .bind("https://site.invalid/x")
+            .fetch_one(&job.store.0)
+            .await
+            .unwrap();
+    let mut v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    for c in v["capture"]["collectors"].as_array_mut().unwrap() {
+        if c["collector"] == "graph" {
+            c["state"] = "partial".into();
+        }
+    }
+    sqlx::query("UPDATE local_page_evidence SET evidence=? WHERE job_id=? AND url=?")
+        .bind(serde_json::to_string(&v).unwrap())
+        .bind(&job.id)
+        .bind("https://site.invalid/x")
+        .execute(&job.store.0)
+        .await
+        .unwrap();
+    let set = build(&job).await;
+    check_invariants(&set, &job.report);
+    assert_eq!(
+        deep(&set),
+        vec![(Outcome::Unknown, Some("link_limit".into()))],
+        "{:?}",
+        section(&set, FamilyKey::S05).items
+    );
+}

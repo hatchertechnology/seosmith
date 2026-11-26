@@ -131,10 +131,17 @@ pub async fn build_all(
     if capture != CaptureMode::Wire2 {
         return sections("capture_mode_changed");
     }
-    let Ok(captures) = load_captures(store, job_id).await else {
-        return sections("analyzer_error");
-    };
-    let ctx = Ctx::new(report, captures, clock, capture);
+    // The total budget starts before the evidence is read: loading and parsing up to
+    // 16 MiB of saved captures counts against it, and is itself bounded by it.
+    let started = clock.now();
+    let captures =
+        match tokio::time::timeout(common::TOTAL_DEADLINE, load_captures(store, job_id)).await {
+            Ok(Ok(captures)) => captures,
+            Ok(Err(_)) => return sections("analyzer_error"),
+            Err(_) => return sections("analysis_deadline"),
+        };
+    let mut ctx = Ctx::new(report, captures, clock, capture);
+    ctx.started = started;
     let source = JobSource::LiveStandard;
     // The deadline is a wall bound: an analyzer that is still running when the budget
     // is gone is dropped, and its family is `unavailable(analysis_deadline)`.

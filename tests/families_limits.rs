@@ -99,3 +99,21 @@ async fn items_beyond_the_family_limit_are_counted_not_dropped_silently() {
     assert_eq!(s06.omitted_reason.as_deref(), Some("family_item_limit"));
     assert!(s06.items_total >= 301);
 }
+
+/// F7 at the `build_all` level: S04 runs out of its 10 s family budget part-way, and
+/// `build_all` keeps the partial section (with `omitted_items`) instead of replacing it
+/// with `unavailable`. The clock advances 1.5 s per call, so S02 and S03 finish inside
+/// their budgets, S04 starts well inside the 30 s total and crosses 10 s mid-family.
+#[tokio::test]
+async fn build_all_keeps_a_mid_family_s04_partial() {
+    let job = crawl(&rich_site(), 20, 10, CaptureMode::Wire2).await;
+    let clock = StepClock::new(Duration::from_millis(1500));
+    let set =
+        families::build_all(&job.store, &job.id, &job.report, CaptureMode::Wire2, &clock).await;
+    check_invariants(&set, &job.report);
+    let s04 = section(&set, FamilyKey::S04);
+    assert_eq!(s04.state, SectionState::Partial, "{s04:#?}");
+    assert_eq!(s04.omitted_reason.as_deref(), Some("analysis_deadline"));
+    assert!(s04.truncated && s04.omitted_items > 0, "{s04:#?}");
+    assert_eq!(s04.items_total, s04.items.len() as u64 + s04.omitted_items);
+}

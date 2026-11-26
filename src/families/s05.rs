@@ -14,13 +14,12 @@ pub fn build(ctx: &Ctx<'_>, graph: &Value) -> FamilySection {
     let eligible = ctx.entities.iter().filter(|e| e.html).count() as u64;
     let mut b = SectionBuilder::new(FamilyKey::S05, SEMANTICS, ctx, eligible);
     let omitted = capture_omissions(ctx, &mut b, &["graph"], true);
-    // A page whose graph was dropped has unknown outgoing edges: a distance found from
-    // the other edges is only an upper bound, so "deep" cannot be claimed.
-    let graph_gap = omitted
-        .iter()
-        .filter_map(|n| ctx.captures.get(&ctx.entities[*n].url)?.omission("graph"))
-        .min()
-        .unwrap_or("collector_byte_limit");
+    // A page whose outgoing edges are incomplete makes every distance found from the
+    // other edges only an upper bound, so "deep" cannot be claimed. Edges are
+    // incomplete when a capture bound dropped a graph, when the analyzer dropped a page
+    // (`link_limit`, a bad row), when a page's links were truncated, and when rows
+    // beyond the analyzer's row limit were never read.
+    let edge_gap = edge_gap(ctx, graph, &omitted);
     let nodes = graph["nodes"].as_array().map_or(&[][..], Vec::as_slice);
     let unknown_reason = graph["coverage"]["reasons"][0]
         .as_str()
@@ -54,12 +53,12 @@ pub fn build(ctx: &Ctx<'_>, graph: &Value) -> FamilySection {
                 }
                 b.push(Some(entity), "orphan_page", Outcome::Issue, None, f);
             }
-            Some("reachable") if distance.is_some_and(|d| d >= DEEP) && !omitted.is_empty() => {
+            Some("reachable") if distance.is_some_and(|d| d >= DEEP) && edge_gap.is_some() => {
                 b.push(
                     Some(entity),
                     "deep_page",
                     Outcome::Unknown,
-                    Some(graph_gap),
+                    edge_gap.as_deref(),
                     f,
                 );
             }
@@ -137,12 +136,8 @@ pub fn build(ctx: &Ctx<'_>, graph: &Value) -> FamilySection {
         if !entity.html {
             continue;
         }
-        let code = if reason == "analysis_budget" {
-            link_limit = true;
-            "link_limit".to_owned()
-        } else {
-            slug(collector.unwrap_or(reason))
-        };
+        let code = omitted_code(reason, collector);
+        link_limit |= code == "link_limit";
         b.push(
             Some(entity),
             "graph_unavailable",
@@ -169,4 +164,55 @@ pub fn build(ctx: &Ctx<'_>, graph: &Value) -> FamilySection {
         "sitemap_only": sitemap_only, "analyzer_coverage": graph["coverage"],
     }));
     b.finish()
+}
+
+/// The analyzer's code for a page it dropped from the graph.
+fn omitted_code(reason: &str, collector: Option<&str>) -> String {
+    if reason == "analysis_budget" {
+        "link_limit".to_owned()
+    } else {
+        slug(collector.unwrap_or(reason))
+    }
+}
+
+/// The first (by name, so the choice is deterministic) reason some HTML page's outgoing
+/// edges are unknown, or `None` when every page's edges were read in full.
+fn edge_gap(
+    ctx: &Ctx<'_>,
+    graph: &Value,
+    capture_omitted: &std::collections::HashSet<usize>,
+) -> Option<String> {
+    let mut codes = std::collections::BTreeSet::new();
+    for n in capture_omitted {
+        let reason = ctx
+            .captures
+            .get(&ctx.entities[*n].url)
+            .and_then(|c| c.omission("graph"));
+        codes.insert(reason.unwrap_or("collector_byte_limit").to_owned());
+    }
+    for row in graph["omitted"].as_array().map_or(&[][..], Vec::as_slice) {
+        let reason = row["reason"].as_str().unwrap_or("unspecified");
+        if row["url"]
+            .as_str()
+            .and_then(|u| ctx.entity(u))
+            .is_some_and(|e| e.html)
+        {
+            codes.insert(omitted_code(reason, row["collector_reason"].as_str()));
+        }
+    }
+    if graph["row_limit_reached"] == true {
+        codes.insert("analyzer_row_limit".to_owned());
+    }
+    let reasons = graph["coverage"]["reasons"].as_array();
+    if reasons.is_some_and(|r| {
+        r.iter().any(|c| {
+            matches!(
+                c.as_str(),
+                Some("extraction_truncated" | "truncation_counts_invalid")
+            )
+        })
+    }) {
+        codes.insert("link_limit".to_owned());
+    }
+    codes.into_iter().next()
 }

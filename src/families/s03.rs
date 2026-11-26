@@ -30,6 +30,22 @@ pub fn build(ctx: &Ctx<'_>, index: &Value) -> FamilySection {
         b.partial("analyzer_row_limit");
     }
     let sitemap = &index["graphs"]["sitemap"];
+    // The frontier's `in_sitemap` flag only ever rises, while a resumed wire2 job keeps
+    // the sitemap run that finished last. A page flagged as listed that the retained
+    // sitemap does not list is therefore a contradiction between two attempts: its item
+    // stays `unknown`, and the section says why it is not complete.
+    let mismatched = findings
+        .iter()
+        .filter(|f| {
+            f["rule"] == "sitemap_origin_unavailable"
+                && f["reason"] == "target_not_found_in_retained_documents"
+        })
+        .filter_map(|f| f["url"].as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    if mismatched > 0 {
+        b.partial("sitemap_evidence_mismatch");
+    }
     if sitemap["omitted_sources"].as_u64().unwrap_or(0) > 0
         || sitemap["remaining_sources_unknown"] == true
     {
@@ -49,6 +65,7 @@ pub fn build(ctx: &Ctx<'_>, index: &Value) -> FamilySection {
         "sitemap": {"state": sitemap["state"], "discovery_state": sitemap["discovery_state"],
             "roots": sitemap["roots"].as_array().map_or(0, Vec::len),
             "omitted_sources": sitemap["omitted_sources"], "sources": sources},
+        "sitemap_flag_mismatch_pages": mismatched,
         "canonical_graphs": index["graphs"]["canonical"].as_array().map_or(0, Vec::len),
         "alternate_clusters": index["graphs"]["alternates"].as_array().map_or(0, Vec::len),
     }));

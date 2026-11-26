@@ -191,3 +191,33 @@ pub fn build(ctx: &Ctx<'_>, impact: &Value) -> FamilySection {
         "duplicate_groups": impact["duplicates"].as_array().map_or(0, Vec::len)}));
     b.finish()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::no_cache;
+
+    #[test]
+    fn no_cache_reads_directives_not_prefixes() {
+        for yes in [
+            "no-store",
+            "No-Store",
+            "public, no-store",
+            "max-age=0",
+            "max-age=00",
+            "public, Max-Age=0",
+            "max-age=\"0\"",
+        ] {
+            assert!(no_cache(yes), "{yes}");
+        }
+        for no in [
+            "max-age=05",
+            "max-age=3600",
+            "public, max-age=10",
+            "s-maxage=0",
+            "no-cache",
+            "",
+        ] {
+            assert!(!no_cache(no), "{no}");
+        }
+    }
+}
