@@ -230,7 +230,16 @@ fn apply(report: &mut Report, policy: &AdvisoryPolicy) {
 
 /// Generate local experimental metadata; no schema 3 payload is queued for delivery.
 pub fn apply_with_evidence(report: &mut Report, policy: &AdvisoryPolicy) -> anyhow::Result<()> {
-    let (candidate, manifest) = crate::policy_candidate::generate(report, policy)?;
+    apply_with_evidence_form(report, policy, crate::policy_candidate::ManifestForm::List)
+}
+
+/// [`apply_with_evidence`] with the manifest form of the target wire.
+pub fn apply_with_evidence_form(
+    report: &mut Report,
+    policy: &AdvisoryPolicy,
+    form: crate::policy_candidate::ManifestForm,
+) -> anyhow::Result<()> {
+    let (candidate, manifest) = crate::policy_candidate::generate_form(report, policy, form)?;
     apply(report, policy);
     if let Some(guidance) = &mut report.policy_guidance {
         guidance.candidate = Some(candidate);

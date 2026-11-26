@@ -51,15 +51,154 @@ pub struct Coverage {
     pub outcomes: BTreeMap<String, usize>,
     pub unknown_reasons: BTreeMap<String, usize>,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// How the S14 manifest rows are emitted (design A9).
+///
+/// `List` is `s14-wire-1`: every row carries its candidate id list. `Digest` is
+/// `s14-wire-2`: a row carries only `candidates_count` and `candidates_digest`,
+/// so the manifest is bounded by construction. The id lists are always built in
+/// memory and are what the producer validates; under `Digest` they are never
+/// serialized.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ManifestForm {
+    List,
+    Digest,
+}
+
+impl ManifestForm {
+    /// The manifest byte cap of this form (producer and receiver agree).
+    #[must_use]
+    pub const fn max_bytes(self) -> usize {
+        match self {
+            Self::List => 262_144,
+            Self::Digest => 16_384,
+        }
+    }
+}
+
+/// Count and digest of a row's candidate ids (the `Digest` form).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CandidatesSummary {
+    pub count: usize,
+    pub digest: String,
+}
+
+#[derive(Clone, Debug)]
 pub struct ManifestRow {
     pub category: String,
     pub rule_id: String,
     pub rule_version: String,
     pub expected_pointer: Option<String>,
+    /// The candidate ids in emission order. Empty for a digest-form row that was
+    /// read back from bytes; serialized only when `summary` is `None`.
     pub candidates: Vec<String>,
+    /// `Some` selects the `Digest` form on serialization.
+    pub summary: Option<CandidatesSummary>,
 }
+
+/// The two serial forms of a row, for reading. Unknown keys are rejected, and a
+/// row must be exactly one form.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RowRepr {
+    category: String,
+    rule_id: String,
+    rule_version: String,
+    expected_pointer: Option<String>,
+    #[serde(default)]
+    candidates: Option<Vec<String>>,
+    #[serde(default)]
+    candidates_count: Option<usize>,
+    #[serde(default)]
+    candidates_digest: Option<String>,
+}
+
+impl Serialize for ManifestRow {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        /// Writing twin of [`RowRepr`]: borrows, so there is no copy of a large id list per serialization.
+        #[derive(Serialize)]
+        struct RowOut<'a> {
+            category: &'a str,
+            rule_id: &'a str,
+            rule_version: &'a str,
+            expected_pointer: &'a Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            candidates: Option<&'a [String]>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            candidates_count: Option<usize>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            candidates_digest: Option<&'a str>,
+        }
+        RowOut {
+            category: &self.category,
+            rule_id: &self.rule_id,
+            rule_version: &self.rule_version,
+            expected_pointer: &self.expected_pointer,
+            candidates: self.summary.is_none().then_some(self.candidates.as_slice()),
+            candidates_count: self.summary.as_ref().map(|s| s.count),
+            candidates_digest: self.summary.as_ref().map(|s| s.digest.as_str()),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ManifestRow {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let r = RowRepr::deserialize(deserializer)?;
+        let (candidates, summary) = match (r.candidates, r.candidates_count, r.candidates_digest) {
+            (Some(list), None, None) => (list, None),
+            (None, Some(count), Some(digest)) => {
+                (Vec::new(), Some(CandidatesSummary { count, digest }))
+            }
+            _ => {
+                return Err(D::Error::custom(
+                    "manifest row is neither list nor digest form",
+                ));
+            }
+        };
+        Ok(Self {
+            category: r.category,
+            rule_id: r.rule_id,
+            rule_version: r.rule_version,
+            expected_pointer: r.expected_pointer,
+            candidates,
+            summary,
+        })
+    }
+}
+
+impl ManifestRow {
+    /// This row's form.
+    #[must_use]
+    pub const fn form(&self) -> ManifestForm {
+        if self.summary.is_some() {
+            ManifestForm::Digest
+        } else {
+            ManifestForm::List
+        }
+    }
+    /// Switches the row to the digest form, computed from the in-memory list.
+    fn into_digest_form(mut self) -> Self {
+        self.summary = Some(CandidatesSummary {
+            count: self.candidates.len(),
+            digest: candidates_digest(&self.candidates),
+        });
+        self
+    }
+}
+
+/// `sha256("seosmith-candidates-v1\ncount=<n>\n" + "id=<len>:<id>\n"... + "end\n")`,
+/// the same tagged framing as [`manifest_digest`]. Ids are hashed in emission order.
+pub fn candidates_digest(ids: &[String]) -> String {
+    use std::fmt::Write;
+    let mut bytes = format!("seosmith-candidates-v1\ncount={}\n", ids.len());
+    for id in ids {
+        let _ = writeln!(bytes, "id={}:{id}", id.len());
+    }
+    bytes.push_str("end\n");
+    format!("sha256:{}", digest(bytes.as_bytes()))
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Candidate {
@@ -276,9 +415,10 @@ fn validate(candidate: &Candidate, report: &Report, manifest: &[ManifestRow]) ->
             && candidate.records.len() <= 512,
         "count limit"
     );
+    let form = manifest_form(manifest)?;
     ensure_coded!(
         JobErrorCode::PolicyManifestLimit,
-        serde_json::to_vec(manifest)?.len() <= 262_144,
+        serde_json::to_vec(manifest)?.len() <= form.max_bytes(),
         "manifest byte limit"
     );
     ensure_invariant!(
@@ -731,12 +871,36 @@ pub(crate) fn source_unavailable(page: &crate::model::Page) -> bool {
         || page.extraction_truncated
 }
 
+/// The form of a whole manifest. A manifest mixing both forms is a producer bug.
+fn manifest_form(manifest: &[ManifestRow]) -> Result<ManifestForm, GenerationError> {
+    let form = manifest
+        .first()
+        .map_or(ManifestForm::List, ManifestRow::form);
+    ensure_invariant!(
+        manifest.iter().all(|row| row.form() == form),
+        "mixed manifest forms"
+    );
+    Ok(form)
+}
+
 /// Produce a bounded experimental contract from the fixed S14 scalar rule set.
+/// The manifest is in the `s14-wire-1` list form.
 pub fn generate(
     report: &Report,
     policy: &crate::policy::AdvisoryPolicy,
 ) -> Result<(Candidate, Vec<ManifestRow>), GenerationError> {
-    let (contract, manifest) = build(report, policy)?;
+    generate_form(report, policy, ManifestForm::List)
+}
+
+/// [`generate`] with an explicit manifest form. Under `Digest` the manifest cap
+/// that [`validate`] enforces is the 16,384 B digest cap, measured on the rows
+/// exactly as they will be emitted.
+pub fn generate_form(
+    report: &Report,
+    policy: &crate::policy::AdvisoryPolicy,
+    form: ManifestForm,
+) -> Result<(Candidate, Vec<ManifestRow>), GenerationError> {
+    let (contract, manifest) = build(report, policy, form)?;
     validate(&contract, report, &manifest)?;
     Ok((contract, manifest))
 }
@@ -752,12 +916,22 @@ pub fn generate_unvalidated(
     report: &Report,
     policy: &crate::policy::AdvisoryPolicy,
 ) -> Result<(Candidate, Vec<ManifestRow>), GenerationError> {
-    Ok(build(report, policy)?)
+    generate_unvalidated_form(report, policy, ManifestForm::List)
+}
+
+/// [`generate_unvalidated`] with an explicit manifest form.
+pub fn generate_unvalidated_form(
+    report: &Report,
+    policy: &crate::policy::AdvisoryPolicy,
+    form: ManifestForm,
+) -> Result<(Candidate, Vec<ManifestRow>), GenerationError> {
+    Ok(build(report, policy, form)?)
 }
 
 fn build(
     report: &Report,
     policy: &crate::policy::AdvisoryPolicy,
+    form: ManifestForm,
 ) -> Result<(Candidate, Vec<ManifestRow>)> {
     ensure_invariant!(report.request.validate().is_ok(), "invalid crawl request");
     ensure_invariant!(policy.validate().is_ok(), "invalid advisory policy");
@@ -991,6 +1165,7 @@ fn build(
             rule_version: "s14-1".into(),
             expected_pointer: expected,
             candidates: ids,
+            summary: None,
         });
         coverage.complete = report.coverage_complete
             && (rule != "external_target" || report.request.check_external_links)
@@ -1005,6 +1180,7 @@ fn build(
         rule_version: "s14-1".into(),
         expected_pointer: None,
         candidates: vec![],
+        summary: None,
     };
     let mut edge_coverage = Coverage {
         category: "observation".into(),
@@ -1158,6 +1334,12 @@ fn build(
     contract.coverage.push(edge_coverage);
     manifest.push(edge_manifest);
     contract.manifest_digest = manifest_digest(&manifest);
+    if form == ManifestForm::Digest {
+        manifest = manifest
+            .into_iter()
+            .map(ManifestRow::into_digest_form)
+            .collect();
+    }
     Ok((contract, manifest))
 }
 
@@ -1168,7 +1350,7 @@ pub fn validate_generated(
     report: &Report,
     policy: &crate::policy::AdvisoryPolicy,
 ) -> Result<(), GenerationError> {
-    let (expected, expected_manifest) = generate(report, policy)?;
+    let (expected, expected_manifest) = generate_form(report, policy, manifest_form(manifest)?)?;
     let same = (|| -> Result<bool> {
         Ok(
             serde_json::to_value(candidate)? == serde_json::to_value(expected)?
@@ -1244,6 +1426,7 @@ mod tests {
             rule_version: "s14-1".into(),
             expected_pointer: Some("/policy/title_min".into()),
             candidates: vec![c.records[0].entity_id.clone()],
+            summary: None,
         }]);
         (c, report)
     }
@@ -1884,6 +2067,7 @@ mod tests {
             rule_version: "s14-1".into(),
             expected_pointer: None,
             candidates: vec![],
+            summary: None,
         });
         assert_eq!(
             manifest_digest(&added),
@@ -1954,6 +2138,7 @@ mod tests {
             rule_version: "s14-1".into(),
             expected_pointer: Some("/policy/title_min".into()),
             candidates: vec![c.records[0].entity_id.clone()],
+            summary: None,
         }];
         assert!(validate(&c, &r, &manifest).is_ok());
         let mut empty_policy = c.clone();

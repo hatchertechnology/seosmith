@@ -4,10 +4,11 @@
 //! over the final findings. [`generate`] is the evidence-free fixture form kept
 //! for the pinned review fixtures and local tools. Neither is a delivery gate;
 //! the receiver independently recomputes the population.
-use crate::contract::attach_v1_schema4;
+use crate::contract::{EvidenceLimits, attach_schema4};
 use crate::generation_error::{
     GenerationError, JobErrorCode, ensure_coded, ensure_invariant, invariant,
 };
+use crate::policy_candidate::ManifestForm;
 use crate::{
     delivery::HTP_MAX_REPORT_BYTES,
     model::{Report, digest},
@@ -18,7 +19,30 @@ use std::collections::{HashMap, HashSet};
 
 use crate::contract::MAX_EXTENSION_BYTES;
 
-fn no_nul(value: &serde_json::Value) -> bool {
+/// What distinguishes one wire from another: the label carried by
+/// `policy_guidance.version` and the canonical policy, the S01 evidence limits
+/// and the manifest-row form. `WIRE1` is byte-identical to the historical output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WireProfile {
+    pub label: &'static str,
+    pub limits: EvidenceLimits,
+    pub form: ManifestForm,
+}
+
+impl WireProfile {
+    pub const WIRE1: Self = Self {
+        label: "s14-wire-1",
+        limits: EvidenceLimits::WIRE1,
+        form: ManifestForm::List,
+    };
+    pub const WIRE2: Self = Self {
+        label: "s14-wire-2",
+        limits: EvidenceLimits::WIRE2,
+        form: ManifestForm::Digest,
+    };
+}
+
+pub(crate) fn no_nul(value: &serde_json::Value) -> bool {
     match value {
         serde_json::Value::String(s) => !s.contains('\0'),
         serde_json::Value::Array(a) => a.iter().all(no_nul),
@@ -177,7 +201,7 @@ fn check_policy_extension(len: usize) -> Result<(), GenerationError> {
 /// Evidence-free schema-4 form, used by the pinned review fixtures and local
 /// tools. The production path is [`generate_wire_v1`].
 pub fn generate(report: &mut Report, config: &AdvisoryPolicy) -> Result<Vec<u8>, GenerationError> {
-    Ok(generate_with(report, config, false)?)
+    Ok(generate_with(report, config, false, WireProfile::WIRE1)?)
 }
 
 /// Production schema-4 serialisation: `s14-wire-1` plus S01 evidence v1 over the
@@ -187,17 +211,33 @@ pub fn generate_wire_v1(
     report: &mut Report,
     config: &AdvisoryPolicy,
 ) -> Result<Vec<u8>, GenerationError> {
-    Ok(generate_with(report, config, true)?)
+    generate_wire(report, config, WireProfile::WIRE1)
 }
 
-fn generate_with(report: &mut Report, config: &AdvisoryPolicy, evidence: bool) -> Result<Vec<u8>> {
+/// [`generate_wire_v1`] for any wire: the S01 evidence limits, the manifest form
+/// and every size check follow `profile`, and each check measures the form that
+/// is emitted.
+pub fn generate_wire(
+    report: &mut Report,
+    config: &AdvisoryPolicy,
+    profile: WireProfile,
+) -> Result<Vec<u8>, GenerationError> {
+    Ok(generate_with(report, config, true, profile)?)
+}
+
+fn generate_with(
+    report: &mut Report,
+    config: &AdvisoryPolicy,
+    evidence: bool,
+    profile: WireProfile,
+) -> Result<Vec<u8>> {
     ensure_invariant!(
         report.schema_version == 1
             && report.evidence_contract.is_none()
             && report.policy_guidance.is_none(),
         "prototype requires an unversioned base report"
     );
-    policy::apply_with_evidence(report, config)?;
+    policy::apply_with_evidence_form(report, config, profile.form)?;
     let guidance = report
         .policy_guidance
         .as_ref()
@@ -230,15 +270,15 @@ fn generate_with(report: &mut Report, config: &AdvisoryPolicy, evidence: bool) -
     if evidence {
         // `report.findings` is final here; evidence must not run earlier.
         // `apply_with_evidence` leaves the local schema number (3), which is what
-        // `attach_v1_schema4` requires; it never changes it. The schema becomes 4 below.
-        attach_v1_schema4(report)?;
+        // `attach_schema4` requires; it never changes it. The schema becomes 4 below.
+        attach_schema4(report, profile.limits)?;
         ensure_invariant!(
             report.schema_version == 3,
             "evidence attachment must not set the schema version"
         );
         check_evidence_extension(serde_json::to_vec(&report.evidence_contract)?.len())?;
     }
-    let policy = serde_json::json!({"catalog_version":"s14-1","collection":{"check_external_links":report.request.check_external_links,"delay_ms":report.request.delay_ms,"max_duration_seconds":report.request.max_duration_seconds,"max_pages":report.request.max_pages,"max_resources":report.request.max_resources,"seed_url":report.request.url},"engine_version":report.engine_version,"policy":config,"ruleset_version":report.ruleset_version,"schema_version":4,"validator_version":"s14-wire-1","wire_contract_version":"s14-wire-1"});
+    let policy = serde_json::json!({"catalog_version":"s14-1","collection":{"check_external_links":report.request.check_external_links,"delay_ms":report.request.delay_ms,"max_duration_seconds":report.request.max_duration_seconds,"max_pages":report.request.max_pages,"max_resources":report.request.max_resources,"seed_url":report.request.url},"engine_version":report.engine_version,"policy":config,"ruleset_version":report.ruleset_version,"schema_version":4,"validator_version":profile.label,"wire_contract_version":profile.label});
     // This typed object has a fixed two-container shape; it is not an untrusted JSON parser.
     let canonical = serde_json::to_string(&policy)?;
     ensure_coded!(
@@ -251,7 +291,7 @@ fn generate_with(report: &mut Report, config: &AdvisoryPolicy, evidence: bool) -
         .policy_guidance
         .as_mut()
         .ok_or_else(|| invariant("policy missing"))?;
-    guidance.version = "s14-wire-1".into();
+    guidance.version = profile.label.into();
     let candidate = guidance
         .candidate
         .as_mut()

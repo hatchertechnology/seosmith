@@ -7,6 +7,7 @@ use seosmith::{
     api::{self, App},
     crawler,
     delivery::Delivery,
+    families::types::{CaptureMode, FamilySet},
     fetch::service_url,
     generation_error::{GenerationError, JobErrorCode},
     model::CrawlRequest,
@@ -32,6 +33,13 @@ struct Cli {
     /// `--advisory-policy`; incompatible with `--evidence-contract-v2`.
     #[arg(long, env = "SEOSMITH_POLICY_WIRE_V1", default_value_t = false)]
     policy_wire_v1: bool,
+    /// Emit `s14-wire-2` reports (S01 limits 1,024/1,024, digest manifest rows and
+    /// `evidence_families`) and capture the worker's evidence. Requires
+    /// `SEOSMITH_POLICY_WIRE_V1=true` and an advisory policy; refused with
+    /// `SEOSMITH_EVIDENCE_CONTRACT_V2` (the older schema-2 evidence gate) and by
+    /// the local `crawl` subcommand. The receiver must accept wire-2 first.
+    #[arg(long, env = "SEOSMITH_POLICY_WIRE_V2", default_value_t = false)]
+    policy_wire_v2: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -143,6 +151,13 @@ async fn main() -> Result<()> {
         !cli.policy_wire_v1 || cli.advisory_policy.is_some(),
         "--policy-wire-v1 requires --advisory-policy"
     );
+    check_wire2_flags(
+        cli.policy_wire_v2,
+        cli.policy_wire_v1,
+        cli.evidence_contract_v2,
+        cli.advisory_policy.is_some(),
+        matches!(cli.command, Command::Crawl { .. }),
+    )?;
     ensure!(
         !(cli.evidence_contract_v2 && cli.advisory_policy.is_some()),
         "S14 and S01 cannot be combined until their wire contract is agreed"
@@ -396,7 +411,15 @@ async fn main() -> Result<()> {
                         .await?;
                 }
                 result?;
-            } else if !finalize_job(&store, &mut report, cli.evidence_contract_v2, None).await? {
+            } else if !finalize_job(
+                &store,
+                &mut report,
+                cli.evidence_contract_v2,
+                None,
+                JobModes::default(),
+            )
+            .await?
+            {
                 anyhow::bail!("report finalization failed");
             }
             if let Some(bytes) = wire_bytes {
@@ -417,12 +440,14 @@ async fn main() -> Result<()> {
             let crawl_store = store.clone();
             let worker_stop = stop.clone();
             let wire_policy = cli.policy_wire_v1.then(|| policy.clone()).flatten();
+            let process_mode = process_capture_mode(cli.policy_wire_v2);
             let worker = tokio::spawn(async move {
                 let result = process_jobs(
                     crawl_store,
                     &mut stopped,
                     cli.evidence_contract_v2,
                     wire_policy.as_ref(),
+                    process_mode,
                 )
                 .await;
                 let _ = worker_stop.send(true);
@@ -464,6 +489,77 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// The `SEOSMITH_POLICY_WIRE_V2` refusals (design A6). Rollback is the one-word
+/// flip back to false, which leaves a valid wire-1 configuration, so wire-2
+/// requires wire-1 rather than replacing it. The names are spelled in full:
+/// `SEOSMITH_EVIDENCE_CONTRACT_V2` is the older schema-2 evidence gate and has
+/// nothing to do with wire-2.
+fn check_wire2_flags(
+    v2: bool,
+    v1: bool,
+    evidence_contract_v2: bool,
+    has_policy: bool,
+    local_crawl: bool,
+) -> Result<()> {
+    if !v2 {
+        return Ok(());
+    }
+    ensure!(
+        !evidence_contract_v2,
+        "SEOSMITH_POLICY_WIRE_V2 cannot be combined with SEOSMITH_EVIDENCE_CONTRACT_V2 (the schema-2 evidence gate)"
+    );
+    ensure!(
+        v1,
+        "SEOSMITH_POLICY_WIRE_V2 requires SEOSMITH_POLICY_WIRE_V1=true"
+    );
+    ensure!(
+        has_policy,
+        "SEOSMITH_POLICY_WIRE_V2 requires --advisory-policy"
+    );
+    ensure!(
+        !local_crawl,
+        "--policy-wire-v2 is not supported by the local crawl subcommand in Wave 1; use serve"
+    );
+    Ok(())
+}
+
+/// How the worker captures: `Wire2` when `SEOSMITH_POLICY_WIRE_V2` is on, else `None`.
+/// This process-wide mode is claimed with the job and decides the wire; the
+/// mode stored with the job decides how its evidence was captured.
+const fn process_capture_mode(policy_wire_v2: bool) -> CaptureMode {
+    if policy_wire_v2 {
+        CaptureMode::Wire2
+    } else {
+        CaptureMode::None
+    }
+}
+
+/// Capture modes of one finalised job (design 2, "Capture mode on recovery").
+#[derive(Clone, Copy, Debug, Default)]
+struct JobModes {
+    /// The current flag: chooses the wire (`Wire2` emits wire-2, `None` wire-1).
+    process: CaptureMode,
+    /// The mode stored when the job was first claimed: chooses the families.
+    stored: CaptureMode,
+}
+
+/// The six evidence families of a job. TEMPORARY, written against the 8b-2 stubs
+/// (`src/families/` has types only): every family is `unavailable`. Replace the
+/// body with `seosmith::families::build_all(store, id, report, stored, &SystemClock).await`
+/// when 8b-2's builders land. A job whose stored mode is `none` is labelled
+/// `capture_mode_changed`, as `build_all` will.
+async fn build_families(
+    _store: &Store,
+    _id: &str,
+    _report: &seosmith::model::Report,
+    stored: CaptureMode,
+) -> FamilySet {
+    seosmith::wire2::unavailable_families(match stored {
+        CaptureMode::None => "capture_mode_changed",
+        CaptureMode::Wire2 => "analyzer_error",
+    })
+}
+
 /// A fixed, redacted label for a crawl failure: the kind of the first recognisable
 /// cause in the chain, never its message (which can carry a URL or stored content).
 fn crawl_failure_reason(error: &anyhow::Error) -> &'static str {
@@ -489,20 +585,42 @@ async fn process_jobs(
     stopped: &mut watch::Receiver<bool>,
     evidence_contract_v2: bool,
     wire_policy: Option<&seosmith::policy::AdvisoryPolicy>,
+    process_mode: CaptureMode,
 ) -> Result<()> {
     loop {
         if *stopped.borrow() {
             return Ok(());
         }
-        if let Some(request) = store.claim().await? {
+        if let Some(request) = store.claim_with(process_mode).await? {
             tracing::info!(run_id=%request.request_id, "crawl started");
+            let id = request.request_id.to_string();
+            // A recovered job keeps the mode it was first claimed with.
+            let stored = match store.capture_mode(&id).await {
+                Ok(mode) => mode,
+                Err(_) => {
+                    fail_logged(&store, &id, JobErrorCode::StoreError).await;
+                    tracing::error!(run_id=%id, code=JobErrorCode::StoreError.as_str(), "capture mode unavailable");
+                    continue;
+                }
+            };
             let result = tokio::select! {
-                result = crawl_job(&store, &request) => result,
+                result = crawl_job(&store, &request, stored) => result,
                 _ = stopped.changed() => return Ok(()),
             };
             match result {
                 Ok(mut report) => {
-                    finalize_job(&store, &mut report, evidence_contract_v2, wire_policy).await?;
+                    let modes = JobModes {
+                        process: process_mode,
+                        stored,
+                    };
+                    finalize_job(
+                        &store,
+                        &mut report,
+                        evidence_contract_v2,
+                        wire_policy,
+                        modes,
+                    )
+                    .await?;
                 }
                 Err(error) => {
                     let code = JobErrorCode::CrawlInternalError;
@@ -528,7 +646,11 @@ async fn process_jobs(
 /// (`local-cli-fixtures`) answer from `SEOSMITH_LOCAL_FIXTURES` when it is set,
 /// so a test can drive the whole `serve` worker without a network. Without the
 /// feature, or with the variable unset, this is exactly `crawler::crawl`.
-async fn crawl_job(store: &Store, request: &CrawlRequest) -> Result<seosmith::model::Report> {
+async fn crawl_job(
+    store: &Store,
+    request: &CrawlRequest,
+    stored: CaptureMode,
+) -> Result<seosmith::model::Report> {
     #[cfg(feature = "local-cli-fixtures")]
     if let Some(fixtures) = load_fixtures()? {
         // A fixture transport touches no origin, so the per-fetch politeness
@@ -539,7 +661,7 @@ async fn crawl_job(store: &Store, request: &CrawlRequest) -> Result<seosmith::mo
         report.request.delay_ms = request.delay_ms;
         return Ok(report);
     }
-    crawler::crawl(store, request).await
+    crawler::crawl_captured(store, request, stored).await
 }
 
 // The optional fixture transport is compiled only for offline acceptance. It never
@@ -636,10 +758,23 @@ async fn finalize_job(
     report: &mut seosmith::model::Report,
     v2: bool,
     wire_policy: Option<&seosmith::policy::AdvisoryPolicy>,
+    modes: JobModes,
 ) -> Result<bool> {
     if let Some(policy) = wire_policy {
         let id = report.request.request_id.to_string();
-        let bytes = match seosmith::finding_coverage_prototype::generate_wire_v1(report, policy) {
+        // The current flag chooses the wire; the stored mode chooses the families
+        // (design 2). With the flag off the captures are ignored, whatever the
+        // stored mode, and the bytes are today's wire-1 bytes.
+        let generated = match modes.process {
+            CaptureMode::Wire2 => {
+                let families = build_families(store, &id, report, modes.stored).await;
+                seosmith::wire2::generate_wire_v2(report, policy, families)
+            }
+            CaptureMode::None => {
+                seosmith::finding_coverage_prototype::generate_wire_v1(report, policy)
+            }
+        };
+        let bytes = match generated {
             Ok(bytes) => bytes,
             Err(error) => {
                 fail_logged(store, &id, error.code).await;
@@ -755,7 +890,16 @@ mod tests {
             store.claim().await?.unwrap();
         }
         // The cap error is a failed job (`Ok(false)`), never an `Err` that would stop the worker.
-        assert!(!finalize_job(&store, &mut oversized, false, Some(&policy)).await?);
+        assert!(
+            !finalize_job(
+                &store,
+                &mut oversized,
+                false,
+                Some(&policy),
+                JobModes::default()
+            )
+            .await?
+        );
         let failed = store
             .view(&oversized.request.request_id.to_string())
             .await?
@@ -775,7 +919,7 @@ mod tests {
             .to_string();
         assert!(cause.contains("byte limit"), "{cause}");
         assert!(store.pending().await?.is_none());
-        assert!(finalize_job(&store, &mut ok, false, Some(&policy)).await?);
+        assert!(finalize_job(&store, &mut ok, false, Some(&policy), JobModes::default()).await?);
         let (id, body, sha, _) = store.pending().await?.unwrap();
         assert_eq!(id, ok.request.request_id.to_string());
         assert_eq!(sha, seosmith::model::digest(body.as_bytes()));
@@ -804,7 +948,16 @@ mod tests {
             .bind(stuck.request.request_id.to_string())
             .execute(&store.0)
             .await?;
-        assert!(!finalize_job(&store, &mut stuck, false, Some(&policy)).await?);
+        assert!(
+            !finalize_job(
+                &store,
+                &mut stuck,
+                false,
+                Some(&policy),
+                JobModes::default()
+            )
+            .await?
+        );
         let view = store
             .view(&stuck.request.request_id.to_string())
             .await?
@@ -813,7 +966,7 @@ mod tests {
             (view.state.as_str(), view.error.as_deref()),
             ("failed", Some("store_error"))
         );
-        assert!(finalize_job(&store, &mut ok, false, Some(&policy)).await?);
+        assert!(finalize_job(&store, &mut ok, false, Some(&policy), JobModes::default()).await?);
         Ok(())
     }
 
@@ -829,12 +982,144 @@ mod tests {
         report.request.request_id = uuid::Uuid::new_v4();
         store.submit(&report.request).await?;
         store.claim().await?.unwrap();
-        assert!(!finalize_job(&store, &mut report, false, Some(&policy)).await?);
+        assert!(
+            !finalize_job(
+                &store,
+                &mut report,
+                false,
+                Some(&policy),
+                JobModes::default()
+            )
+            .await?
+        );
         let view = store
             .view(&report.request.request_id.to_string())
             .await?
             .unwrap();
         assert_eq!(view.error.as_deref(), Some("generation_invariant"));
+        Ok(())
+    }
+
+    #[test]
+    fn wire2_flag_refusals() {
+        let ok = |v2, v1, ev2, policy, crawl| check_wire2_flags(v2, v1, ev2, policy, crawl);
+        // Off: anything goes (the existing checks handle the rest).
+        assert!(ok(false, false, false, false, false).is_ok());
+        assert!(ok(false, true, false, true, true).is_ok());
+        // On with v1 and a policy: accepted.
+        assert!(ok(true, true, false, true, false).is_ok());
+        // v2 without v1.
+        let e = ok(true, false, false, true, false).unwrap_err().to_string();
+        assert!(e.contains("SEOSMITH_POLICY_WIRE_V1"), "{e}");
+        // v2 with the schema-2 evidence gate.
+        let e = ok(true, true, true, true, false).unwrap_err().to_string();
+        assert!(e.contains("SEOSMITH_EVIDENCE_CONTRACT_V2"), "{e}");
+        // v2 without a policy.
+        let e = ok(true, true, false, false, false).unwrap_err().to_string();
+        assert!(e.contains("--advisory-policy"), "{e}");
+        // v2 on the local crawl subcommand.
+        let e = ok(true, true, false, true, true).unwrap_err().to_string();
+        assert!(e.contains("local crawl"), "{e}");
+    }
+
+    #[test]
+    fn the_flag_maps_to_the_process_capture_mode() {
+        assert_eq!(process_capture_mode(true), CaptureMode::Wire2);
+        assert_eq!(process_capture_mode(false), CaptureMode::None);
+    }
+
+    #[tokio::test]
+    async fn the_cli_parses_the_flag_and_the_env_name() {
+        let cli = Cli::try_parse_from(["seosmith", "--policy-wire-v2", "serve"]).unwrap();
+        assert!(cli.policy_wire_v2);
+        let cli = Cli::try_parse_from(["seosmith", "serve"]).unwrap();
+        assert!(!cli.policy_wire_v2, "default is false");
+    }
+
+    async fn claimed_report(store: &Store, case: &str) -> Result<seosmith::model::Report> {
+        let mut report = seosmith::finding_coverage_prototype::fixture_input(case)?;
+        report.request.request_id = uuid::Uuid::new_v4();
+        store.submit(&report.request).await?;
+        store.claim().await?.unwrap();
+        Ok(report)
+    }
+
+    async fn stored_report(store: &Store, id: uuid::Uuid) -> Result<serde_json::Value> {
+        let body: String = sqlx::query_scalar("SELECT report FROM jobs WHERE id=?")
+            .bind(id.to_string())
+            .fetch_one(&store.0)
+            .await?;
+        Ok(serde_json::from_str(&body)?)
+    }
+
+    #[tokio::test]
+    async fn the_flag_chooses_the_wire_and_the_stored_mode_chooses_the_families() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(dir.path().join("w.sqlite").to_str().unwrap()).await?;
+        let policy = seosmith::policy::AdvisoryPolicy::default();
+        // Flag on, job stored with `none`: wire-2, every family capture_mode_changed.
+        let mut report = claimed_report(&store, "complete-missing-h1").await?;
+        let modes = JobModes {
+            process: CaptureMode::Wire2,
+            stored: CaptureMode::None,
+        };
+        assert!(finalize_job(&store, &mut report, false, Some(&policy), modes).await?);
+        let v = stored_report(&store, report.request.request_id).await?;
+        assert_eq!(v["policy_guidance"]["version"], "s14-wire-2");
+        let families = v["evidence_families"]["families"].as_object().unwrap();
+        assert_eq!(families.len(), 6);
+        assert!(
+            families
+                .values()
+                .all(|s| s["state"] == "unavailable" && s["reason"] == "capture_mode_changed")
+        );
+        // Flag off, job stored with wire2: wire-1 bytes, captures ignored.
+        let mut report = claimed_report(&store, "complete-missing-h1").await?;
+        let modes = JobModes {
+            process: CaptureMode::None,
+            stored: CaptureMode::Wire2,
+        };
+        assert!(finalize_job(&store, &mut report, false, Some(&policy), modes).await?);
+        let v = stored_report(&store, report.request.request_id).await?;
+        assert_eq!(v["policy_guidance"]["version"], "s14-wire-1");
+        assert!(v.get("evidence_families").is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_wire2_job_never_returns_err_and_fails_with_a_named_code() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(dir.path().join("w.sqlite").to_str().unwrap()).await?;
+        let policy = seosmith::policy::AdvisoryPolicy::default();
+        let modes = JobModes {
+            process: CaptureMode::Wire2,
+            stored: CaptureMode::Wire2,
+        };
+        // A generation invariant: a duplicate source entity.
+        let mut dup = claimed_report(&store, "complete-missing-h1").await?;
+        let again = dup.pages[0].clone();
+        dup.pages.push(again);
+        assert!(!finalize_job(&store, &mut dup, false, Some(&policy), modes).await?);
+        let view = store
+            .view(&dup.request.request_id.to_string())
+            .await?
+            .unwrap();
+        assert_eq!(view.error.as_deref(), Some("generation_invariant"));
+        // A persistence failure: the row already holds a report.
+        let mut stuck = claimed_report(&store, "complete-clean-h1").await?;
+        sqlx::query("UPDATE jobs SET report='{}' WHERE id=?")
+            .bind(stuck.request.request_id.to_string())
+            .execute(&store.0)
+            .await?;
+        assert!(!finalize_job(&store, &mut stuck, false, Some(&policy), modes).await?);
+        let view = store
+            .view(&stuck.request.request_id.to_string())
+            .await?
+            .unwrap();
+        assert_eq!(view.error.as_deref(), Some("store_error"));
+        // The next job still finalizes.
+        let mut ok = claimed_report(&store, "complete-missing-h1").await?;
+        assert!(finalize_job(&store, &mut ok, false, Some(&policy), modes).await?);
         Ok(())
     }
 
@@ -1036,7 +1321,7 @@ mod tests {
                 data: None,
                 error: None,
             });
-        assert!(!finalize_job(&store, &mut bad, false, None).await?);
+        assert!(!finalize_job(&store, &mut bad, false, None, JobModes::default()).await?);
         drop(store);
         let store = Store::open(path.to_str().unwrap()).await?;
         store.recover().await?;
@@ -1054,7 +1339,7 @@ mod tests {
         good.request.request_id = uuid::Uuid::new_v4();
         store.submit(&good.request).await?;
         store.claim().await?.unwrap();
-        assert!(finalize_job(&store, &mut good, false, None).await?);
+        assert!(finalize_job(&store, &mut good, false, None, JobModes::default()).await?);
         let (_, body, hash, _) = store.pending().await?.unwrap();
         assert_eq!(hash, seosmith::model::digest(body.as_bytes()));
         assert_eq!(body, serde_json::to_string(&good)?);
@@ -1072,7 +1357,7 @@ mod tests {
         store.claim().await?.unwrap();
         sqlx::query("CREATE TRIGGER reject_finish BEFORE UPDATE OF report ON jobs BEGIN SELECT RAISE(FAIL, 'storage unavailable'); END").execute(&store.0).await?;
         assert!(
-            finalize_job(&store, &mut report, false, None)
+            finalize_job(&store, &mut report, false, None, JobModes::default())
                 .await
                 .is_err()
         );
@@ -1089,7 +1374,7 @@ mod tests {
             .await?;
         store.recover().await?;
         assert!(store.claim().await?.is_some());
-        assert!(finalize_job(&store, &mut report, false, None).await?);
+        assert!(finalize_job(&store, &mut report, false, None, JobModes::default()).await?);
         Ok(())
     }
 
@@ -1113,7 +1398,7 @@ mod tests {
                 data: Some(value),
                 error: None,
             });
-        finalize_job(&store, &mut bad, true, None).await?;
+        finalize_job(&store, &mut bad, true, None, JobModes::default()).await?;
         let id = bad.request.request_id.to_string();
         assert_eq!(store.view(&id).await?.unwrap().state, "failed");
         assert!(store.report(&id).await?.is_none());
@@ -1124,7 +1409,7 @@ mod tests {
         good.request.request_id = uuid::Uuid::new_v4();
         store.submit(&good.request).await?;
         store.claim().await?.unwrap();
-        finalize_job(&store, &mut good, true, None).await?;
+        finalize_job(&store, &mut good, true, None, JobModes::default()).await?;
         assert!(
             store
                 .report(&good.request.request_id.to_string())

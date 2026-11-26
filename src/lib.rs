@@ -34,6 +34,7 @@ compile_error!("the local-e2e feature is test-only and cannot be built without d
 
 pub mod finding_coverage_prototype;
 pub mod policy_wire_prototype;
+pub mod wire2;
 
 /// Experimental offline link graph analysis.
 pub mod graph_evidence;
