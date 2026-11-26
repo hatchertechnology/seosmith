@@ -127,18 +127,22 @@ fn reason_ok(reason: Option<&String>) -> bool {
     reason.is_none_or(|r| code_ok(r))
 }
 
-fn strings_bounded(value: &Value, depth: usize) -> bool {
+/// Nesting depth; the `facts` object itself is level 1 (the receiver's rule).
+fn depth(value: &Value) -> usize {
     match value {
-        Value::String(s) => s.len() <= FACT_STRING_MAX_BYTES && !s.contains('\0'),
-        Value::Array(items) => {
-            depth < FACTS_MAX_DEPTH && items.iter().all(|v| strings_bounded(v, depth + 1))
-        }
-        Value::Object(map) => {
-            depth < FACTS_MAX_DEPTH
-                && map
-                    .iter()
-                    .all(|(k, v)| !k.contains('\0') && strings_bounded(v, depth + 1))
-        }
+        Value::Object(o) => 1 + o.values().map(depth).max().unwrap_or(0),
+        Value::Array(a) => 1 + a.iter().map(depth).max().unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// Strings and object keys within 2,048 B and NUL-free (the receiver's rule).
+fn strings_bounded(value: &Value) -> bool {
+    let ok = |t: &str| t.len() <= FACT_STRING_MAX_BYTES && !t.contains('\0');
+    match value {
+        Value::String(s) => ok(s),
+        Value::Array(a) => a.iter().all(strings_bounded),
+        Value::Object(o) => o.iter().all(|(k, v)| ok(k) && strings_bounded(v)),
         _ => true,
     }
 }
@@ -190,14 +194,14 @@ fn check_item(report: &Report, item: &FamilyItem) -> Result<(), &'static str> {
             }
         }
         (None, None) => {
-            if !item.facts.get("url").is_some_and(Value::is_string) {
+            if !matches!(item.facts.get("url"), Some(Value::String(u)) if !u.is_empty()) {
                 return Err("unbound item without facts.url");
             }
         }
         _ => return Err("locator and entity must be both set or both null"),
     }
     let facts = Value::Object(item.facts.clone());
-    if !strings_bounded(&facts, 0) {
+    if depth(&facts) > FACTS_MAX_DEPTH || !strings_bounded(&facts) {
         return Err("facts shape");
     }
     if serde_json::to_vec(&facts).map_or(true, |b| b.len() > ITEM_FACTS_MAX_BYTES) {
@@ -216,13 +220,15 @@ fn check_section(report: &Report, section: &FamilySection) -> Result<(), &'stati
         return Err("section code");
     }
     let c = &section.coverage;
-    if c.unknown_reasons.values().sum::<u64>() != c.unknown
-        || !c.unknown_reasons.keys().all(|k| code_ok(k))
-    {
+    let unknown_total = c
+        .unknown_reasons
+        .values()
+        .try_fold(0u64, |a, v| a.checked_add(*v));
+    if unknown_total != Some(c.unknown) || !c.unknown_reasons.keys().all(|k| code_ok(k)) {
         return Err("coverage unknown_reasons");
     }
     let omitted = section.omitted_items;
-    if section.items_total != section.items.len() as u64 + omitted {
+    if (section.items.len() as u64).checked_add(omitted) != Some(section.items_total) {
         return Err("items_total");
     }
     if section.truncated != (omitted > 0) {
@@ -246,14 +252,22 @@ fn check_section(report: &Report, section: &FamilySection) -> Result<(), &'stati
             }
         }
     }
-    let summary_ok = serde_json::to_vec(&section.summary)
-        .is_ok_and(|b| b.len() <= SUMMARY_MAX_BYTES)
-        && no_nul(&section.summary);
+    let summary_ok = section.summary.is_object()
+        && serde_json::to_vec(&section.summary).is_ok_and(|b| b.len() <= SUMMARY_MAX_BYTES)
+        && strings_bounded(&section.summary);
     if !summary_ok {
         return Err("summary");
     }
     for item in &section.items {
         check_item(report, item)?;
+    }
+    let unknown_items = section
+        .items
+        .iter()
+        .filter(|i| i.outcome == Outcome::Unknown)
+        .count() as u64;
+    if unknown_items > c.unknown {
+        return Err("more unknown items than coverage.unknown");
     }
     Ok(())
 }
@@ -413,19 +427,22 @@ fn assemble(
     // is nearly full; give up the largest sections until the object fits. The
     // all-`unavailable` skeleton fits by `plan`, so this terminates.
     while object_len(&set.0, plan.state)? > plan.budget {
+        // The section whose replacement by the skeleton form saves the most;
+        // an already-`unavailable` section counts too (its reason or summary can
+        // be longer than the skeleton's).
         let largest = set
             .0
             .iter()
-            .filter(|(_, s)| s.state != SectionState::Unavailable)
-            .max_by_key(|(_, s)| section_len(s))
-            .map(|(k, s)| (*k, s.semantics.clone()));
-        let Some((key, semantics)) = largest else {
+            .filter_map(|(k, s)| {
+                let minimal = FamilySection::unavailable(*k, &s.semantics, "report_byte_budget");
+                let saved = section_len(s).saturating_sub(section_len(&minimal));
+                (saved > 0).then(|| (saved, *k, minimal))
+            })
+            .max_by_key(|(saved, _, _)| *saved);
+        let Some((_, key, minimal)) = largest else {
             break;
         };
-        set.0.insert(
-            key,
-            FamilySection::unavailable(key, &semantics, "report_byte_budget"),
-        );
+        set.0.insert(key, minimal);
     }
     ensure_invariant!(
         object_len(&set.0, plan.state)? <= plan.budget,
@@ -435,6 +452,7 @@ fn assemble(
         let section = set.0.get(&key).ok_or_else(|| invariant("family missing"))?;
         ensure_invariant!(
             section.items.len() <= limits_for(key).max_items
+                && section_len(section) <= limits_for(key).max_bytes
                 && check_section(report, section).is_ok(),
             "assembled family violates the contract"
         );

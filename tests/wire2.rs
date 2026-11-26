@@ -621,6 +621,46 @@ fn a_section_that_breaks_an_invariant_becomes_unavailable_not_a_failure() -> Res
     let mut s = section(FamilyKey::S05, good(&base));
     s.summary = json!({"blob": "z".repeat(9_000)});
     cases.push(("summary size", s));
+    // 8b-3 review: each of these was accepted by the producer and rejected by the receiver.
+    // summary not an object
+    let mut s = section(FamilyKey::S05, good(&base));
+    s.summary = json!([1, 2]);
+    cases.push(("summary not an object", s));
+    // more unknown items than coverage.unknown
+    let mut s = section(FamilyKey::S05, good(&base));
+    s.items[0].outcome = Outcome::Unknown;
+    s.items[0].reason = Some("target_not_fetched".into());
+    s.state = SectionState::Partial;
+    cases.push(("unknown items over coverage.unknown", s));
+    // an unbound item with an empty facts.url
+    let mut s = section(FamilyKey::S05, good(&base));
+    s.items[0].locator = None;
+    s.items[0].entity_id = None;
+    s.items[0].facts.insert("url".into(), "".into());
+    cases.push(("unbound with empty url", s));
+    // an object key over 2,048 B
+    let mut s = section(FamilyKey::S05, good(&base));
+    s.items[0].facts.insert("k".repeat(2_049), 1.into());
+    cases.push(("facts key over 2048", s));
+    // summary string over 2,048 B
+    let mut s = section(FamilyKey::S05, good(&base));
+    s.summary = json!({"blob": "z".repeat(2_049)});
+    cases.push(("summary string over 2048", s));
+    // summary key over 2,048 B
+    let mut s = section(FamilyKey::S05, good(&base));
+    s.summary = json!({"k".repeat(2_049): 1});
+    cases.push(("summary key over 2048", s));
+    // coverage.unknown_reasons overflow
+    let mut s = section(FamilyKey::S05, good(&base));
+    s.coverage.unknown_reasons = BTreeMap::from([("a".to_owned(), u64::MAX), ("b".to_owned(), 1)]);
+    cases.push(("unknown_reasons overflow", s));
+    // items_total overflow
+    let mut s = section(FamilyKey::S05, good(&base));
+    s.omitted_items = u64::MAX;
+    s.truncated = true;
+    s.omitted_reason = Some("family_item_limit".into());
+    s.items_total = 0;
+    cases.push(("items_total overflow", s));
     for (name, broken) in cases {
         let mut report = base_report(20, 0);
         let mut set = unavailable("capture_mode_changed");
@@ -641,6 +681,70 @@ fn a_section_that_breaks_an_invariant_becomes_unavailable_not_a_failure() -> Res
         v["evidence_families"]["families"]["s05_link_graph"]["state"],
         "complete"
     );
+    Ok(())
+}
+
+/// An unavailable family with a long builder reason does not push the object
+/// over a tight budget: the skeleton uses the shortest sections, and the shrink
+/// loop rewrites an `unavailable` section too.
+#[test]
+fn unavailable_sections_with_longer_reasons_fit_the_tightest_budget() -> Result<()> {
+    let (base, skeleton, _) = skeleton_sizes(40)?;
+    let key = ",\"evidence_families\":".len();
+    let long = "x".repeat(64);
+    // Exactly the room the skeleton needs under `report_byte_budget`.
+    let cap = base + key + 65_536 + skeleton + STATE_SLACK;
+    let mut report = base_report(40, 0);
+    let mut set = unavailable("capture_mode_changed");
+    let mut with_summary = FamilySection::unavailable(FamilyKey::S02, "test-1", &long);
+    with_summary.summary = json!({"note": "n".repeat(4_000)});
+    set.0.insert(FamilyKey::S02, with_summary);
+    let bytes = generate_wire_v2_with_cap(&mut report, &AdvisoryPolicy::default(), set, cap)?;
+    assert!(bytes.len() <= cap);
+    let v: Value = serde_json::from_slice(&bytes)?;
+    assert_eq!(v["evidence_families"]["budget_state"], "report_byte_budget");
+    for (k, _) in FAMILY_LIMITS {
+        assert_eq!(
+            v["evidence_families"]["families"][k.as_str()]["state"],
+            "unavailable"
+        );
+    }
+    Ok(())
+}
+
+/// Whatever the builder emits, the output obeys every rule the receiver checks
+/// beyond the ones above: sorted, within each family's caps, summary an object.
+#[test]
+fn assembled_sections_obey_the_receivers_ordering_and_caps() -> Result<()> {
+    let mut report = base_report(40, 0);
+    let set = heavy_set(&report, 1_500);
+    let v = generate_v2(&mut report, set)?;
+    for (k, l) in FAMILY_LIMITS {
+        let s = &v["evidence_families"]["families"][k.as_str()];
+        assert!(s["summary"].is_object());
+        assert_eq!(s["max_items"], l.max_items);
+        assert_eq!(s["max_bytes"], l.max_bytes);
+        assert!(s["items"].as_array().unwrap().len() <= l.max_items);
+        assert!(serde_json::to_vec(s)?.len() <= l.max_bytes);
+        let rank = |o: &str| {
+            ["issue", "unknown", "observed", "pass"]
+                .iter()
+                .position(|x| *x == o)
+        };
+        let keys: Vec<_> = s["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| {
+                (
+                    rank(i["outcome"].as_str().unwrap()),
+                    i["locator"].as_str().map(str::to_owned),
+                    i["kind"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        assert!(keys.windows(2).all(|w| w[0] <= w[1]), "{}", k.as_str());
+    }
     Ok(())
 }
 

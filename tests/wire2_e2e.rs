@@ -45,6 +45,18 @@ async fn report_for(
     Ok((store, dir, report, id))
 }
 
+/// With `WIRE2_E2E_DUMP_DIR` set, keeps the produced bytes for the receiver's
+/// `admit` example (a manual check; the tests do not depend on it).
+fn dump(name: &str, bytes: &[u8]) -> Result<()> {
+    if let Some(dir) = std::env::var_os("WIRE2_E2E_DUMP_DIR") {
+        std::fs::write(
+            std::path::Path::new(&dir).join(format!("{name}.json")),
+            bytes,
+        )?;
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_captured_crawl_yields_a_wire2_report_with_real_families() -> Result<()> {
     let (store, _dir, mut report, id) = report_for(CaptureMode::Wire2, CaptureMode::Wire2).await?;
@@ -52,6 +64,7 @@ async fn a_captured_crawl_yields_a_wire2_report_with_real_families() -> Result<(
     assert_eq!(stored, CaptureMode::Wire2);
     let families = build_all(&store, &id, &report, stored, &SystemClock).await;
     let bytes = generate_wire_v2(&mut report, &AdvisoryPolicy::default(), families)?;
+    dump("captured", &bytes)?;
     let v: Value = serde_json::from_slice(&bytes)?;
     assert_eq!(v["policy_guidance"]["version"], "s14-wire-2");
     let manifest = serde_json::to_vec(&v["policy_guidance"]["manifest"])?.len();
@@ -84,11 +97,9 @@ async fn a_job_stored_as_none_gets_capture_mode_changed_in_every_family() -> Res
     let stored = store.capture_mode(&id).await?;
     assert_eq!(stored, CaptureMode::None);
     let families = build_all(&store, &id, &report, stored, &SystemClock).await;
-    let v: Value = serde_json::from_slice(&generate_wire_v2(
-        &mut report,
-        &AdvisoryPolicy::default(),
-        families,
-    )?)?;
+    let bytes = generate_wire_v2(&mut report, &AdvisoryPolicy::default(), families)?;
+    dump("none", &bytes)?;
+    let v: Value = serde_json::from_slice(&bytes)?;
     for (_, s) in v["evidence_families"]["families"].as_object().unwrap() {
         assert_eq!(s["state"], "unavailable");
         assert_eq!(s["reason"], "capture_mode_changed");
