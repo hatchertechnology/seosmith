@@ -95,8 +95,16 @@ spec:
               ephemeral-storage: 32Mi
       containers:
         - name: seosmith
-          # The imported local image is pinned to its verified manifest digest.
-          image: localhost/seosmith@sha256:7073b6d33435d0a393dae26e6a25c34c4d2182f27870ef5372768d585a4822f1
+          # Both 4a (schema 2) and 4b (schema 4) run this binary; the report
+          # contract is chosen by the environment below, not by the image.
+          #
+          # Release image built from SEOsmith main 1a0b8708a2453ca78de8602cdc0c2d6637523782
+          # (archive sha256 36c994a9...2772), pinned by the manifest digest that
+          # containerd recorded on import. tests/deploy_thor.rs refuses any
+          # value that is not a full sha256 digest. The v2 image it replaces
+          # (sha256:7073b6d33435d0a393dae26e6a25c34c4d2182f27870ef5372768d585a4822f1)
+          # stays on the node as the 4a rollback candidate.
+          image: localhost/seosmith@sha256:397ec34200c6b01c6acc9684ac9d78e0824b770d97008960dce3390a44a94532
           imagePullPolicy: Never
           securityContext:
             allowPrivilegeEscalation: false
@@ -107,14 +115,27 @@ spec:
             - name: http
               containerPort: 8080
           env:
+            # Step 4b: the schema-4 wire carries its own S01 evidence v1, so the
+            # schema-2 evidence gate is off and must stay off alongside the
+            # wire flag (the binary refuses both together at startup).
             - name: SEOSMITH_EVIDENCE_CONTRACT_V2
+              value: "false"
+            # Emit s14-wire-1 schema-4 reports with evidence v1.
+            - name: SEOSMITH_POLICY_WIRE_V1
               value: "true"
+            # Q1 production advisory policy: {} from
+            # fixtures/policies/production-default.json via the seosmith-policy
+            # ConfigMap generated in kustomization.yaml.
+            - name: SEOSMITH_ADVISORY_POLICY
+              value: /etc/seosmith/policy.json
             - name: SEOSMITH_API_TOKEN_FILE
               value: /secrets/api-token
             - name: HTP_INGEST_TOKEN_FILE
               value: /secrets/htp-token
+            # Schema-4 route: HTP 422 and 409 are terminal here. The legacy
+            # /audits route keeps retrying them, so do not fall back to it.
             - name: HTP_INGEST_URL
-              value: https://htp-api-kerry-hatcher.fly.dev/integrations/seosmith/audits
+              value: https://htp-api-kerry-hatcher.fly.dev/integrations/seosmith/policy-audits
           resources:
             requests:
               cpu: 250m
@@ -147,6 +168,9 @@ spec:
           volumeMounts:
             - name: state
               mountPath: /data
+            - name: policy
+              mountPath: /etc/seosmith
+              readOnly: true
             - name: secrets
               mountPath: /secrets
               readOnly: true
@@ -154,6 +178,11 @@ spec:
         - name: state
           persistentVolumeClaim:
             claimName: seosmith-state
+        - name: policy
+          configMap:
+            # kustomize rewrites this to the content-hashed name of the
+            # seosmith-policy ConfigMap generated in kustomization.yaml.
+            name: seosmith-policy
         - name: secrets
           secret:
             secretName: seosmith-credentials
