@@ -1,5 +1,5 @@
 //! An in-memory origin for crawler tests: URL -> canned response, 404 otherwise.
-#![allow(dead_code)]
+#![allow(dead_code, clippy::unused_async_trait_impl)]
 use anyhow::Result;
 use seosmith::{
     fetch::{Response, Transport},
@@ -8,8 +8,10 @@ use seosmith::{
 use std::collections::BTreeMap;
 use url::Url;
 
+type Canned = (u16, Vec<(&'static str, String)>, Vec<u8>);
+
 #[derive(Default)]
-pub struct Site(pub BTreeMap<String, (u16, Vec<(&'static str, String)>, Vec<u8>)>);
+pub struct Site(pub BTreeMap<String, Canned>);
 
 impl Site {
     pub fn html(mut self, url: &str, body: &str) -> Self {

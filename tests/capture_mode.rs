@@ -233,11 +233,15 @@ async fn evidence_beyond_sixteen_mib_becomes_a_budget_omission() -> anyhow::Resu
 }
 
 fn many_links_site(links: usize) -> Site {
-    let body: String = (0..links)
-        .map(|n| {
-            format!("<a href='/long/path/segment/{n}/with/some/more/text'>link number {n} text</a>")
-        })
-        .collect();
+    let mut body = String::new();
+    for n in 0..links {
+        use std::fmt::Write;
+        write!(
+            body,
+            "<a href='/long/path/segment/{n}/with/some/more/text'>link number {n} text</a>"
+        )
+        .unwrap();
+    }
     Site::default().robots("User-agent: *\nAllow: /\n").html(
         "https://site.invalid/",
         &format!("<html><head><title>H</title></head><body><h1>H</h1>{body}</body></html>"),
