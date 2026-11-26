@@ -1,5 +1,6 @@
 use crate::{
     audit,
+    families::types::CaptureMode,
     fetch::{Fetcher, MAX_BODY, Transport},
     model::{self, CrawlRequest, Page, Report, normalize},
     parse,
@@ -209,6 +210,12 @@ async fn discover_sitemaps(
 }
 pub async fn crawl(store: &Store, r: &CrawlRequest) -> Result<Report> {
     crawl_with(store, r, &Fetcher::default()).await
+}
+/// Crawls with the job's stored capture mode. First-PR stub: delegates to `crawl`.
+#[allow(clippy::unused_async)] // stub: delegates to crawl
+pub async fn crawl_captured(store: &Store, r: &CrawlRequest, mode: CaptureMode) -> Result<Report> {
+    let _ = mode;
+    crawl(store, r).await
 }
 pub async fn crawl_with(store: &Store, r: &CrawlRequest, fetch: &impl Transport) -> Result<Report> {
     crawl_internal(store, r, fetch, false).await

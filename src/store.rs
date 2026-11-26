@@ -1,3 +1,4 @@
+use crate::families::types::CaptureMode;
 use crate::generation_error::JobErrorCode;
 use crate::model::{CrawlRequest, Report, digest};
 use anyhow::{Context, Result, ensure};
@@ -168,7 +169,22 @@ impl Store {
         tx.commit().await?;
         Ok(true)
     }
+    /// Claims the oldest queued standard job. First-PR stub: `mode` is not stored yet.
+    #[allow(clippy::unused_async)] // stub: the real version queries SQLite
+    pub async fn claim_with(&self, mode: CaptureMode) -> Result<Option<CrawlRequest>> {
+        let _ = mode;
+        self.claim_standard().await
+    }
+    /// The stored capture mode of a job. First-PR stub: always `None`.
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)] // stub // stub: the real version queries SQLite
+    pub async fn capture_mode(&self, id: &str) -> Result<CaptureMode> {
+        let _ = id;
+        Ok(CaptureMode::None)
+    }
     pub async fn claim(&self) -> Result<Option<CrawlRequest>> {
+        self.claim_with(CaptureMode::None).await
+    }
+    async fn claim_standard(&self) -> Result<Option<CrawlRequest>> {
         let value:Option<String>=sqlx::query_scalar("UPDATE jobs SET state='running', started_at=coalesce(started_at,strftime('%Y-%m-%dT%H:%M:%fZ','now')) WHERE id=(SELECT id FROM jobs WHERE state='queued' AND execution_mode='standard' ORDER BY created,id LIMIT 1) RETURNING request").fetch_optional(&self.0).await?;
         value
             .map(|v| serde_json::from_str(&v).map_err(Into::into))

@@ -14,6 +14,8 @@ pub mod store;
 
 pub mod extract;
 
+pub mod families;
+
 pub mod contract;
 
 pub mod policy;
