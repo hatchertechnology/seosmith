@@ -44,7 +44,8 @@ pub mod resource_evidence;
 /// Bounded saved-checkpoint resource delivery and affected-page analysis.
 pub mod resource_impact;
 
-mod local_checkpoint;
+/// Per-page capture collectors (also read by `examples/measure_capture.rs`).
+pub mod local_checkpoint;
 
 pub mod s06_batch;
 /// Experimental versioned content detector.

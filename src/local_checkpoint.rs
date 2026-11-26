@@ -135,7 +135,7 @@ pub(crate) fn capture(url: &Url, page: &Page, response: Option<&Response>) -> Va
     capture_with(url, page, response, CaptureMode::None)
 }
 /// `mode` only widens the graph collector's byte limit (`wire2`); `None` is local mode.
-pub(crate) fn capture_with(
+pub fn capture_with(
     url: &Url,
     page: &Page,
     response: Option<&Response>,

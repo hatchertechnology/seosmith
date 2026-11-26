@@ -1,3 +1,4 @@
+#![allow(clippy::format_push_string)]
 //! Deadlines, item limits and the analyzer row limit.
 use seosmith::families::{
     self,

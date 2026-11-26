@@ -111,7 +111,7 @@ pub fn check_invariants(set: &FamilySet, report: &Report) {
                 && c.bytes()
                     .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
         };
-        for (reason, _) in &s.coverage.unknown_reasons {
+        for reason in s.coverage.unknown_reasons.keys() {
             assert!(code(reason), "{name}: reason code {reason}");
         }
         assert!(s.items.len() as u64 <= s.max_items);

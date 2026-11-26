@@ -1,3 +1,4 @@
+#![allow(clippy::format_push_string)]
 //! Over 1,000 entities the analyzers report their row limit, and building stays in memory budget.
 use seosmith::families::{
     self,
