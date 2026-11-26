@@ -1,7 +1,7 @@
 //! Read-only saved-checkpoint resource impact CLI adapter.
 //!
-//! This module is registered only by the binary. It performs no fetch, migration,
-//! report or delivery operation and requires a quiesced immutable database snapshot.
+//! The CLI reads a quiesced immutable snapshot; the worker reads its own live job
+//! (`JobSource`). It performs no fetch, migration, report or delivery operation.
 use crate::families::JobSource;
 use crate::{
     model::Page,

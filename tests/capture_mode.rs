@@ -1,3 +1,4 @@
+#![allow(clippy::format_collect)]
 //! WP8b-2: the capture-mode carrier and worker-mode capture.
 use seosmith::{crawler, families::types::CaptureMode, model::Report, store::Store};
 use sqlx::Row;
@@ -334,5 +335,82 @@ async fn prune_removes_evidence_with_the_frontier() -> anyhow::Result<()> {
     ] {
         assert_eq!(count(&store, sql, &id).await, 0, "{sql}");
     }
+    Ok(())
+}
+
+fn sitemap_site(entries: &[&str]) -> Site {
+    let urls: String = entries
+        .iter()
+        .map(|u| format!("<url><loc>https://site.invalid{u}</loc></url>"))
+        .collect();
+    small_site()
+        .robots("User-agent: *\nAllow: /\nSitemap: https://site.invalid/sitemap.xml\n")
+        .raw(
+            "https://site.invalid/sitemap.xml",
+            200,
+            &[("content-type", "application/xml")],
+            format!(
+                "<?xml version=\"1.0\"?><urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">{urls}</urlset>"
+            )
+            .as_bytes(),
+        )
+}
+
+/// A worker restart resumes a wire2 job with a fresh discovery run. A changed
+/// sitemap must not fail the job (a plain job survives the same restart).
+#[tokio::test]
+async fn resumed_wire2_job_survives_a_changed_sitemap() -> anyhow::Result<()> {
+    let r = request(5, 0);
+    let (_d, store) = store().await?;
+    store.submit(&r).await?;
+    store.claim_with(CaptureMode::Wire2).await?.unwrap();
+    crawler::crawl_captured_with(
+        &store,
+        &unpaced(&r),
+        CaptureMode::Wire2,
+        &sitemap_site(&["/", "/a", "/b"]),
+    )
+    .await?;
+    store.recover().await?;
+    store.claim_with(CaptureMode::None).await?.unwrap();
+    let id = r.request_id.to_string();
+    assert_eq!(store.capture_mode(&id).await?, CaptureMode::Wire2);
+    let stored = store.capture_mode(&id).await?;
+    let resumed =
+        crawler::crawl_captured_with(&store, &unpaced(&r), stored, &sitemap_site(&["/", "/a"]))
+            .await;
+    assert!(resumed.is_ok(), "resume failed: {resumed:?}");
+    // The stored sitemap evidence now describes the run that finished last.
+    let evidence: String =
+        sqlx::query_scalar("SELECT evidence FROM local_sitemap_run WHERE job_id=?")
+            .bind(&id)
+            .fetch_one(&store.0)
+            .await?;
+    assert!(!evidence.contains("/b"), "stale sitemap evidence kept");
+    // And robots evidence lists the origin once, however often the job resumed.
+    let robots: String = sqlx::query_scalar("SELECT evidence FROM local_robots_run WHERE job_id=?")
+        .bind(&id)
+        .fetch_one(&store.0)
+        .await?;
+    let robots: serde_json::Value = serde_json::from_str(&robots)?;
+    assert_eq!(robots["origins"].as_array().unwrap().len(), 1);
+    Ok(())
+}
+
+/// Cancelling a wire2 job mid-crawl is a `cancelled` outcome, not a crawl error.
+#[tokio::test]
+async fn cancelled_wire2_job_reports_cancelled() -> anyhow::Result<()> {
+    let r = request(5, 0);
+    let (_d, store) = store().await?;
+    store.submit(&r).await?;
+    store.claim_with(CaptureMode::Wire2).await?.unwrap();
+    let id = r.request_id.to_string();
+    sqlx::query("UPDATE jobs SET state='cancelled' WHERE id=?")
+        .bind(&id)
+        .execute(&store.0)
+        .await?;
+    let report =
+        crawler::crawl_captured_with(&store, &unpaced(&r), CaptureMode::Wire2, &small_site()).await;
+    assert!(report.is_ok(), "cancel surfaced as error: {report:?}");
     Ok(())
 }

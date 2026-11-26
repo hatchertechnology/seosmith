@@ -14,6 +14,13 @@ pub fn build(ctx: &Ctx<'_>, graph: &Value) -> FamilySection {
     let eligible = ctx.entities.iter().filter(|e| e.html).count() as u64;
     let mut b = SectionBuilder::new(FamilyKey::S05, SEMANTICS, ctx, eligible);
     let omitted = capture_omissions(ctx, &mut b, &["graph"], true);
+    // A page whose graph was dropped has unknown outgoing edges: a distance found from
+    // the other edges is only an upper bound, so "deep" cannot be claimed.
+    let graph_gap = omitted
+        .iter()
+        .filter_map(|n| ctx.captures.get(&ctx.entities[*n].url)?.omission("graph"))
+        .min()
+        .unwrap_or("collector_byte_limit");
     let nodes = graph["nodes"].as_array().map_or(&[][..], Vec::as_slice);
     let unknown_reason = graph["coverage"]["reasons"][0]
         .as_str()
@@ -46,6 +53,15 @@ pub fn build(ctx: &Ctx<'_>, graph: &Value) -> FamilySection {
                     sitemap_only += 1;
                 }
                 b.push(Some(entity), "orphan_page", Outcome::Issue, None, f);
+            }
+            Some("reachable") if distance.is_some_and(|d| d >= DEEP) && !omitted.is_empty() => {
+                b.push(
+                    Some(entity),
+                    "deep_page",
+                    Outcome::Unknown,
+                    Some(graph_gap),
+                    f,
+                );
             }
             Some("reachable") if distance.is_some_and(|d| d >= DEEP) => {
                 observed += 1;

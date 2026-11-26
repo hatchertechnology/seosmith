@@ -29,6 +29,8 @@ pub struct Entity {
     pub locator: String,
     pub is_resource: bool,
     pub html: bool,
+    /// A 2xx response that carried a body: the only kind that can be an exact duplicate.
+    pub has_ok_body: bool,
 }
 
 /// What one page's saved capture says, reduced to the small facts the builders use.
@@ -80,6 +82,7 @@ impl<'a> Ctx<'a> {
                 locator: format!("/pages/{n}"),
                 is_resource: p.is_resource,
                 html: p.html() && !p.is_resource,
+                has_ok_body: p.status.is_some_and(|s| (200..300).contains(&s)) && p.bytes > 0,
             })
             .collect();
         let by_url = entities

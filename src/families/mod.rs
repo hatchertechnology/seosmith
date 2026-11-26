@@ -136,10 +136,15 @@ pub async fn build_all(
     };
     let ctx = Ctx::new(report, captures, clock, capture);
     let source = JobSource::LiveStandard;
-    let index = match saved_index_integrity::analyze(&store.0, job_id, source).await {
-        Ok(bytes) => serde_json::from_slice::<Value>(&bytes).ok(),
-        Err(_) => None,
-    };
+    // The deadline is a wall bound: an analyzer that is still running when the budget
+    // is gone is dropped, and its family is `unavailable(analysis_deadline)`.
+    let index = bounded(&ctx, ctx.started, async {
+        let bytes = saved_index_integrity::analyze(&store.0, job_id, source)
+            .await
+            .ok()?;
+        serde_json::from_slice::<Value>(&bytes).ok()
+    })
+    .await;
     let mut set = std::collections::BTreeMap::<FamilyKey, FamilySection>::default();
     for key in FamilyKey::ALL {
         let started = clock.now();
@@ -147,31 +152,64 @@ pub async fn build_all(
             set.insert(key, unavailable(key, semantics(key), "analysis_deadline"));
             continue;
         }
-        let section = match key {
-            FamilyKey::S02 => index.as_ref().map(|i| s02::build(&ctx, i)),
-            FamilyKey::S03 => index.as_ref().map(|i| s03::build(&ctx, i)),
-            FamilyKey::S04 => Some(s04::build(&ctx, report, started)),
-            FamilyKey::S05 => analyzed(saved_graph::analyze(&store.0, job_id, source).await)
-                .map(|g| s05::build(&ctx, &g)),
-            FamilyKey::S06 => Some(s06::build(&ctx)),
-            FamilyKey::S08 => {
+        // `Err(())` is an analyzer that ran out of time; `Ok(None)` is one that failed.
+        let section: Result<Option<FamilySection>, ()> = match key {
+            FamilyKey::S02 => index
+                .as_ref()
+                .map(|i| i.as_ref().map(|i| s02::build(&ctx, i)))
+                .map_err(|e| *e),
+            FamilyKey::S03 => index
+                .as_ref()
+                .map(|i| i.as_ref().map(|i| s03::build(&ctx, i)))
+                .map_err(|e| *e),
+            FamilyKey::S04 => Ok(Some(s04::build(&ctx, report, started))),
+            FamilyKey::S05 => bounded(&ctx, started, async {
+                analyzed(saved_graph::analyze(&store.0, job_id, source).await)
+            })
+            .await
+            .map(|g| g.map(|g| s05::build(&ctx, &g))),
+            FamilyKey::S06 => Ok(Some(s06::build(&ctx))),
+            FamilyKey::S08 => bounded(&ctx, started, async {
                 analyzed(resource_impact_cli::analyze(&store.0, job_id, source).await)
-                    .map(|r| s08::build(&ctx, &r))
-            }
+            })
+            .await
+            .map(|r| r.map(|r| s08::build(&ctx, &r))),
         };
         let section = match section {
-            None => unavailable(key, semantics(key), "analyzer_error"),
-            Some(_) if ctx.family_expired(started) => {
+            Err(()) => unavailable(key, semantics(key), "analysis_deadline"),
+            Ok(None) => unavailable(key, semantics(key), "analyzer_error"),
+            // S04 stops mid-family and counts the rest in `omitted_items`: keep that
+            // partial section instead of discarding it.
+            Ok(Some(_)) if key != FamilyKey::S04 && ctx.family_expired(started) => {
                 unavailable(key, semantics(key), "analysis_deadline")
             }
-            Some(_) if all_run_limited(&ctx, key) => {
+            Ok(Some(_)) if all_run_limited(&ctx, key) => {
                 unavailable(key, semantics(key), "run_byte_limit")
             }
-            Some(section) => section,
+            Ok(Some(section)) => section,
         };
         set.insert(key, section);
     }
     FamilySet(set)
+}
+
+/// Runs `work` for at most what is left of the family and total budgets.
+async fn bounded<T>(
+    ctx: &Ctx<'_>,
+    family_started: std::time::Instant,
+    work: impl std::future::Future<Output = T>,
+) -> Result<T, ()> {
+    let now = ctx.clock.now();
+    let total_left =
+        common::TOTAL_DEADLINE.saturating_sub(now.saturating_duration_since(ctx.started));
+    let family_left =
+        common::FAMILY_DEADLINE.saturating_sub(now.saturating_duration_since(family_started));
+    let budget = total_left.min(family_left);
+    // Starting an analyzer with next to nothing left only wastes the time.
+    if budget < std::time::Duration::from_millis(1) {
+        return Err(());
+    }
+    tokio::time::timeout(budget, work).await.map_err(|_| ())
 }
 
 fn analyzed(result: anyhow::Result<Vec<u8>>) -> Option<Value> {

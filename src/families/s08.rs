@@ -21,6 +21,16 @@ fn compressible(mime: Option<&str>) -> bool {
     })
 }
 
+/// `no-store` or a `max-age` of zero, read as directives (`max-age=05` is 5, not 0).
+fn no_cache(value: &str) -> bool {
+    value.split(',').any(|d| {
+        let d = d.trim().to_ascii_lowercase();
+        d == "no-store"
+            || d.strip_prefix("max-age=")
+                .is_some_and(|n| n.trim_matches('"').parse::<u64>() == Ok(0))
+    })
+}
+
 pub fn build(ctx: &Ctx<'_>, impact: &Value) -> FamilySection {
     let eligible = ctx.entities.iter().filter(|e| e.is_resource).count() as u64;
     let mut b = SectionBuilder::new(FamilyKey::S08, SEMANTICS, ctx, eligible);
@@ -48,6 +58,7 @@ pub fn build(ctx: &Ctx<'_>, impact: &Value) -> FamilySection {
             ("affected_pages", json!(affected)),
         ]);
         let mut issues = 0;
+        let mut unknowns = 0;
         if r["response"]["http_success"] == false {
             issues += 1;
             b.push(
@@ -91,6 +102,7 @@ pub fn build(ctx: &Ctx<'_>, impact: &Value) -> FamilySection {
             }
             None if compressible(mime) && bytes.is_some_and(|n| n >= COMPRESSIBLE_MIN_BYTES) => {
                 // The transport decodes bodies and may drop the header: absence proves nothing.
+                unknowns += 1;
                 b.push(
                     Some(entity),
                     "compression_unverified",
@@ -102,7 +114,7 @@ pub fn build(ctx: &Ctx<'_>, impact: &Value) -> FamilySection {
             _ => {}
         }
         match r["cache"]["cache_control"]["value"].as_str() {
-            Some(v) if v.contains("no-store") || v.contains("max-age=0") => {
+            Some(v) if no_cache(v) => {
                 issues += 1;
                 b.push(
                     Some(entity),
@@ -112,18 +124,22 @@ pub fn build(ctx: &Ctx<'_>, impact: &Value) -> FamilySection {
                     f.clone(),
                 );
             }
-            None => b.push(
-                Some(entity),
-                "cache_unverified",
-                Outcome::Unknown,
-                Some("cache_control_absent_not_proof"),
-                f.clone(),
-            ),
+            None => {
+                unknowns += 1;
+                b.push(
+                    Some(entity),
+                    "cache_unverified",
+                    Outcome::Unknown,
+                    Some("cache_control_absent_not_proof"),
+                    f.clone(),
+                );
+            }
             _ => {}
         }
         if r["measurement"]["state"] == "observed" && bytes.is_some() {
             observed += 1;
-            if issues == 0 {
+            // A resource with an unknown dimension is observed, not a pass.
+            if issues == 0 && unknowns == 0 {
                 b.push(Some(entity), "resource_delivery", Outcome::Pass, None, f);
             }
         } else {

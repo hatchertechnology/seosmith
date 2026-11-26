@@ -188,3 +188,38 @@ async fn an_unreadable_job_gives_analyzer_error_not_a_panic() {
         SectionState::Unavailable
     );
 }
+
+/// Empty 404s and redirects share one body digest: they are not duplicate content.
+#[tokio::test]
+async fn s06_only_groups_2xx_bodies() {
+    use support::Site;
+    let site = Site::default()
+        .robots("User-agent: *\nAllow: /\n")
+        .html(
+            "https://site.invalid/",
+            "<html><head><title>H</title></head><body><h1>H</h1><a href='/m1'>1</a><a href='/m2'>2</a><a href='/r1'>3</a><a href='/r2'>4</a><a href='/t1'>5</a><a href='/t2'>6</a></body></html>",
+        )
+        .raw("https://site.invalid/m1", 404, &[("content-type", "text/html")], b"")
+        .raw("https://site.invalid/m2", 404, &[("content-type", "text/html")], b"")
+        .raw("https://site.invalid/r1", 301, &[("content-type", "text/html")], b"")
+        .raw("https://site.invalid/r2", 301, &[("content-type", "text/html")], b"")
+        .raw("https://site.invalid/t1", 404, &[("content-type", "text/html")], b"<html><body>not found</body></html>")
+        .raw("https://site.invalid/t2", 404, &[("content-type", "text/html")], b"<html><body>not found</body></html>");
+    let job = crawl(&site, 20, 10, CaptureMode::Wire2).await;
+    let set = families::build_all(
+        &job.store,
+        &job.id,
+        &job.report,
+        CaptureMode::Wire2,
+        &SystemClock,
+    )
+    .await;
+    check_invariants(&set, &job.report);
+    let s06 = section(&set, FamilyKey::S06);
+    assert!(
+        s06.items.iter().all(|i| i.kind != "exact_duplicate_group"),
+        "{:?}",
+        s06.items
+    );
+    assert_eq!(s06.summary["exact_duplicate_groups"], 0);
+}

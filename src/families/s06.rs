@@ -25,7 +25,8 @@ pub fn build(ctx: &Ctx<'_>) -> FamilySection {
         if omitted.contains(&n) {
             continue;
         }
-        if let Some(hash) = &capture.body_hash {
+        // Empty 404s and redirects all share one digest: only 2xx bodies can duplicate.
+        if let Some(hash) = capture.body_hash.as_ref().filter(|_| entity.has_ok_body) {
             groups.entry(hash).or_default().push(n);
         }
         if !entity.html {

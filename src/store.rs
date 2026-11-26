@@ -28,25 +28,39 @@ pub struct JobView {
     pub attempts: i64,
     pub error: Option<String>,
 }
+/// What a capture evidence write may do for this job.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CaptureGate {
+    /// A running local job: replays must match byte for byte.
+    Local,
+    /// A running standard `wire2` job: it can resume after a restart, so a fresh
+    /// discovery run may replace the finished one the earlier attempt saved.
+    Wire2,
+    /// A cancelled `wire2` job: nothing is written; the crawl loop reports `cancelled`.
+    Cancelled,
+}
 /// A job that may record capture evidence: a running local job, or a running
 /// standard job that was first claimed with `capture_mode='wire2'`.
-async fn ensure_capture_running(tx: &mut sqlx::SqliteConnection, id: &str) -> Result<()> {
+async fn ensure_capture_running(tx: &mut sqlx::SqliteConnection, id: &str) -> Result<CaptureGate> {
     let state: Option<(String, Option<String>, Option<String>)> =
         sqlx::query_as("SELECT state,execution_mode,capture_mode FROM jobs WHERE id=?")
             .bind(id)
             .fetch_optional(&mut *tx)
             .await?;
-    let ok = match state {
-        Some((state, Some(mode), _)) if state == "local_running" && mode == "local" => true,
-        Some((state, Some(mode), Some(capture)))
-            if state == "running" && mode == "standard" && capture == "wire2" =>
-        {
-            true
+    let gate = match state {
+        Some((state, Some(mode), _)) if state == "local_running" && mode == "local" => {
+            Some(CaptureGate::Local)
         }
-        _ => false,
+        Some((state, Some(mode), Some(capture))) if mode == "standard" && capture == "wire2" => {
+            match state.as_str() {
+                "running" => Some(CaptureGate::Wire2),
+                "cancelled" => Some(CaptureGate::Cancelled),
+                _ => None,
+            }
+        }
+        _ => None,
     };
-    ensure!(ok, "job is not local running");
-    Ok(())
+    gate.context("job is not local running")
 }
 impl Store {
     pub async fn open(path: &str) -> Result<Self> {
@@ -353,7 +367,10 @@ impl Store {
             "sitemap evidence exceeds limit"
         );
         let mut tx = self.0.begin_with("BEGIN IMMEDIATE").await?;
-        ensure_capture_running(&mut tx, id).await?;
+        let gate = ensure_capture_running(&mut tx, id).await?;
+        if gate == CaptureGate::Cancelled {
+            return Ok(());
+        }
         let existing: Option<String> =
             sqlx::query_scalar("SELECT evidence FROM local_sitemap_run WHERE job_id=?")
                 .bind(id)
@@ -365,8 +382,11 @@ impl Store {
                 return Ok(());
             }
             let old: crate::sitemap_evidence::LocalRun = serde_json::from_str(&old)?;
+            // A resumed wire2 job discovers again, and the sitemap may have changed
+            // since the crash: the last finished run wins. Local jobs never resume.
             ensure!(
-                old.state == "in_progress" && run.state != "in_progress",
+                gate == CaptureGate::Wire2
+                    || (old.state == "in_progress" && run.state != "in_progress"),
                 "sitemap evidence replay differs"
             );
         }
@@ -383,7 +403,9 @@ impl Store {
         source: &str,
     ) -> Result<()> {
         let mut tx = self.0.begin_with("BEGIN IMMEDIATE").await?;
-        ensure_capture_running(&mut tx, id).await?;
+        if ensure_capture_running(&mut tx, id).await? == CaptureGate::Cancelled {
+            return Ok(());
+        }
         let existing: Option<String> =
             sqlx::query_scalar("SELECT evidence FROM local_robots_run WHERE job_id=?")
                 .bind(id)
@@ -396,6 +418,14 @@ impl Store {
         let origins = value["origins"]
             .as_array_mut()
             .context("invalid robots run evidence")?;
+        if origins
+            .iter()
+            .any(|o| o["origin"] == origin && o["source"] == source)
+        {
+            // A resumed job records the same outcome again.
+            tx.commit().await?;
+            return Ok(());
+        }
         if origins.len() < 32 && origin.len() <= 1024 {
             origins.push(serde_json::json!({"origin":origin,"source":source}));
         } else {
@@ -437,7 +467,9 @@ impl Store {
             "evidence URL mismatch"
         );
         let mut tx = self.0.begin_with("BEGIN IMMEDIATE").await?;
-        ensure_capture_running(&mut tx, id).await?;
+        if ensure_capture_running(&mut tx, id).await? == CaptureGate::Cancelled {
+            return Ok(());
+        }
         let existing: Option<FrontierCheckpoint> = sqlx::query_as("SELECT f.page,e.evidence,f.depth,f.in_sitemap,f.resource FROM frontier f LEFT JOIN local_page_evidence e ON e.job_id=f.job_id AND e.url=f.url WHERE f.job_id=? AND f.url=?").bind(id).bind(&page.url).fetch_optional(&mut *tx).await?;
         let (old_page, old_evidence, depth, in_sitemap, resource) =
             existing.context("page is not in frontier")?;
