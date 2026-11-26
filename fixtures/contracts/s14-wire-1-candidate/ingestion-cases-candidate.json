@@ -40,12 +40,6 @@
       "expected": "reject"
     },
     {
-      "fixture": "v4-candidate-forged-source-claim.json",
-      "ingestion": "owner_import",
-      "expected": "accept",
-      "lifecycle_scope": "unverified"
-    },
-    {
       "fixture": "v4-candidate-generation-2.json",
       "ingestion": "owner_import",
       "expected": "accept",

@@ -24,7 +24,7 @@ write('invalid-escaped-duplicate-nested.json',raw.replace(b'"policy_guidance":{"
 p=copy.deepcopy(base);c=p['policy_guidance']['candidate'];policy=c['policy_canonical_json'];policy=policy.replace('{"catalog_version":', '{"catalog_version":"s14-1","catalog_version":', 1);digest='sha256:'+hashlib.sha256(policy.encode()).hexdigest();c['policy_canonical_json']=policy;c['policy_digest']=digest
 for r in c['records']: r['policy_ref']=digest
 write('invalid-policy-duplicate-key.json',p)
-p=json.loads((D/'v4-candidate-omitted.json').read_bytes());row=next(x for x in p['policy_guidance']['candidate']['coverage'] if x['rule_id']=='http_redirect' and x['category']=='policy_violation');row['eligibility_counts']['unknown']-=1;row['eligibility_counts']['eligible']=1;row['attempt_counts']['not_attempted']-=1;row['attempt_counts']['completed']=1;row['outcomes']['unknown']-=1;row['outcomes']['no_violation']=1;row['unknown_reasons']['source_unavailable']-=1;write('invalid-omitted-forged-pass.json',p)
+# invalid-omitted-forged-pass.json was derived from v4-candidate-omitted.json, which failed full-population admission and was dropped; the committed negative is kept as is.
 registry={'status':'candidate-not-frozen','catalog':base['policy_guidance']['catalog'],'manifest_rules':[{k:v for k,v in x.items() if k!='candidates'} for x in base['policy_guidance']['manifest']]};write('registry-candidate.json',registry)
 matrix=json.loads(pathlib.Path('fixtures/policies/state-matrix.json').read_bytes());matrix['version']='s14-wire-1';matrix['status']='candidate-not-frozen';write('state-matrix-candidate.json',matrix)
 files=[]

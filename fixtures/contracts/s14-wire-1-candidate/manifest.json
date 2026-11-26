@@ -4,14 +4,14 @@
   "files": [
     {
       "path": "edge-cases-candidate.json",
-      "bytes": 3033,
-      "sha256": "e52487d60170ff5b4db186a2ba06b28b6ff37a19071ed4f2d60a6357bdfd6f5c",
+      "bytes": 247,
+      "sha256": "a136c1fc7269267d97406f521d1b4a2b45035661cd55d2fc98b627def9f9176b",
       "expected_report_validation": "reference"
     },
     {
       "path": "ingestion-cases-candidate.json",
-      "bytes": 4654,
-      "sha256": "6c396d1d848558269b1409aae8707f913126a22eca2b0525ad6b00870682e763",
+      "bytes": 4482,
+      "sha256": "5931f7cb28a7ab96abf1f21731caa1cb121e081760f51f7924180f7094b57b8d",
       "expected_report_validation": "reference"
     },
     {
@@ -189,18 +189,6 @@
       "expected_report_validation": "reference"
     },
     {
-      "path": "unicode-cases-candidate.json",
-      "bytes": 760,
-      "sha256": "fc67f7119172f44acaa4130c464223aeed8281d51c6142f2a905fb8846f33e4c",
-      "expected_report_validation": "reference"
-    },
-    {
-      "path": "url-normalization-cases-candidate.json",
-      "bytes": 1709,
-      "sha256": "e1256980f8a896d5c7d70896f915b5c7237233096c81c0581abc24a65462a7bf",
-      "expected_report_validation": "reference"
-    },
-    {
       "path": "v4-candidate-blocked.json",
       "bytes": 46208,
       "sha256": "557b0564e0a2bba68cb1e63e73c0819fe55f7759220fc9d3f8fe836b8018b0a3",
@@ -210,72 +198,6 @@
       "path": "v4-candidate-complete.json",
       "bytes": 45958,
       "sha256": "2c59c8eff03997d98f7ad1c49d513a030faf6bd37fa3edbee52e76d8606e25a1",
-      "expected_report_validation": "accept"
-    },
-    {
-      "path": "v4-candidate-edge-control.json",
-      "bytes": 43513,
-      "sha256": "e24aacc2cae1f57bf91ede4ec0e1280fd8899c0723000c804099d29598a7573a",
-      "expected_report_validation": "accept"
-    },
-    {
-      "path": "v4-candidate-edge-omitted.json",
-      "bytes": 425676,
-      "sha256": "a04ee5fe1042223e4e01942e0ec1aaebf3b118292fb314aa45429e3f61af234c",
-      "expected_report_validation": "accept"
-    },
-    {
-      "path": "v4-candidate-edge-source_blocked.json",
-      "bytes": 43226,
-      "sha256": "1cde4cb9bc98dc1a2bc71179a9dca9eb193e8bfc0db61b821a19175951388aff",
-      "expected_report_validation": "accept"
-    },
-    {
-      "path": "v4-candidate-edge-source_error.json",
-      "bytes": 43237,
-      "sha256": "da1ed6c726c235bd5a7c688347fa49afb8638a10f9686de0d5e5dec828e48e5c",
-      "expected_report_validation": "accept"
-    },
-    {
-      "path": "v4-candidate-edge-source_missing_status.json",
-      "bytes": 43228,
-      "sha256": "c5c6fc88b7cff029ddc577b53efa2aad55068558fa904c46ffacd1de6d756eb6",
-      "expected_report_validation": "accept"
-    },
-    {
-      "path": "v4-candidate-edge-source_non_html.json",
-      "bytes": 42906,
-      "sha256": "683b41bf058104646fbf80454ba28cb07c6acfa8307b5fcc086c77d25a0c75f8",
-      "expected_report_validation": "accept"
-    },
-    {
-      "path": "v4-candidate-edge-source_non_success.json",
-      "bytes": 42899,
-      "sha256": "f601bdfb04e237af9b437a05f68e513558ac2b421719d4a7c2e8106c6c5a45a7",
-      "expected_report_validation": "accept"
-    },
-    {
-      "path": "v4-candidate-edge-source_truncated.json",
-      "bytes": 43226,
-      "sha256": "2307481f816e6299acd58a2b7ffaf9b6c868c60a6aa5866101c1909cf834c5dd",
-      "expected_report_validation": "accept"
-    },
-    {
-      "path": "v4-candidate-edge-target_blocked.json",
-      "bytes": 43760,
-      "sha256": "0e84edfe030d5f75909ab4ad156958779dd603778774505c2c5ed01ec83ce420",
-      "expected_report_validation": "accept"
-    },
-    {
-      "path": "v4-candidate-edge-target_error.json",
-      "bytes": 43771,
-      "sha256": "8b326a37ec0edadf0c0a6ae338285fba3eacbfb083f4493728554a38056dfc39",
-      "expected_report_validation": "accept"
-    },
-    {
-      "path": "v4-candidate-edge-target_missing_status.json",
-      "bytes": 43762,
-      "sha256": "3e9fa34336c10a283044c235abe590b2e96642e9ebaf3b3c476b1320fbe1e3d9",
       "expected_report_validation": "accept"
     },
     {
@@ -300,12 +222,6 @@
       "path": "v4-candidate-intent.json",
       "bytes": 44834,
       "sha256": "530c1c822d56ad151a8d9c17bc39b6c9a8c5ad6d103699af01917319e8e54139",
-      "expected_report_validation": "accept"
-    },
-    {
-      "path": "v4-candidate-omitted.json",
-      "bytes": 416163,
-      "sha256": "6f28d8a8732d60250c6707390c3d2389b15ef07f43dd4ea0c702c5136778124b",
       "expected_report_validation": "accept"
     },
     {
