@@ -1,4 +1,24 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
+# The Argo Application's destination namespace, stated here as well so the
+# generated ConfigMap joins it. A generated object with no namespace does not
+# get its references rewritten in resources that name `htp-prod` explicitly,
+# which would leave the Deployment pointing at an unhashed name that does not
+# exist. Cluster-scoped resources (the PersistentVolume) are unaffected.
+namespace: htp-prod
 resources:
   - resources.yaml
+generatorOptions:
+  # The content-hash suffix is deliberate. The sender reads the advisory policy
+  # once at startup, so a policy change must change the generated ConfigMap
+  # name, the pod template and therefore restart the pod on the next sync.
+  disableNameSuffixHash: false
+configMapGenerator:
+  # `policy.json` is a byte-identical copy of
+  # fixtures/policies/production-default.json (Q1: {}). It lives beside this
+  # kustomization because a kustomize file source may not reach outside its
+  # root directory and Argo CD sets no load restrictor. Verify with the `cmp`
+  # step in README.md before committing a policy change.
+  - name: seosmith-policy
+    files:
+      - policy.json

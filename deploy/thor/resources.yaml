@@ -115,18 +115,27 @@ spec:
             - name: http
               containerPort: 8080
           env:
+            # Step 4b: the schema-4 wire carries its own S01 evidence v1, so the
+            # schema-2 evidence gate is off and must stay off alongside the
+            # wire flag (the binary refuses both together at startup).
             - name: SEOSMITH_EVIDENCE_CONTRACT_V2
-              value: "true"
-            # Explicitly off in 4a: this binary still emits schema 2. Step 4b
-            # flips this flag, sets the wire flag and adds the advisory policy.
-            - name: SEOSMITH_POLICY_WIRE_V1
               value: "false"
+            # Emit s14-wire-1 schema-4 reports with evidence v1.
+            - name: SEOSMITH_POLICY_WIRE_V1
+              value: "true"
+            # Q1 production advisory policy: {} from
+            # fixtures/policies/production-default.json via the seosmith-policy
+            # ConfigMap generated in kustomization.yaml.
+            - name: SEOSMITH_ADVISORY_POLICY
+              value: /etc/seosmith/policy.json
             - name: SEOSMITH_API_TOKEN_FILE
               value: /secrets/api-token
             - name: HTP_INGEST_TOKEN_FILE
               value: /secrets/htp-token
+            # Schema-4 route: HTP 422 and 409 are terminal here. The legacy
+            # /audits route keeps retrying them, so do not fall back to it.
             - name: HTP_INGEST_URL
-              value: https://htp-api-kerry-hatcher.fly.dev/integrations/seosmith/audits
+              value: https://htp-api-kerry-hatcher.fly.dev/integrations/seosmith/policy-audits
           resources:
             requests:
               cpu: 250m
@@ -159,6 +168,9 @@ spec:
           volumeMounts:
             - name: state
               mountPath: /data
+            - name: policy
+              mountPath: /etc/seosmith
+              readOnly: true
             - name: secrets
               mountPath: /secrets
               readOnly: true
@@ -166,6 +178,11 @@ spec:
         - name: state
           persistentVolumeClaim:
             claimName: seosmith-state
+        - name: policy
+          configMap:
+            # kustomize rewrites this to the content-hashed name of the
+            # seosmith-policy ConfigMap generated in kustomization.yaml.
+            name: seosmith-policy
         - name: secrets
           secret:
             secretName: seosmith-credentials
