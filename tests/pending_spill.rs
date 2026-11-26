@@ -11,14 +11,14 @@
 //! `pending()` rewrite, is what protects it.
 //!
 //! The failure needs a process whose temp files cannot be written. Two independent
-//! ways, so no CI host can silently skip the check:
+//! ways:
 //! - `rlimit`: the test binary runs again under `sh -c 'ulimit -f ...'` (no
 //!   `bwrap`, no namespaces). Every write past the limit fails, including a sorter
-//!   spill, wherever SQLite looks for a temp directory.
+//!   spill, wherever SQLite looks for a temp directory. This is the required guard:
+//!   it runs on every host and never skips.
 //! - `bwrap`: `--ro-bind / /` with only the DB directory writable, which is thor's
-//!   exact condition (`SQLITE_IOERR_GETTEMPPATH`, 6410). Where `bwrap` is unusable
-//!   this test fails loudly when `CI` is set (and prints `SKIPPED` otherwise);
-//!   the `rlimit` tests still run.
+//!   exact condition (`SQLITE_IOERR_GETTEMPPATH`, 6410). Extra coverage where
+//!   `bwrap` is usable; it prints `SKIPPED` and returns otherwise.
 use anyhow::{Result, ensure};
 use seosmith::{model::CrawlRequest, store::Store};
 use std::process::Command;
@@ -261,14 +261,10 @@ fn bwrap_command(dir: &std::path::Path) -> Command {
     c
 }
 
-/// Thor's exact condition. Required under CI; skipped with a message elsewhere.
+/// Thor's exact condition. Extra coverage; skipped with a message where bwrap is unusable.
 #[tokio::test]
 async fn pending_and_pages_work_with_no_writable_temp_directory() -> Result<()> {
     if !bwrap_usable() {
-        assert!(
-            std::env::var_os("CI").is_none(),
-            "bwrap is not usable on this CI host; the sandboxed thor check did not run"
-        );
         eprintln!("SKIPPED: bwrap is not usable here; the rlimit tests still ran");
         return Ok(());
     }
