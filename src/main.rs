@@ -1,8 +1,5 @@
-mod resource_impact_cli;
 #[cfg(feature = "policy-wire-prototype")]
 mod saved_export;
-mod saved_graph;
-mod saved_index_integrity;
 mod saved_pair;
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
@@ -233,7 +230,8 @@ async fn main() -> Result<()> {
             policy.is_none() && !cli.evidence_contract_v2,
             "saved graph does not accept report options"
         );
-        saved_graph::run(std::path::Path::new(&cli.database), &request_id.to_string()).await?;
+        seosmith::saved_graph::run(std::path::Path::new(&cli.database), &request_id.to_string())
+            .await?;
         return Ok(());
     }
     if let Command::ResourceImpact { request_id } = cli.command {
@@ -241,8 +239,11 @@ async fn main() -> Result<()> {
             policy.is_none() && !cli.evidence_contract_v2,
             "resource impact does not accept report options"
         );
-        resource_impact_cli::run(std::path::Path::new(&cli.database), &request_id.to_string())
-            .await?;
+        seosmith::resource_impact_cli::run(
+            std::path::Path::new(&cli.database),
+            &request_id.to_string(),
+        )
+        .await?;
         return Ok(());
     }
     if let Command::SavedPair {
@@ -283,8 +284,11 @@ async fn main() -> Result<()> {
             policy.is_none() && !cli.evidence_contract_v2,
             "saved index integrity does not accept report options"
         );
-        saved_index_integrity::run(std::path::Path::new(&cli.database), &request_id.to_string())
-            .await?;
+        seosmith::saved_index_integrity::run(
+            std::path::Path::new(&cli.database),
+            &request_id.to_string(),
+        )
+        .await?;
         return Ok(());
     }
     if let Command::Operations { operation } = cli.command {

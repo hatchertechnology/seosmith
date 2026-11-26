@@ -28,6 +28,26 @@ pub struct JobView {
     pub attempts: i64,
     pub error: Option<String>,
 }
+/// A job that may record capture evidence: a running local job, or a running
+/// standard job that was first claimed with `capture_mode='wire2'`.
+async fn ensure_capture_running(tx: &mut sqlx::SqliteConnection, id: &str) -> Result<()> {
+    let state: Option<(String, Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT state,execution_mode,capture_mode FROM jobs WHERE id=?")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let ok = match state {
+        Some((state, Some(mode), _)) if state == "local_running" && mode == "local" => true,
+        Some((state, Some(mode), Some(capture)))
+            if state == "running" && mode == "standard" && capture == "wire2" =>
+        {
+            true
+        }
+        _ => false,
+    };
+    ensure!(ok, "job is not local running");
+    Ok(())
+}
 impl Store {
     pub async fn open(path: &str) -> Result<Self> {
         if let Some(parent) = Path::new(path).parent() {
@@ -91,6 +111,14 @@ impl Store {
             .any(|r| r.get::<String, _>("name") == "local_finalization")
         {
             sqlx::query("ALTER TABLE jobs ADD COLUMN local_finalization TEXT")
+                .execute(&mut *tx)
+                .await?;
+        }
+        if !job_columns
+            .iter()
+            .any(|r| r.get::<String, _>("name") == "capture_mode")
+        {
+            sqlx::query("ALTER TABLE jobs ADD COLUMN capture_mode TEXT")
                 .execute(&mut *tx)
                 .await?;
         }
@@ -169,26 +197,33 @@ impl Store {
         tx.commit().await?;
         Ok(true)
     }
-    /// Claims the oldest queued standard job. First-PR stub: `mode` is not stored yet.
-    #[allow(clippy::unused_async)] // stub: the real version queries SQLite
+    /// Claims the oldest queued standard job. `mode` is written only when the job is
+    /// claimed for the first time (`started_at IS NULL`); a recovered job keeps the
+    /// mode it was first claimed with, so its evidence rows are never mixed.
     pub async fn claim_with(&self, mode: CaptureMode) -> Result<Option<CrawlRequest>> {
-        let _ = mode;
-        self.claim_standard().await
-    }
-    /// The stored capture mode of a job. First-PR stub: always `None`.
-    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)] // stub // stub: the real version queries SQLite
-    pub async fn capture_mode(&self, id: &str) -> Result<CaptureMode> {
-        let _ = id;
-        Ok(CaptureMode::None)
-    }
-    pub async fn claim(&self) -> Result<Option<CrawlRequest>> {
-        self.claim_with(CaptureMode::None).await
-    }
-    async fn claim_standard(&self) -> Result<Option<CrawlRequest>> {
-        let value:Option<String>=sqlx::query_scalar("UPDATE jobs SET state='running', started_at=coalesce(started_at,strftime('%Y-%m-%dT%H:%M:%fZ','now')) WHERE id=(SELECT id FROM jobs WHERE state='queued' AND execution_mode='standard' ORDER BY created,id LIMIT 1) RETURNING request").fetch_optional(&self.0).await?;
+        let value:Option<String>=sqlx::query_scalar("UPDATE jobs SET state='running', capture_mode=CASE WHEN started_at IS NULL THEN ? ELSE capture_mode END, started_at=coalesce(started_at,strftime('%Y-%m-%dT%H:%M:%fZ','now')) WHERE id=(SELECT id FROM jobs WHERE state='queued' AND execution_mode='standard' ORDER BY created,id LIMIT 1) RETURNING request")
+            .bind(mode.as_str())
+            .fetch_optional(&self.0)
+            .await?;
         value
             .map(|v| serde_json::from_str(&v).map_err(Into::into))
             .transpose()
+    }
+    /// The stored capture mode. Jobs from before the column, and unknown text, read as `None`.
+    pub async fn capture_mode(&self, id: &str) -> Result<CaptureMode> {
+        let stored: Option<Option<String>> =
+            sqlx::query_scalar("SELECT capture_mode FROM jobs WHERE id=?")
+                .bind(id)
+                .fetch_optional(&self.0)
+                .await?;
+        Ok(stored
+            .flatten()
+            .as_deref()
+            .and_then(CaptureMode::parse)
+            .unwrap_or(CaptureMode::None))
+    }
+    pub async fn claim(&self) -> Result<Option<CrawlRequest>> {
+        self.claim_with(CaptureMode::None).await
     }
     pub async fn claim_local(&self, id: &str) -> Result<Option<CrawlRequest>> {
         let value: Option<String> = sqlx::query_scalar("UPDATE jobs SET state='local_running', started_at=coalesce(started_at,strftime('%Y-%m-%dT%H:%M:%fZ','now')) WHERE id=? AND state='local_queued' AND execution_mode='local' RETURNING request")
@@ -318,15 +353,7 @@ impl Store {
             "sitemap evidence exceeds limit"
         );
         let mut tx = self.0.begin_with("BEGIN IMMEDIATE").await?;
-        let state: Option<(String, Option<String>)> =
-            sqlx::query_as("SELECT state,execution_mode FROM jobs WHERE id=?")
-                .bind(id)
-                .fetch_optional(&mut *tx)
-                .await?;
-        ensure!(
-            state == Some(("local_running".into(), Some("local".into()))),
-            "job is not local running"
-        );
+        ensure_capture_running(&mut tx, id).await?;
         let existing: Option<String> =
             sqlx::query_scalar("SELECT evidence FROM local_sitemap_run WHERE job_id=?")
                 .bind(id)
@@ -356,15 +383,7 @@ impl Store {
         source: &str,
     ) -> Result<()> {
         let mut tx = self.0.begin_with("BEGIN IMMEDIATE").await?;
-        let state: Option<(String, Option<String>)> =
-            sqlx::query_as("SELECT state,execution_mode FROM jobs WHERE id=?")
-                .bind(id)
-                .fetch_optional(&mut *tx)
-                .await?;
-        ensure!(
-            state == Some(("local_running".into(), Some("local".into()))),
-            "job is not local running"
-        );
+        ensure_capture_running(&mut tx, id).await?;
         let existing: Option<String> =
             sqlx::query_scalar("SELECT evidence FROM local_robots_run WHERE job_id=?")
                 .bind(id)
@@ -390,7 +409,17 @@ impl Store {
         tx.commit().await?;
         Ok(())
     }
+    /// Same as `checkpoint_local`, for a standard job first claimed with `capture_mode='wire2'`.
+    pub(crate) async fn checkpoint_capture(
+        &self,
+        id: &str,
+        page: &crate::model::Page,
+        evidence: &serde_json::Value,
+    ) -> Result<()> {
+        self.checkpoint_local(id, page, evidence).await
+    }
     /// Atomically persist a local page and its fixed collector set. Replays must match bytes.
+    /// The job must be a running local job or a running `wire2` standard job.
     pub(crate) async fn checkpoint_local(
         &self,
         id: &str,
@@ -408,15 +437,7 @@ impl Store {
             "evidence URL mismatch"
         );
         let mut tx = self.0.begin_with("BEGIN IMMEDIATE").await?;
-        let state: Option<(String, Option<String>)> =
-            sqlx::query_as("SELECT state,execution_mode FROM jobs WHERE id=?")
-                .bind(id)
-                .fetch_optional(&mut *tx)
-                .await?;
-        ensure!(
-            state == Some(("local_running".into(), Some("local".into()))),
-            "job is not local running"
-        );
+        ensure_capture_running(&mut tx, id).await?;
         let existing: Option<FrontierCheckpoint> = sqlx::query_as("SELECT f.page,e.evidence,f.depth,f.in_sitemap,f.resource FROM frontier f LEFT JOIN local_page_evidence e ON e.job_id=f.job_id AND e.url=f.url WHERE f.job_id=? AND f.url=?").bind(id).bind(&page.url).fetch_optional(&mut *tx).await?;
         let (old_page, old_evidence, depth, in_sitemap, resource) =
             existing.context("page is not in frontier")?;
@@ -696,6 +717,11 @@ impl Store {
     }
     pub async fn prune(&self) -> Result<()> {
         // Never expire pending deliveries. Keep compact idempotency tombstones indefinitely.
+        // Evidence rows go with the frontier rows of the same delivered jobs.
+        sqlx::query("DELETE FROM local_page_evidence WHERE job_id IN (SELECT id FROM jobs WHERE delivery_state='delivered' AND created < unixepoch()-2592000 AND execution_mode='standard')").execute(&self.0).await?;
+        sqlx::query("DELETE FROM local_sitemap_run WHERE job_id IN (SELECT id FROM jobs WHERE delivery_state='delivered' AND created < unixepoch()-2592000 AND execution_mode='standard')").execute(&self.0).await?;
+        sqlx::query("DELETE FROM local_robots_run WHERE job_id IN (SELECT id FROM jobs WHERE delivery_state='delivered' AND created < unixepoch()-2592000 AND execution_mode='standard')").execute(&self.0).await?;
+        sqlx::query("DELETE FROM local_evidence_usage WHERE job_id IN (SELECT id FROM jobs WHERE delivery_state='delivered' AND created < unixepoch()-2592000 AND execution_mode='standard')").execute(&self.0).await?;
         sqlx::query("DELETE FROM frontier WHERE job_id IN (SELECT id FROM jobs WHERE delivery_state='delivered' AND created < unixepoch()-2592000)").execute(&self.0).await?;
         sqlx::query("UPDATE jobs SET report=NULL WHERE delivery_state='delivered' AND created < unixepoch()-2592000").execute(&self.0).await?;
         Ok(())

@@ -1,13 +1,14 @@
-use anyhow::{Context, Result, ensure};
-use futures_util::TryStreamExt;
-use seosmith::{
+use crate::families::JobSource;
+use crate::{
     collection_evidence,
     graph_evidence::{self, GraphCoverageInput, LocalPageEvidence},
     integrity_evidence,
 };
+use anyhow::{Context, Result, ensure};
+use futures_util::TryStreamExt;
 use serde_json::{Value, json};
 use sqlx::{
-    Row,
+    Row, SqlitePool,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
 };
 use std::{
@@ -158,8 +159,17 @@ pub async fn run(path: &Path, id: &str) -> Result<()> {
         .connect_with(opts)
         .await
         .context("open existing database read-only")?;
+    let output = analyze(&pool, id, JobSource::SavedLocal).await?;
+    println!("{}", std::str::from_utf8(&output)?);
+    Ok(())
+}
+
+/// The analysis behind the CLI, over any pool holding the job. `SavedLocal`
+/// enforces the terminal local-only checks; `LiveStandard` reads a standard job
+/// from the worker's own store.
+pub async fn analyze(pool: &SqlitePool, id: &str, source: JobSource) -> Result<Vec<u8>> {
     let columns = sqlx::query("PRAGMA table_info(jobs)")
-        .fetch_all(&pool)
+        .fetch_all(pool)
         .await?;
     let has_finalization = columns
         .iter()
@@ -171,22 +181,18 @@ pub async fn run(path: &Path, id: &str) -> Result<()> {
     };
     let job = sqlx::query(job_query)
         .bind(id)
-        .fetch_optional(&pool)
+        .fetch_optional(pool)
         .await
         .context("unsupported or legacy jobs schema")?
         .context("job absent")?;
     let state: String = job.try_get("state")?;
     let mode: Option<String> = job.try_get("execution_mode")?;
     ensure!(
-        state == "local_only" && mode.as_deref() == Some("local"),
+        source.accepts(&state, mode.as_deref()),
         "job is not terminal local-only (legacy, active, or unsupported)"
     );
     let finalization: Option<String> = job.try_get("local_finalization")?;
-    let completion = match finalization.as_deref() {
-        Some("completed") => "completed",
-        Some("interrupted") => "interrupted",
-        _ => "unknown",
-    };
+    let completion = source.completion(finalization.as_deref());
     let request: Option<String> = job.try_get("request")?;
     let request = request.context("saved request absent or exceeds 64 KiB")?;
     let request: Value = serde_json::from_str(&request).context("unsupported saved request")?;
@@ -196,7 +202,7 @@ pub async fn run(path: &Path, id: &str) -> Result<()> {
         .context("saved seed absent")?;
     let scope = Url::parse(seed).ok();
     let mut rows = sqlx::query("SELECT CASE WHEN length(CAST(f.url AS BLOB)) <= 8192 THEN f.url END AS url, f.page IS NOT NULL AS has_page, f.in_sitemap AS in_sitemap, CASE WHEN length(CAST(f.url AS BLOB)) <= 8192 AND length(CAST(e.evidence AS BLOB)) <= ? THEN e.evidence END AS evidence, e.evidence IS NOT NULL AS has_evidence FROM frontier f LEFT JOIN local_page_evidence e ON e.job_id=f.job_id AND e.url=f.url WHERE f.job_id=? ORDER BY f.url LIMIT ?")
-        .bind(MAX_EVIDENCE).bind(id).bind(i64::try_from(MAX_ROWS + 1)?).fetch(&pool);
+        .bind(MAX_EVIDENCE).bind(id).bind(i64::try_from(MAX_ROWS + 1)?).fetch(pool);
     let mut row_count = 0usize;
     let mut row_limit = false;
     let mut pages = Vec::new();
@@ -253,7 +259,7 @@ pub async fn run(path: &Path, id: &str) -> Result<()> {
         if capture["version"].as_u64() == Some(1)
             && capture.get("url") == Some(&Value::Null)
             && capture["url_omission"] == "run_byte_limit"
-            && capture["url_sha256"].as_str() == Some(&seosmith::model::digest(url.as_bytes()))
+            && capture["url_sha256"].as_str() == Some(&crate::model::digest(url.as_bytes()))
         {
             omitted.push(json!({"url":url,"reason":"run_byte_limit"}));
             continue;
@@ -395,6 +401,5 @@ pub async fn run(path: &Path, id: &str) -> Result<()> {
         output.len() <= MAX_OUTPUT,
         "analysis output exceeds 4 MiB; no partial output produced"
     );
-    println!("{}", std::str::from_utf8(&output)?);
-    Ok(())
+    Ok(output)
 }

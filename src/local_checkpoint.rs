@@ -1,10 +1,22 @@
 //! Bounded local observations, never included in delivery reports.
-use crate::{collection_evidence, fetch::Response, graph_evidence, model::Page, resource_evidence};
+use crate::{
+    collection_evidence, families::types::CaptureMode, fetch::Response, graph_evidence,
+    model::Page, resource_evidence,
+};
 use serde::Serialize;
 use serde_json::{Value, json};
 use url::Url;
 
 const COLLECTOR_LIMIT: usize = 24 * 1024;
+/// Worker (`wire2`) capture: full navigation and footer link sets exceed 24 KiB.
+const GRAPH_LIMIT_WIRE2: usize = 64 * 1024;
+
+fn graph_limit(mode: CaptureMode) -> usize {
+    match mode {
+        CaptureMode::Wire2 => GRAPH_LIMIT_WIRE2,
+        CaptureMode::None => COLLECTOR_LIMIT,
+    }
+}
 const URL_COPY_LIMIT: usize = 8192;
 
 fn set_url_identity(value: &mut Value, url: &str) {
@@ -45,11 +57,19 @@ fn unavailable(collector: &'static str, reason: &'static str) -> Observation {
     }
 }
 fn observed<T: Serialize>(collector: &'static str, value: &T, partial: bool) -> Observation {
+    observed_within(collector, value, partial, COLLECTOR_LIMIT)
+}
+fn observed_within<T: Serialize>(
+    collector: &'static str,
+    value: &T,
+    partial: bool,
+    limit: usize,
+) -> Observation {
     let data = serde_json::to_value(value).expect("local evidence serializes");
     if serde_json::to_vec(&data)
         .expect("local evidence serializes")
         .len()
-        > COLLECTOR_LIMIT
+        > limit
     {
         return unavailable(collector, "collector_byte_limit");
     }
@@ -110,7 +130,17 @@ fn soft_404(page: &Page, response: Option<&Response>) -> Observation {
     observation
 }
 /// The collector set is fixed for every page, including unavailable sources.
+#[cfg(test)]
 pub(crate) fn capture(url: &Url, page: &Page, response: Option<&Response>) -> Value {
+    capture_with(url, page, response, CaptureMode::None)
+}
+/// `mode` only widens the graph collector's byte limit (`wire2`); `None` is local mode.
+pub(crate) fn capture_with(
+    url: &Url,
+    page: &Page,
+    response: Option<&Response>,
+    mode: CaptureMode,
+) -> Value {
     let (html, graph, resource) = if let Some(response) = response {
         let resource = observed(
             "resource",
@@ -124,7 +154,7 @@ pub(crate) fn capture(url: &Url, page: &Page, response: Option<&Response>) -> Va
             let partial = errors || !graph.extraction_complete;
             (
                 observed("html_occurrences", &collection, !collection.complete),
-                observed("graph", &graph, partial),
+                observed_within("graph", &graph, partial, graph_limit(mode)),
                 resource,
             )
         } else {
@@ -189,6 +219,7 @@ fn resource_references(url: &Url, page: &Page, response: Option<&Response>) -> O
     result
 }
 /// Capture the decisions from the same policy bytes used by admission.
+#[cfg(test)]
 pub(crate) fn capture_robots(
     url: &Url,
     page: &Page,
@@ -196,7 +227,17 @@ pub(crate) fn capture_robots(
     body: &str,
     source: &str,
 ) -> Value {
-    let mut value = capture(url, page, response);
+    capture_robots_with(url, page, response, body, source, CaptureMode::None)
+}
+pub(crate) fn capture_robots_with(
+    url: &Url,
+    page: &Page,
+    response: Option<&Response>,
+    body: &str,
+    source: &str,
+    mode: CaptureMode,
+) -> Value {
+    let mut value = capture_with(url, page, response, mode);
     let decisions: Vec<_> = [
         "Seosmith",
         "Googlebot",

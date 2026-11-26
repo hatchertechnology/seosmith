@@ -15,6 +15,9 @@ pub mod store;
 pub mod extract;
 
 pub mod families;
+pub mod resource_impact_cli;
+pub mod saved_graph;
+pub mod saved_index_integrity;
 
 pub mod contract;
 
