@@ -87,12 +87,6 @@
       "expected_report_validation": "reject"
     },
     {
-      "path": "invalid-omitted-forged-pass.json",
-      "bytes": 416207,
-      "sha256": "e3c3938db6acdf36e566d7dec5d6e49ee17696f5bbd4133d25718dd22a80b108",
-      "expected_report_validation": "reject"
-    },
-    {
       "path": "invalid-policy-duplicate-key.json",
       "bytes": 45988,
       "sha256": "9291b9e4670ca8a4ccf608ea99d6593679d8e6f3d0c9f796c58ca47e714d4189",

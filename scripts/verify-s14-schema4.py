@@ -7,7 +7,8 @@
       also runs the receiver's admit on every fixture, requires every one to
       admit, and checks the recorded admit summary digest when present
   python3 scripts/verify-s14-schema4.py --admit <bin> --write-admit
-      records validator_revision, summary_sha256 and summary_bytes in the manifest
+      records validator_revision, summary_sha256 and summary_bytes in the manifest,
+      plus the receiver commit given by --receiver-commit <sha>
 """
 import argparse, hashlib, json, pathlib, re, subprocess, sys
 
@@ -41,6 +42,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--admit")
     ap.add_argument("--write-admit", action="store_true")
+    ap.add_argument("--receiver-commit", help="HTP commit the admit binary was built from; recorded with --write-admit")
     args = ap.parse_args()
     manifest_path = DIR / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
@@ -83,6 +85,9 @@ def main():
                 fail(f"{entry['path']}: admit result differs from the manifest")
             print(f"admit ok {entry['path']} {result['summary_sha256']}")
         if args.write_admit:
+            if not args.receiver_commit:
+                fail("--write-admit requires --receiver-commit")
+            manifest["admit_receiver_commit"] = args.receiver_commit
             manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
     print(f"ok: {len(manifest['files'])} fixtures verified")
 

@@ -247,7 +247,10 @@ fn crawl_case(dir: &std::path::Path) -> Result<Vec<u8>> {
         ])
         .args([
             "--advisory-policy",
-            "fixtures/policies/production-default.json",
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/fixtures/policies/production-default.json"
+            ),
         ])
         .arg("--policy-wire-v1")
         .args([
@@ -259,6 +262,14 @@ fn crawl_case(dir: &std::path::Path) -> Result<Vec<u8>> {
     if !output.status.success() {
         bail!("crawl failed: {}", String::from_utf8_lossy(&output.stderr));
     }
+    // Without --features local-cli-fixtures the fixture transport is compiled
+    // out and the crawl fails over the network yet still exits 0.
+    let doc: Value = serde_json::from_slice(&output.stdout)?;
+    ensure!(
+        doc["outcome"] == "completed" && doc["pages"].as_array().is_some_and(|p| !p.is_empty()),
+        "crawl did not complete (outcome {}); was the seosmith binary built with --features local-cli-fixtures?",
+        doc["outcome"]
+    );
     Ok(output.stdout)
 }
 
