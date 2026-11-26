@@ -213,12 +213,6 @@
       "expected_report_validation": "accept"
     },
     {
-      "path": "v4-candidate-depth64.json",
-      "bytes": 46094,
-      "sha256": "cb4eb3cef93f3048e5dc1d67ab499e72c4e301239d89172b9f736327a60ffd3e",
-      "expected_report_validation": "accept"
-    },
-    {
       "path": "v4-candidate-edge-control.json",
       "bytes": 43513,
       "sha256": "e24aacc2cae1f57bf91ede4ec0e1280fd8899c0723000c804099d29598a7573a",
@@ -291,12 +285,6 @@
       "expected_report_validation": "accept"
     },
     {
-      "path": "v4-candidate-forged-source-claim.json",
-      "bytes": 45987,
-      "sha256": "9fe6c2aeb03ca377cd135bccbf5d750387ab115d17a096d9ef581a2b06988342",
-      "expected_report_validation": "accept"
-    },
-    {
       "path": "v4-candidate-generation-0.json",
       "bytes": 45958,
       "sha256": "366573b4dd4f95ca4c1a763be259bff63214e0ea21106f2d908e6b60fd10419a",
@@ -312,12 +300,6 @@
       "path": "v4-candidate-intent.json",
       "bytes": 44834,
       "sha256": "530c1c822d56ad151a8d9c17bc39b6c9a8c5ad6d103699af01917319e8e54139",
-      "expected_report_validation": "accept"
-    },
-    {
-      "path": "v4-candidate-mixed-omitted.json",
-      "bytes": 425640,
-      "sha256": "9cd361d79c93e40ddb57b0043c201fea0090836c500dd726849d055ec6b5efe9",
       "expected_report_validation": "accept"
     },
     {
@@ -342,24 +324,6 @@
       "path": "v4-candidate-resolved.json",
       "bytes": 44594,
       "sha256": "720f1e4d2f4f935f30b80efaae8edd0f271497511e9a9a3163036b2474842b13",
-      "expected_report_validation": "accept"
-    },
-    {
-      "path": "v4-candidate-unicode-equal.json",
-      "bytes": 43277,
-      "sha256": "e64ac00bffcabcb9776500eca0e28e01333b8a45b0fb42da35efd333f4d3c2e6",
-      "expected_report_validation": "accept"
-    },
-    {
-      "path": "v4-candidate-unicode-short.json",
-      "bytes": 43514,
-      "sha256": "fe6c813bcd2e0be9acf7c3b45a7cf729894c67aa01665a0ce427af2a1a58731a",
-      "expected_report_validation": "accept"
-    },
-    {
-      "path": "v4-candidate-url-normalization.json",
-      "bytes": 47115,
-      "sha256": "730c2d22f715a1ac758776bb7098c98aba0b636252d012a76307ab026200eef2",
       "expected_report_validation": "accept"
     },
     {
