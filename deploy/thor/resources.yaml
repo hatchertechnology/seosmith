@@ -95,8 +95,16 @@ spec:
               ephemeral-storage: 32Mi
       containers:
         - name: seosmith
-          # The imported local image is pinned to its verified manifest digest.
-          image: localhost/seosmith@sha256:7073b6d33435d0a393dae26e6a25c34c4d2182f27870ef5372768d585a4822f1
+          # Both 4a (schema 2) and 4b (schema 4) run this binary; the report
+          # contract is chosen by the environment below, not by the image.
+          #
+          # PLACEHOLDER: this is NOT a real digest. Fill it from the release
+          # build at the merged S1+E-p SHA and re-commit before any sync; the
+          # 4a procedure in README.md refuses to sync while a placeholder is
+          # present. The v2 image it replaces
+          # (sha256:7073b6d33435d0a393dae26e6a25c34c4d2182f27870ef5372768d585a4822f1)
+          # stays on the node as the 4a rollback candidate.
+          image: localhost/seosmith@sha256:PLACEHOLDER-FILL-FROM-4A-RELEASE-BUILD
           imagePullPolicy: Never
           securityContext:
             allowPrivilegeEscalation: false
@@ -109,6 +117,10 @@ spec:
           env:
             - name: SEOSMITH_EVIDENCE_CONTRACT_V2
               value: "true"
+            # Explicitly off in 4a: this binary still emits schema 2. Step 4b
+            # flips this flag, sets the wire flag and adds the advisory policy.
+            - name: SEOSMITH_POLICY_WIRE_V1
+              value: "false"
             - name: SEOSMITH_API_TOKEN_FILE
               value: /secrets/api-token
             - name: HTP_INGEST_TOKEN_FILE
