@@ -436,7 +436,7 @@ fn assemble(
             .filter_map(|(k, s)| {
                 let minimal = FamilySection::unavailable(*k, &s.semantics, "report_byte_budget");
                 let saved = section_len(s).saturating_sub(section_len(&minimal));
-                (saved > 0).then(|| (saved, *k, minimal))
+                (saved > 0).then_some((saved, *k, minimal))
             })
             .max_by_key(|(saved, _, _)| *saved);
         let Some((_, key, minimal)) = largest else {
