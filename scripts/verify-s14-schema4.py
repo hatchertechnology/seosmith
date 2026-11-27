@@ -64,6 +64,10 @@ def admit2(binary, path):
     lines = [l for l in p.stderr.decode().splitlines() if l.strip()]
     last = lines[-1] if lines else ""
     if p.returncode != 0:
+        if p.returncode != 1:
+            fail(f"{path.name}: receiver exited {p.returncode}, a rejection exits 1")
+        if sum(1 for l in lines if l.startswith("rejected stage=")) != 1:
+            fail(f"{path.name}: expected exactly one `rejected stage=` line: {p.stderr.decode()!r}")
         m = REJECT_LINE.fullmatch(last)
         if not m:
             fail(f"{path.name}: rejected without a `rejected stage=.. error=..` last line: {last!r}")
@@ -78,6 +82,8 @@ def admit2(binary, path):
 
 
 def verify_wire2(args):
+    if args.write_admit and not args.admit:
+        fail("--write-admit requires --admit")
     manifest_path = DIR2 / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
     if manifest["max_report_bytes"] != CAP:

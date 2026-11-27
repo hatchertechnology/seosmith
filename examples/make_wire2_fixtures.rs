@@ -794,6 +794,57 @@ fn section_mut<'a>(v: &'a mut Value, key: &str) -> &'a mut Value {
     &mut v["evidence_families"]["families"][key]
 }
 
+/// Rewrites a section so it holds only `pass` items and its compact JSON is exactly its own
+/// `max_bytes`: whole items of two 1,500 B facts strings, then one item sized to land on the
+/// cap. Every section invariant (1-4, 6, 7) still holds.
+fn fill_section(s: &mut Value, template: &Value) {
+    let max_bytes = usize::try_from(s["max_bytes"].as_u64().unwrap()).unwrap();
+    let max_items = usize::try_from(s["max_items"].as_u64().unwrap()).unwrap();
+    s["state"] = json!("complete");
+    s["reason"] = Value::Null;
+    s["coverage"]["unknown"] = json!(0);
+    s["coverage"]["unknown_reasons"] = json!({});
+    s["omitted_items"] = json!(0);
+    s["omitted_reason"] = Value::Null;
+    s["truncated"] = json!(false);
+    let set = |s: &mut Value, lens: &[usize]| {
+        let items: Vec<Value> = lens
+            .iter()
+            .enumerate()
+            .map(|(i, l)| {
+                let mut item = template.clone();
+                item["kind"] = json!(format!("k_{i:03}"));
+                item["outcome"] = json!("pass");
+                item["reason"] = Value::Null;
+                item["facts"] = json!({"p": "x".repeat(l / 2), "q": "y".repeat(l - l / 2)});
+                item
+            })
+            .collect();
+        s["items_total"] = json!(items.len());
+        s["items"] = Value::Array(items);
+    };
+    let len = |s: &Value| serde_json::to_vec(s).unwrap().len();
+    let mut lens: Vec<usize> = Vec::new();
+    loop {
+        let mut probe = lens.clone();
+        probe.push(3000);
+        probe.push(0);
+        set(s, &probe);
+        if len(s) > max_bytes {
+            break;
+        }
+        lens.push(3000);
+    }
+    let mut probe = lens.clone();
+    probe.push(0);
+    set(s, &probe);
+    let tail = max_bytes - len(s);
+    lens.push(tail);
+    set(s, &lens);
+    assert_eq!(len(s), max_bytes, "section must land on its cap");
+    assert!(lens.len() <= max_items && tail <= 3000);
+}
+
 fn first_item_mut<'a>(v: &'a mut Value, key: &str) -> Result<&'a mut Value> {
     section_mut(v, key)["items"]
         .get_mut(0)
@@ -1127,24 +1178,28 @@ pub fn cases() -> Result<Vec<Case>> {
             s["items_total"] = json!(s["items_total"].as_u64().unwrap() + 1);
         },
     )?;
+    // Both invariant-2 negatives start from a `partial` section (partial-sources s02), so the
+    // `complete => !truncated` invariant (3) stays satisfied and only invariant 2 is broken.
     neg2(
         &mut out,
         "families-truncated-mismatch",
-        tc,
-        &v2,
+        "partial-sources",
+        &v2_partial,
         rej_shape,
-        "invariant 2: truncated with no omitted items",
+        "invariant 2: truncated with a reason but no omitted items",
         &|v| {
-            section_mut(v, "s02_indexing")["truncated"] = json!(true);
+            let s = section_mut(v, "s02_indexing");
+            s["truncated"] = json!(true);
+            s["omitted_reason"] = json!("family_item_limit");
         },
     )?;
     neg2(
         &mut out,
         "families-omission-reason-missing",
-        tc,
-        &v2,
+        "partial-sources",
+        &v2_partial,
         rej_shape,
-        "invariant 2: omitted items without omitted_reason",
+        "invariant 2: omitted items, truncated, without omitted_reason",
         &|v| {
             let s = section_mut(v, "s02_indexing");
             s["omitted_items"] = json!(1);
@@ -1335,11 +1390,37 @@ pub fn cases() -> Result<Vec<Case>> {
         "invariant 6: 129 items in a section with max_items 128",
         &|v| {
             let s = section_mut(v, "s06_duplicates");
-            let mut extra = s["items"].as_array().unwrap().last().unwrap().clone();
-            let kind = format!("{}z", extra["kind"].as_str().unwrap());
-            extra["kind"] = json!(kind);
+            // An exact copy of the last item: the receiver's order check is strict
+            // (`last > key`), so an equal key is in order and the count is the only defect.
+            let extra = s["items"].as_array().unwrap().last().unwrap().clone();
             s["items"].as_array_mut().unwrap().push(extra);
             s["omitted_items"] = json!(s["omitted_items"].as_u64().unwrap() - 1);
+        },
+    )?;
+    neg2(
+        &mut out,
+        "families-over-786432",
+        tc,
+        &v2,
+        rej_bounds,
+        "every section filled to exactly its own max_bytes (the six caps sum to 786,432); the envelope pushes the compact total over the families cap",
+        &|v| {
+            let template = first_item_mut(v, "s02_indexing").unwrap().clone();
+            let f = &mut v["evidence_families"]["families"];
+            for (_, s) in f.as_object_mut().unwrap().iter_mut() {
+                fill_section(s, &template);
+            }
+        },
+    )?;
+    neg2(
+        &mut out,
+        "families-relationships-not-array",
+        tc,
+        &v2,
+        rej_shape,
+        "pages[0].relationships is an object under v2",
+        &|v| {
+            v["pages"][0]["relationships"] = json!({});
         },
     )?;
     neg2(

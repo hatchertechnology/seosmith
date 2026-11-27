@@ -10,7 +10,7 @@
 //! - `scripts/verify-s14-schema4.py --wire2 --admit` compares the HTP receiver's
 //!   `rejected stage=.. error=..` line with the manifest. When a receiver run has
 //!   been recorded in the manifest (`admit` per file), it must equal `expect`.
-use serde_json::{Value, json};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, fmt::Write as _, path::PathBuf, process::Command};
 
@@ -272,6 +272,12 @@ fn expected_stages_follow_the_design_table() {
             "negative/families-items-over-max.json",
             "inspection",
             "Bounds",
+        ),
+        ("negative/families-over-786432.json", "inspection", "Bounds"),
+        (
+            "negative/families-relationships-not-array.json",
+            "inspection",
+            "Shape",
         ),
         (
             "negative/manifest-list-under-v2.json",
@@ -661,6 +667,30 @@ fn negatives_carry_the_defect_they_are_named_for() {
     );
     assert!(fam("negative/families-not-object-v2.json").is_array());
     assert_eq!(fam("negative/families-bad-version.json")["version"], 2);
+    // Invariant-2 negatives start from a partial section, so invariant 3 stays intact.
+    for name in [
+        "families-truncated-mismatch",
+        "families-omission-reason-missing",
+    ] {
+        let d = doc(&format!("negative/{name}.json"));
+        let s = &d["evidence_families"]["families"]["s02_indexing"];
+        assert_eq!(s["state"], "partial", "{name}");
+    }
+    // The envelope negative: every section within its own cap, the families object over 786,432.
+    let d = doc("negative/families-over-786432.json");
+    let f = &d["evidence_families"];
+    let mut sum = 0;
+    for (k, s) in f["families"].as_object().unwrap() {
+        let n = serde_json::to_vec(s).unwrap().len();
+        assert_eq!(n as u64, s["max_bytes"].as_u64().unwrap(), "{k}");
+        sum += n;
+    }
+    assert_eq!(sum, 786_432);
+    assert!(serde_json::to_vec(f).unwrap().len() > 786_432);
+    assert!(
+        doc("negative/families-relationships-not-array.json")["pages"][0]["relationships"]
+            .is_object()
+    );
     // Label negatives.
     assert_eq!(
         doc("negative/unknown-wire-label.json")["policy_guidance"]["version"],
@@ -900,7 +930,6 @@ fn a_recorded_receiver_run_equals_the_expectation() {
             assert_eq!(a["error"], e["error"], "{}", f["path"]);
         }
     }
-    let _ = json!(null);
 }
 
 // ------------------------------------------------------- the contract document

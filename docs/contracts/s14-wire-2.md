@@ -39,7 +39,7 @@ Wire-1 is unchanged and still accepted: nothing in this document changes a wire-
 - **Compact bytes.** Every byte bound counts the compact serialization (`serde_json::to_vec` length) including quotes and escapes. String bounds count UTF-8 bytes of the decoded string. Whitespace in the raw text is not content.
 - **Policy records are a sample.** Records are emitted in rule order until there are 512 records or 128 observation records; the rest are counted as omitted (`record_limit`, `observation_limit`). `finding_coverage` reads `unknown` for every rule with an omission and the audit `partial`. Coverage rows count every candidate (`candidates = emitted + omitted`). Wire-2 does not claim S14 completeness.
 - **Producer reserve.** The production budgeter keeps 65,536 B of the report cap in reserve, so a production wire-2 report is at most `4,952,756 - 65,536 + 21` bytes. `positive/exact-cap-v2.json` is produced through the producer's cap test seam (`generate_wire_v2_with_cap`) so that the receiver's own boundary is exercised.
-- **Canonical policy size.** The `policy_guidance` bound in the design assumes a canonical policy of up to 65,536 B (`policy_candidate.rs`). That is a producer test input only: **the receiver rejects a 65,536 B canonical policy**, so no accepted report carries one, and the measured `policy_guidance` (about 331 KB) is far under the 1 MiB cap.
+- **Canonical policy size.** The `policy_guidance` bound in the design assumes a canonical policy of up to 65,536 B (`policy_candidate.rs`). That is a producer size stress only. The receiver's length cap is inclusive (a length over 65,536 B is `Bounds`), so the 65,536 B value is not rejected for its size: it is rejected because it is not the policy the receiver derives itself (`inspection`/`Policy`). A valid canonical policy is about 16 KB at most, so no accepted report carries a large one, and the measured `policy_guidance` (about 331 KB, measured at 1,753 entities with 9,975 external links; `positive/manifest-scale.json` carries 315,587 B) is far under the 1 MiB cap. No fixture pins the 65,536 B case.
 - **Flag off.** With `SEOSMITH_POLICY_WIRE_V2` false the report is the wire-1 report, equal **as parsed JSON** to what the same crawl produced before wire-2 existed; the document does not promise equal key order or whitespace across producer versions.
 - Over 4,952,756 B the API answers 413 `report_limit` before `admit`; `admit` itself rejects with `inspection`/`ByteLimit`.
 
@@ -64,14 +64,14 @@ All six keys are required. A family that was not produced is present with `state
 
 **Item:** `entity_id`, `locator`, `kind`, `outcome` (`issue | pass | observed | unknown`), `reason`, `facts`.
 
-### Invariants (the producer constructs them; the receiver checks every one at `inspection`)
+### Invariants (the producer constructs all of them; the receiver checks the ones not marked *producer-only* at `inspection`)
 
 1. `items_total = items.len() + omitted_items`.
 2. `truncated` holds exactly when `omitted_items > 0`; then `omitted_reason` is one of `family_item_limit`, `family_byte_budget`, `report_byte_budget`, `analysis_deadline`.
 3. `state = "complete"` implies `coverage.unknown == 0` and `!truncated`. `state = "unavailable"` implies `items == []` and a non-null `reason`.
 4. `outcome = "unknown"` requires a `reason`. `coverage.unknown_reasons` sums to `coverage.unknown`. A capture omission (`collector_byte_limit`, `run_byte_limit`) is never `pass`.
-5. **Locator binding.** A `locator` is null or `/pages/N`, `/pages/N/links/M` or `/pages/N/relationships/M`, canonical decimal, and must resolve in the same report. `entity_id` equals the S01 `entity_id(url, is_resource)` of `pages[N]`. An item with no page has `locator: null`, `entity_id: null` and a non-empty string `facts.url`; only kinds marked `unbound_url` in the table below may do this.
-6. **Bounds.** `facts`: depth at most 4 (`facts` itself is level 1), at most 4,096 compact bytes, strings (and keys) at most 2,048 B, no NUL. `summary`: an object of at most 8 KiB. `kind`, `reason` and the keys of `unknown_reasons` match `^[a-z0-9_]{1,64}$`. A section is at most its `max_bytes` and `max_items` (table below); `semantics` and the section's `max_items`/`max_bytes` equal the table.
+5. **Locator binding.** A `locator` is null or `/pages/N`, `/pages/N/links/M` or `/pages/N/relationships/M`, canonical decimal, and must resolve in the same report. `entity_id` equals the S01 `entity_id(url, is_resource)` of `pages[N]`. An item with no page has `locator: null`, `entity_id: null` and a non-empty string `facts.url`. The receiver enforces exactly that rule; restricting it to kinds marked `unbound_url` (table below) is *producer-only*.
+6. **Bounds.** `facts`: depth at most 4 (`facts` itself is level 1), at most 4,096 compact bytes, strings (and keys) at most 2,048 B, no NUL. `summary`: an object of at most 8 KiB. `kind`, `reason` and the keys of `unknown_reasons` match `^[a-z0-9_]{1,64}$`. A section is at most its `max_bytes` and `max_items`, and its `max_items` and `max_bytes` fields equal the table below (receiver-checked). A section's `semantics` equal to the table is *producer-only*: the receiver checks only that it is non-empty and at most 64 B. A `kind`, `reason` or `unknown_reasons` key that fails the regex is `Shape`, not `Bounds`.
 7. **Order.** Items are sorted by (outcome rank `issue < unknown < observed < pass`, then `locator` with **null first and a byte-wise string compare** (`/pages/10` sorts before `/pages/2`), then `kind`).
 
 `evidence_families.version` that is present and not the integer 1 is `UnsupportedSchema`.
@@ -87,11 +87,11 @@ All six keys are required. A family that was not produced is present with `state
 | `s06_duplicates` | `s06-local-detector-2` | 128 | 98,304 |
 | `s08_resources` | `static_local_resource_delivery_impact_v1` | 256 | 163,840 |
 
-The byte caps sum to 786,432. The producer budgets families against the final report bytes: `budget = min(786,432, 4,952,756 - 65,536 - base)`; when the room is under 786,432 the object says `budget_state: "report_byte_budget"` and the omitted items say `report_byte_budget`. The `max_bytes` fields always carry the table values.
+The byte caps sum to 786,432. The producer budgets families against the final report bytes: `budget = min(786,432, 4,952,756 - 65,536 - key - base)` (`base` is the report without `evidence_families`; `key` is the 21 bytes of `,"evidence_families":`); when the room is under 786,432 the object says `budget_state: "report_byte_budget"` and the omitted items say `report_byte_budget`. The `max_bytes` fields always carry the table values.
 
 ### Kind table
 
-The receiver checks only the regular expression for `kind`; this table is what the producer emits.
+The receiver checks only the regular expression for `kind` (not table membership); this table is what the production builders emit. Two heavy synthetic positives, `positive/family-byte-budget.json` and `positive/report-budget-degraded.json`, use the test-only kinds `alpha_item` and `beta_item` to fill a section to its byte budget; they are not table kinds.
 
 | Family | `kind` values | Outcomes |
 |---|---|---|
@@ -102,7 +102,7 @@ The receiver checks only the regular expression for `kind`; this table is what t
 | S06 | `soft_404_candidate`, `soft_404_clear`, `soft_404_undecided`, `exact_duplicate_group`, `capture_omission` | issue, pass, unknown |
 | S08 | `failed_resource`, `heavy_resource`, `duplicate_resource`, `uncompressed_resource`, `compression_unverified`, `uncached_resource`, `cache_unverified`, `resource_delivery`, `unmeasured_resource`, `resource_unavailable`, `capture_omission` | issue, pass, unknown |
 
-- `unbound_url` kinds: **none are emitted today**. Every item the current builders produce is bound to a page. The invariant stays for forward use, and `positive/unbound-url-item.json` pins that the receiver accepts a null-locator item carrying `facts.url` (kind `sitemap_entry_not_crawled`).
+- `unbound_url` kinds: `sitemap_entry_not_crawled` (S03) is the one `unbound_url` kind, reserved for S03 and **not emitted today**; every item the current builders produce is bound to a page. `positive/unbound-url-item.json` pins that the receiver accepts a null-locator item carrying `facts.url` (that kind). The receiver does not check the kind, only the null-locator-plus-`facts.url` rule.
 - S06 near-duplicate similarity is not an item: every HTML page counts one unknown with reason `main_text_not_retained` in `coverage.unknown_reasons`, so S06 is always `partial`, and `summary.near_duplicate` says `unknown`. Exact-duplicate groups beyond the 64-group cap are in `summary.exact_duplicate_groups`, not in `items_total`.
 - S02 and S03 reasons from the analyzers are free text; the producer reduces them to codes with `slug()` (`^[a-z0-9_]{1,64}$`) and keeps the original text in `facts.detail`.
 
@@ -147,7 +147,7 @@ Worked values (pinned by `tests/wire2_fixtures.rs`):
 
 ## 5. Stages and rejections
 
-`admit` has three stages: `inspection` (structure and bounds), `summary` (rebuild of the saved summary and the manifest), `population` (findings and entities against the report's pages). `commit` is SQL and is not reachable from a receiver-admitted report; it is tested separately (8c-2). No fixture expects `commit`.
+`admit` has three stages: `inspection` (structure and bounds), `summary` (rebuild of the saved summary and the manifest), `population` (findings and entities against the report's pages). `commit` is SQL. No receiver-admitted **wire-2** report is rejected there; it is tested separately (8c-2), and a wire-1 report can still be admitted and rejected at `commit` (see below). No fixture expects `commit`.
 
 On rejection the receiver's `admit` example prints exactly one last stderr line `rejected stage=<inspection|summary|population> error=<InspectionError name>` and exits 1. `scripts/verify-s14-schema4.py --wire2 --admit <bin>` parses it and fails on any difference from `fixtures/wire2/manifest.json`.
 
@@ -155,7 +155,7 @@ On rejection the receiver's `admit` example prints exactly one last stderr line 
 |---|---|---|
 | `inspection` | `Shape` | families under the v1 label (including `null`); v2 without families, `null` or a non-object; an unknown or missing key at any level; a broken invariant 1-5 or 7; a non-array `pages[].relationships` under v2; an unrecognised label that carries families |
 | `inspection` | `UnsupportedSchema` | `evidence_families.version` present and not 1 |
-| `inspection` | `Bounds` | a v2 manifest row not in digest form (extra, missing or malformed field, or `candidates` present); a manifest over its wire's cap (v1 262,144 B, v2 16,384 B); invariant 6 (facts, summary, items, depth); families over 786,432 B; S01 observations or evaluations over 1,024 (v2); an unrecognised wire label with no families |
+| `inspection` | `Bounds` | a v2 manifest row not in digest form (extra, missing or malformed field, or `candidates` present); a manifest over its wire's cap (v1 262,144 B, v2 16,384 B); invariant 6 size, count and depth bounds (facts, summary, items, depth; a regex failure on `kind`/`reason` is `Shape`); families over 786,432 B (`families-over-786432`); S01 observations or evaluations over 1,024 (v2); an unrecognised wire label with no families |
 | `inspection` | `ByteLimit` | the report is over 4,952,756 B |
 | `summary` | `SemanticMismatch` | a v2 `candidates_count` or `candidates_digest` that differs from the rebuilt list; digest-form rows under the v1 label |
 | `population` | `SemanticMismatch` | a finding multiplicity or entity set that differs from the rebuilt population |
@@ -164,15 +164,15 @@ Not at `inspection`/`summary`: S01 above 128 observations or 512 evaluations und
 
 ## 6. Fixtures (`fixtures/wire2/`)
 
-`manifest.json` lists each file with `bytes`, `sha256`, `wire`, `base`, `note` and `expect` (`{"admit": true, "validator_revision"}` or `{"admit": false, "stage", "error"}`). `admit` and `admit_receiver_commit` record a run of the HTP receiver (`scripts/verify-s14-schema4.py --wire2 --admit <bin> --write-admit --receiver-commit <sha>`). Every positive is `wire2::generate_wire_v2` output over a base report and a `FamilySet` assembled with `families::common::SectionBuilder`; every negative is one positive (or one wire-1 twin) with a single defect applied through `serde_json` and re-serialized by the same compact, key-sorted writer. Nothing is edited by hand, so the example reproduces every byte.
+`manifest.json` lists each file with `bytes`, `sha256`, `wire`, `base`, `note` and `expect` (`{"admit": true, "validator_revision"}` or `{"admit": false, "stage", "error"}`). `admit` and `admit_receiver_commit` record a run of the HTP receiver (`scripts/verify-s14-schema4.py --wire2 --admit <bin> --write-admit --receiver-commit <sha>`). Every positive is `wire2::generate_wire_v2` output over a base report and a `FamilySet` assembled with `families::common::SectionBuilder`; every negative is one positive (or one wire-1 twin) with a single defect applied through `serde_json` and re-serialized by the same compact, key-sorted writer. Nothing is edited by hand, so the example reproduces every fixture byte. `manifest.json` is the exception: the example writes it without the `admit` blocks and `admit_receiver_commit`, which the verify script's `--write-admit` adds afterwards (the test compares it as parsed JSON with those keys removed), so re-run the last two commands below after the example.
 
 **Positives (admit with the v2 revision):** `complete-small`, `partial-sources`, `capture-omissions`, `family-item-limit`, `family-byte-budget`, `report-budget-degraded`, `wire2-limits`, `unbound-url-item`, `locators-v2`, `s14-record-limit`, `external-links-checked-v2`, `manifest-scale` (57 pages, 1,696 resources, 456 out-of-scope edges: the geometry that fails under wire-1), `entities-1024`, `exact-cap-v2` (exactly 4,952,756 B).
 
 **Negatives:**
 
-- `inspection`/`Shape`: `families-null-v1`, `families-object-v1`, `families-null-v2`, `families-missing-v2`, `families-not-object-v2`, `families-unknown-top-key`, `families-unknown-family-key`, `families-missing-family`, `families-unknown-section-key`, `families-unknown-coverage-key`, `families-unknown-item-key`, `families-bad-budget-state`, `families-items-total-mismatch`, `families-truncated-mismatch`, `families-omission-reason-missing`, `families-complete-with-unknown`, `families-unavailable-with-items`, `families-unknown-without-reason`, `families-unknown-reasons-sum`, `families-pass-with-capture-omission`, `families-locator-unresolved`, `families-locator-bad-form`, `families-entity-id-mismatch`, `families-null-locator-no-url`, `families-link-locator-out-of-range`, `families-relationship-locator-out-of-range`, `families-unsorted`, `families-wrong-max-bytes`, `unknown-wire-label-with-families`.
+- `inspection`/`Shape`: `families-null-v1`, `families-object-v1`, `families-null-v2`, `families-missing-v2`, `families-not-object-v2`, `families-unknown-top-key`, `families-unknown-family-key`, `families-missing-family`, `families-unknown-section-key`, `families-unknown-coverage-key`, `families-unknown-item-key`, `families-bad-budget-state`, `families-items-total-mismatch`, `families-truncated-mismatch`, `families-omission-reason-missing`, `families-complete-with-unknown`, `families-unavailable-with-items`, `families-unknown-without-reason`, `families-unknown-reasons-sum`, `families-pass-with-capture-omission`, `families-locator-unresolved`, `families-locator-bad-form`, `families-entity-id-mismatch`, `families-null-locator-no-url`, `families-link-locator-out-of-range`, `families-relationship-locator-out-of-range`, `families-relationships-not-array`, `families-unsorted`, `families-wrong-max-bytes`, `unknown-wire-label-with-families`.
 - `inspection`/`UnsupportedSchema`: `families-bad-version`.
-- `inspection`/`Bounds`: `families-facts-too-big`, `families-facts-too-deep`, `families-items-over-max`, `manifest-list-under-v2`, `manifest-row-missing-digest`, `manifest-row-bad-digest`, `manifest-row-extra-key`, `manifest-over-16384-v2`, `s01-obs-1025-v2`, `s01-evals-1025-v2`, `unknown-wire-label`.
+- `inspection`/`Bounds`: `families-facts-too-big`, `families-facts-too-deep`, `families-items-over-max`, `families-over-786432`, `manifest-list-under-v2`, `manifest-row-missing-digest`, `manifest-row-bad-digest`, `manifest-row-extra-key`, `manifest-over-16384-v2`, `s01-obs-1025-v2`, `s01-evals-1025-v2`, `unknown-wire-label`.
 - `inspection`/`ByteLimit`: `cap-plus-one-v2`.
 - `summary`/`SemanticMismatch`: `manifest-count-mismatch`, `manifest-count-below-emitted`, `manifest-digest-mismatch`, `manifest-digest-under-v1`.
 - `population`/`SemanticMismatch`: `population-duplicate-finding-v2`.

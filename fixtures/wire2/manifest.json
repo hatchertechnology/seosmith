@@ -632,16 +632,16 @@
       }
     },
     {
-      "base": "complete-small",
-      "bytes": 158852,
+      "base": "partial-sources",
+      "bytes": 64924,
       "expect": {
         "admit": false,
         "error": "Shape",
         "stage": "inspection"
       },
-      "note": "invariant 2: truncated with no omitted items",
+      "note": "invariant 2: truncated with a reason but no omitted items",
       "path": "negative/families-truncated-mismatch.json",
-      "sha256": "2cc0cf936ba310cfb814aa1549628ddf023552bdab494abed7f0acffee23754e",
+      "sha256": "ddecd0db7a98d0bd2061b75f873938a4c446ad13921f191a6e4f5bbf6a3c2212",
       "wire": "s14-wire-2",
       "admit": {
         "admit": false,
@@ -650,16 +650,16 @@
       }
     },
     {
-      "base": "complete-small",
-      "bytes": 158852,
+      "base": "partial-sources",
+      "bytes": 64909,
       "expect": {
         "admit": false,
         "error": "Shape",
         "stage": "inspection"
       },
-      "note": "invariant 2: omitted items without omitted_reason",
+      "note": "invariant 2: omitted items, truncated, without omitted_reason",
       "path": "negative/families-omission-reason-missing.json",
-      "sha256": "cf4d44667238c810b2dbcf509163514991ef5e5eeab442162935e6d4cefb57b8",
+      "sha256": "b6bb442b6f64713bf6c18810575756b09319bdfa6e25f395cb97ddc071dbfb71",
       "wire": "s14-wire-2",
       "admit": {
         "admit": false,
@@ -903,7 +903,7 @@
     },
     {
       "base": "family-item-limit",
-      "bytes": 1049167,
+      "bytes": 1049166,
       "expect": {
         "admit": false,
         "error": "Bounds",
@@ -911,12 +911,48 @@
       },
       "note": "invariant 6: 129 items in a section with max_items 128",
       "path": "negative/families-items-over-max.json",
-      "sha256": "b158316d279da15e92e014d4fe6fed439cc0fe439511fd3cb61a3a42c351096e",
+      "sha256": "b9c47b321aa2acb2ba18df990628690ab5188286cac9d88ef1ac24427a2511b4",
       "wire": "s14-wire-2",
       "admit": {
         "admit": false,
         "stage": "inspection",
         "error": "Bounds"
+      }
+    },
+    {
+      "base": "complete-small",
+      "bytes": 933994,
+      "expect": {
+        "admit": false,
+        "error": "Bounds",
+        "stage": "inspection"
+      },
+      "note": "every section filled to exactly its own max_bytes (the six caps sum to 786,432); the envelope pushes the compact total over the families cap",
+      "path": "negative/families-over-786432.json",
+      "sha256": "e3cf74d4d4d3fd80d7157b1204a0363e6dbf0fdab201566b997ad264d211a90f",
+      "wire": "s14-wire-2",
+      "admit": {
+        "admit": false,
+        "stage": "inspection",
+        "error": "Bounds"
+      }
+    },
+    {
+      "base": "complete-small",
+      "bytes": 158627,
+      "expect": {
+        "admit": false,
+        "error": "Shape",
+        "stage": "inspection"
+      },
+      "note": "pages[0].relationships is an object under v2",
+      "path": "negative/families-relationships-not-array.json",
+      "sha256": "f4fa6843badaf6cd02a4e359fac66733d4c79ff1849912963a6c847922b2d713",
+      "wire": "s14-wire-2",
+      "admit": {
+        "admit": false,
+        "stage": "inspection",
+        "error": "Shape"
       }
     },
     {
