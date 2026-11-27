@@ -21,11 +21,13 @@
 //! mean the report has no findings (a complete check may contain expected
 //! findings). `unknown` is never clean.
 
+use crate::generation_error::{GenerationError, JobErrorCode, ensure_coded, ensure_invariant};
 use crate::{
     audit,
     model::{Link, Page, Report},
     policy::AdvisoryPolicy,
-    policy_wire_prototype,
+    policy_candidate::ManifestForm,
+    policy_wire_prototype::{self, WireProfile},
 };
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
@@ -240,12 +242,16 @@ fn check_status(report: &Report, rule: &str, item_ok: bool, graph_ok: bool) -> &
 /// Re-derive the full pinned audit + policy finding population (including
 /// multiplicity) from the retained pages, applying policy retain/replace/
 /// suppress ordering. Full recomputation is independent of source adequacy.
-fn expected_findings(report: &Report, policy: &AdvisoryPolicy) -> Result<Vec<Value>> {
+fn expected_findings(
+    report: &Report,
+    policy: &AdvisoryPolicy,
+    form: ManifestForm,
+) -> Result<Vec<Value>> {
     let mut clone = report.clone();
     clone.schema_version = 1;
     clone.policy_guidance = None;
     clone.findings = audit::analyze(&clone.pages, &clone.request.url);
-    crate::policy::apply_with_evidence(&mut clone, policy)?;
+    crate::policy::apply_with_evidence_form(&mut clone, policy, form)?;
     clone
         .findings
         .iter()
@@ -418,15 +424,43 @@ pub fn fixture_input(case: &str) -> Result<Report> {
 /// Run the actual audit and policy pipeline before adding the experimental
 /// extension. Full recomputation is a fail-closed contradiction check; source
 /// adequacy then decides complete versus partial per rule.
-pub fn generate(report: &mut Report, policy: &AdvisoryPolicy) -> Result<Vec<u8>> {
-    generate_with(report, policy, false)
+pub fn generate(report: &mut Report, policy: &AdvisoryPolicy) -> Result<Vec<u8>, GenerationError> {
+    Ok(generate_with(report, policy, false)?)
 }
 
 /// Production serialiser: audit, policy, S01 evidence over the final findings,
 /// then `finding_coverage`, serialised last. The bytes are stored and delivered
 /// unchanged.
-pub fn generate_wire_v1(report: &mut Report, policy: &AdvisoryPolicy) -> Result<Vec<u8>> {
-    generate_with(report, policy, true)
+pub fn generate_wire_v1(
+    report: &mut Report,
+    policy: &AdvisoryPolicy,
+) -> Result<Vec<u8>, GenerationError> {
+    generate_wire(report, policy, WireProfile::WIRE1)
+}
+
+/// [`generate_wire_v1`] for any wire. The bytes are the whole report except
+/// anything a later stage adds (`wire2` appends `evidence_families`).
+pub fn generate_wire(
+    report: &mut Report,
+    policy: &AdvisoryPolicy,
+    profile: WireProfile,
+) -> Result<Vec<u8>, GenerationError> {
+    generate_wire_capped(
+        report,
+        policy,
+        profile,
+        crate::delivery::HTP_MAX_REPORT_BYTES,
+    )
+}
+
+/// [`generate_wire`] with an explicit byte cap on the result.
+pub fn generate_wire_capped(
+    report: &mut Report,
+    policy: &AdvisoryPolicy,
+    profile: WireProfile,
+    cap: usize,
+) -> Result<Vec<u8>, GenerationError> {
+    Ok(generate_capped(report, policy, true, profile, cap)?)
 }
 
 fn generate_with(report: &mut Report, policy: &AdvisoryPolicy, evidence: bool) -> Result<Vec<u8>> {
@@ -434,6 +468,7 @@ fn generate_with(report: &mut Report, policy: &AdvisoryPolicy, evidence: bool) -
         report,
         policy,
         evidence,
+        WireProfile::WIRE1,
         crate::delivery::HTP_MAX_REPORT_BYTES,
     )
 }
@@ -443,25 +478,27 @@ fn generate_capped(
     report: &mut Report,
     policy: &AdvisoryPolicy,
     evidence: bool,
+    profile: WireProfile,
     cap: usize,
 ) -> Result<Vec<u8>> {
-    ensure!(
+    ensure_invariant!(
         report.schema_version == 1 && report.policy_guidance.is_none(),
         "base report required"
     );
     report.findings = audit::analyze(&report.pages, &report.request.url);
     let bytes = if evidence {
-        policy_wire_prototype::generate_wire_v1(report, policy)?
+        policy_wire_prototype::generate_wire(report, policy, profile)?
     } else {
         policy_wire_prototype::generate(report, policy)?
     };
-    let expected = expected_findings(report, policy)?;
+    let expected = expected_findings(report, policy, profile.form)?;
     let retained = report
         .findings
         .iter()
         .map(serde_json::to_value)
         .collect::<Result<Vec<_>, serde_json::Error>>()?;
-    ensure!(
+    ensure_coded!(
+        JobErrorCode::PopulationMismatch,
         multiset(retained) == multiset(expected),
         "retained findings differ from the pinned population"
     );
@@ -489,7 +526,11 @@ fn generate_capped(
     validate_extension(&value)?;
     validate_emitted_full_catalogue(&value)?;
     let bytes = serde_json::to_vec(&value)?;
-    ensure!(bytes.len() <= cap, "prototype exceeds report byte limit");
+    ensure_coded!(
+        JobErrorCode::ReportByteLimit,
+        bytes.len() <= cap,
+        "prototype exceeds report byte limit"
+    );
     Ok(bytes)
 }
 
@@ -504,16 +545,18 @@ mod tests {
         base.findings = audit::analyze(&base.pages, &base.request.url);
         let before = policy_wire_prototype::generate_wire_v1(&mut base, &policy)?.len();
         let mut report = fixture_input("complete-missing-h1")?;
-        let after = generate_capped(&mut report, &policy, true, usize::MAX)?.len();
+        let after =
+            generate_capped(&mut report, &policy, true, WireProfile::WIRE1, usize::MAX)?.len();
         assert!(after > before, "finding_coverage adds bytes");
         // Pre-coverage bytes fit the cap; the final bytes exceed it by one.
         let mut report = fixture_input("complete-missing-h1")?;
-        let error = generate_capped(&mut report, &policy, true, after - 1).unwrap_err();
+        let error =
+            generate_capped(&mut report, &policy, true, WireProfile::WIRE1, after - 1).unwrap_err();
         assert!(error.to_string().contains("report byte limit"), "{error}");
         assert!(after > before);
         let mut report = fixture_input("complete-missing-h1")?;
         assert_eq!(
-            generate_capped(&mut report, &policy, true, after)?.len(),
+            generate_capped(&mut report, &policy, true, WireProfile::WIRE1, after)?.len(),
             after
         );
         Ok(())
@@ -901,7 +944,8 @@ mod tests {
     #[test]
     fn population_contradiction_fails_closed() {
         let report = fixture_input("complete-missing-h1").unwrap();
-        let expected = expected_findings(&report, &AdvisoryPolicy::default()).unwrap();
+        let expected =
+            expected_findings(&report, &AdvisoryPolicy::default(), ManifestForm::List).unwrap();
         assert!(
             expected.iter().any(|f| f["rule"] == "missing_h1"),
             "expected population lacks missing_h1"
@@ -910,14 +954,18 @@ mod tests {
         missing.pop();
         assert_ne!(
             multiset(missing),
-            multiset(expected_findings(&report, &AdvisoryPolicy::default()).unwrap())
+            multiset(
+                expected_findings(&report, &AdvisoryPolicy::default(), ManifestForm::List).unwrap()
+            )
         );
         let mut duplicated = expected.clone();
         let first = duplicated[0].clone();
         duplicated.push(first);
         assert_ne!(
             multiset(duplicated),
-            multiset(expected_findings(&report, &AdvisoryPolicy::default()).unwrap())
+            multiset(
+                expected_findings(&report, &AdvisoryPolicy::default(), ManifestForm::List).unwrap()
+            )
         );
     }
 

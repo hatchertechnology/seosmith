@@ -1,4 +1,5 @@
 //! Local, operator-scoped adapter. No transport or credential forwarding.
+use crate::generation_error::JobErrorCode;
 use crate::{
     crawler,
     model::{self, CrawlRequest},
@@ -298,7 +299,9 @@ async fn run_bounded(
             let body = serde_json::to_string(&report)?;
             if body.len() > REPORT_LIMIT {
                 tx.rollback().await?;
-                store.fail(&r.request_id.to_string()).await?;
+                store
+                    .fail_with(&r.request_id.to_string(), JobErrorCode::ReportByteLimit)
+                    .await?;
                 anyhow::bail!("report_too_large");
             }
             let updated = sqlx::query("UPDATE jobs SET report=?,report_hash=?,state=? WHERE id=? AND execution_mode='standard' AND state IN ('running','cancelled') AND report IS NULL")
@@ -314,10 +317,11 @@ async fn run_bounded(
         }
         failure => {
             let error = if failure.is_err() {
-                "adapter_deadline_exceeded"
+                JobErrorCode::AdapterDeadlineExceeded
             } else {
-                "crawl_internal_error"
-            };
+                JobErrorCode::CrawlInternalError
+            }
+            .as_str();
             sqlx::query("UPDATE jobs SET state='failed',error=? WHERE id=? AND state='running'")
                 .bind(error)
                 .bind(r.request_id.to_string())
@@ -437,6 +441,23 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn a_failed_crawl_stores_crawl_internal_error_not_the_deadline_code() {
+        let (_dir, store, r) = fixture().await;
+        run_bounded(&store, &r, async {
+            anyhow::bail!("boom with https://secret.example/")
+        })
+        .await
+        .unwrap();
+        let view = store
+            .view(&r.request_id.to_string())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(view.state, "failed");
+        assert_eq!(view.error.as_deref(), Some("crawl_internal_error"));
     }
 
     #[tokio::test]

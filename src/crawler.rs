@@ -1,5 +1,6 @@
 use crate::{
     audit,
+    families::types::CaptureMode,
     fetch::{Fetcher, MAX_BODY, Transport},
     model::{self, CrawlRequest, Page, Report, normalize},
     parse,
@@ -210,8 +211,23 @@ async fn discover_sitemaps(
 pub async fn crawl(store: &Store, r: &CrawlRequest) -> Result<Report> {
     crawl_with(store, r, &Fetcher::default()).await
 }
+/// Crawls a standard job. With `CaptureMode::Wire2` every page also gets the local
+/// collector set, robots and sitemap evidence (read later by `families::build_all`).
+/// `CaptureMode::None` is exactly `crawl`.
+pub async fn crawl_captured(store: &Store, r: &CrawlRequest, mode: CaptureMode) -> Result<Report> {
+    crawl_captured_with(store, r, mode, &Fetcher::default()).await
+}
+/// `crawl_captured` over any transport (the fixture seam).
+pub async fn crawl_captured_with(
+    store: &Store,
+    r: &CrawlRequest,
+    mode: CaptureMode,
+    fetch: &impl Transport,
+) -> Result<Report> {
+    crawl_internal(store, r, fetch, Capture::from_mode(mode)).await
+}
 pub async fn crawl_with(store: &Store, r: &CrawlRequest, fetch: &impl Transport) -> Result<Report> {
-    crawl_internal(store, r, fetch, false).await
+    crawl_internal(store, r, fetch, Capture::Off).await
 }
 pub async fn crawl_local(store: &Store, r: &CrawlRequest) -> Result<Report> {
     crawl_local_with(store, r, &Fetcher::default()).await
@@ -221,14 +237,40 @@ pub async fn crawl_local_with(
     r: &CrawlRequest,
     fetch: &impl Transport,
 ) -> Result<Report> {
-    crawl_internal(store, r, fetch, true).await
+    crawl_internal(store, r, fetch, Capture::Local).await
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Capture {
+    /// Plain standard crawl: no evidence.
+    Off,
+    /// The local-only subcommand.
+    Local,
+    /// A standard job that also records evidence for the hosted families.
+    Wire2,
+}
+impl Capture {
+    fn from_mode(mode: CaptureMode) -> Self {
+        match mode {
+            CaptureMode::None => Capture::Off,
+            CaptureMode::Wire2 => Capture::Wire2,
+        }
+    }
+    fn mode(self) -> CaptureMode {
+        if self == Capture::Wire2 {
+            CaptureMode::Wire2
+        } else {
+            CaptureMode::None
+        }
+    }
 }
 async fn crawl_internal(
     store: &Store,
     r: &CrawlRequest,
     fetch: &impl Transport,
-    local: bool,
+    capture_kind: Capture,
 ) -> Result<Report> {
+    let local = capture_kind == Capture::Local;
+    let capturing = capture_kind != Capture::Off;
     let id = r.request_id.to_string();
     if local {
         store.require_local_running(r).await?;
@@ -238,12 +280,12 @@ async fn crawl_internal(
     let deadline = chrono::DateTime::parse_from_rfc3339(&started_at)?.timestamp()
         + i64::try_from(r.max_duration_seconds)?;
     let mut policies = HashMap::new();
-    let mut sitemap_capture = local.then(|| crate::sitemap_evidence::LocalRun::new(&[]));
+    let mut sitemap_capture = capturing.then(|| crate::sitemap_evidence::LocalRun::new(&[]));
     if let Some(run) = &sitemap_capture {
         store.record_local_sitemap(&id, run).await?;
     }
     let result = robots(fetch, &r.url).await;
-    if local {
+    if capturing {
         store
             .record_local_robots(
                 &id,
@@ -301,7 +343,7 @@ async fn crawl_internal(
         let u = Url::parse(&url)?;
         if let std::collections::hash_map::Entry::Vacant(e) = policies.entry(origin(&u)) {
             let result = robots(fetch, &u).await;
-            if local {
+            if capturing {
                 store
                     .record_local_robots(
                         &id,
@@ -328,7 +370,7 @@ async fn crawl_internal(
             tokio::time::sleep(Duration::from_millis(r.delay_ms)).await;
             match fetch.get(&u).await {
                 Ok(response) => {
-                    if local {
+                    if capturing {
                         local_response = Some(response.clone());
                     }
                     if r.in_scope(&u) || is_resource {
@@ -422,16 +464,21 @@ async fn crawl_internal(
             }
         }
         // Checkpoint after discoveries: a crash can replay discovery without losing targets.
-        if local {
+        if capturing {
             let policy = &policies[&origin(&u)];
-            let evidence = crate::local_checkpoint::capture_robots(
+            let evidence = crate::local_checkpoint::capture_robots_with(
                 &u,
                 &page,
                 local_response.as_ref(),
                 &policy.body,
                 policy.source,
+                capture_kind.mode(),
             );
-            store.checkpoint_local(&id, &page, &evidence).await?;
+            if local {
+                store.checkpoint_local(&id, &page, &evidence).await?;
+            } else {
+                store.checkpoint_capture(&id, &page, &evidence).await?;
+            }
         } else {
             store.save_page(&id, &page).await?;
         }

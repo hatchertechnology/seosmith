@@ -6,6 +6,26 @@ The local execution-mode upgrade quarantines pre-upgrade queued or running jobs 
 
 The Argo Application uses manual sync. At bootstrap replace its `targetRevision: main` with the actual reviewed merge SHA before applying; later releases require an explicit reviewed revision change and sync. Before applying, verify receiver capability, node pressure, network policy enforcement, source/image identity, live owner/site and fresh database backup. Verify the ingress generated proxy labels and tailnet policy; test authenticated and denied traffic and HTP/DNS egress. Start with an empty queue and check startup, readiness and liveness. Deny public ingress, preserve auth and test only bounded approved targets. A Kubernetes manifest render does not by itself prove enforcement.
 
+## Wire-2 and the three flag names
+
+Three flags decide what the sender emits. Runbooks spell all three in full, because the shorter forms ("v1", "v2", "the v2 gate") mean different things:
+
+| Flag | Meaning | Thor today |
+|---|---|---|
+| `SEOSMITH_EVIDENCE_CONTRACT_V2` | the older **schema-2** evidence gate (4a). It has nothing to do with wire-2, despite the `_V2` in its name. | `"false"` |
+| `SEOSMITH_POLICY_WIRE_V1` | emit schema-4 `s14-wire-1` reports with S01 evidence v1 (4b). | `"true"` |
+| `SEOSMITH_POLICY_WIRE_V2` | emit schema-4 `s14-wire-2` reports: `evidence_families`, digest manifest rows, S01 limits 1,024/1,024. See `docs/contracts/s14-wire-2.md`. | `"false"` |
+
+`SEOSMITH_POLICY_WIRE_V2=true` requires `SEOSMITH_POLICY_WIRE_V1=true` and an advisory policy, and the binary refuses it together with `SEOSMITH_EVIDENCE_CONTRACT_V2=true` and on the local `crawl` subcommand. `tests/deploy_thor.rs` pins the three values and that combination rule in the committed manifest.
+
+`SEOSMITH_POLICY_WIRE_V2` is stated explicitly as `"false"`. The image pinned in `resources.yaml` (`397ec342...`) was built before the flag existed and does not read it, so the line is inert until the wire-2 rollout (R6) pins a new image digest and flips the one value. The receiver must accept wire-2 first: a report sent to an older receiver is rejected terminally (`delivery_rejected`) and never stored.
+
+Rolling back wire-2 is the one-word flip `SEOSMITH_POLICY_WIRE_V2` back to `"false"`: `SEOSMITH_POLICY_WIRE_V1` stays `"true"`, so, unlike rule 5 of the 4b rollback, the binary still starts and the next job is `s14-wire-1`. Wait until the queue is empty and no wire-2 job is pending before the receiver's wire-2 validator revision is disabled. Pinning the Argo revision back to the old image is safe only while no wire-2 rows exist, or after a purge: the old image cannot describe the new job error codes (`report_byte_limit`, `policy_manifest_limit`, ...).
+
+### Writable `/tmp`
+
+The pod keeps `readOnlyRootFilesystem: true`. A `tmp` `emptyDir` (`sizeLimit: 128Mi`) is mounted at `/tmp` because SQLite spills a sorted result to a temporary file once a row passes about 1.77 MB; with no writable temp directory `Store::pending` failed with `SQLITE_IOERR_GETTEMPPATH` (extended code 6410) and the whole delivery queue wedged behind one large report. Do not remove the volume or the mount; `tests/deploy_thor.rs` fails if either is missing. (The binary also sets `temp_store=MEMORY` and selects the pending row's id before its report, as `tests/pending_spill.rs` pins, so the mount is the second safeguard; an image that predates that fix still needs it.)
+
 ## Recovery and rollback
 
 Before the first crawl and before changes: stop submissions; stop the only sender using a controlled manual GitOps action; ensure termination and no SQLite writer; archive the entire state directory including SQLite, WAL, SHM and report files, encrypt to independently recoverable age recipients, and copy to an off-host retained destination. Verify archive integrity and decrypt/restore into an isolated directory with no credentials or outbound delivery, then open SQLite and run `PRAGMA integrity_check`. Record artifact hashes, off-host location and result without tokens. Retain deployment source, exact image archive, SOPS-encrypted secret and keys separately. Snapshot on the same pool alone is not an off-host backup. Repeat after a crawl and on a documented schedule; restore testing of an empty initial database alone does not prove recovery of a report-bearing database.
@@ -17,6 +37,8 @@ First-install rollback is stop/scale-to-zero under manual GitOps control, and do
 The init container delays sender startup and requires three successful public receiver health checks and failed connections to the injected Kubernetes API service IP and port, avoiding a DNS failure masquerading as denial. It has no service account token or app secrets. This reduces exposure to kube-router's asynchronous policy-programming window on pod creation and recreation, including when a queue exists. It does not rerun when only the application container restarts or detect subsequent policy loss. It does not prove all private routes are blocked: a Kubernetes API outage can look like denial, Service NAT and same-node traffic are implementation-dependent, and a successful public request does not prove the API service is available. Before rollout, independently verify the same API endpoint is reachable from an unselected control pod while it is denied from a policy-selected pod, check DNS and private ingress, and stop on discrepancies. Continue using the application's public-IP resolution and connection pinning. The pinned init image is Docker Hub `curlimages/curl:8.11.1` multi-architecture index `sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69`; its linux/amd64 manifest is `sha256:ce8e655b562cf387752de7d2076ec3f81a4383c908f386b6724ec3571ce08b4a` and config is `sha256:7551dbeefe0d9a88a7134dd903f97727315e9fd150b4aefa6da5dcf3a4757f2a`. Import the index into the k3s containerd namespace and verify that exact digest resolves on Thor before sync; after node rebuild use the retained image archive or retrieve and verify this digest. The public root probe checks egress and TLS availability, not authenticated ingest readiness. No cluster-wide CNI settings are changed.
 
 ## Deployed state: scoped v2 activation (4a rollback reference)
+
+"v2" in this section is the schema-2 evidence gate `SEOSMITH_EVIDENCE_CONTRACT_V2`, not wire-2 (`SEOSMITH_POLICY_WIRE_V2`; see "Wire-2 and the three flag names").
 
 The one-site sender sets `SEOSMITH_EVIDENCE_CONTRACT_V2=true` for `serve`. Verify the receiver advertises schema 2 and evidence contract 1, the site binding and an empty or reconciled queue, then take and independently restore an encrypted off-host SQLite state backup before changing the pinned Argo revision. Use manual sync with the reviewed merge SHA and verify one bounded authorized crawl, exact receiver receipt and report bytes; keep older v1 reports readable. A v2 gate changes new processing and is not a migration of saved reports.
 

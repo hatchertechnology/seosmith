@@ -1,4 +1,5 @@
 //! Opt-in evidence metadata. Original observations/findings remain authoritative.
+use crate::generation_error::{JobErrorCode, ensure_coded, ensure_invariant};
 use crate::{
     audit,
     model::{Report, digest},
@@ -9,6 +10,27 @@ use serde_json::json;
 
 pub const MAX_OBSERVATIONS: usize = 128;
 pub const MAX_EVALUATIONS: usize = 512;
+
+/// The observation and evaluation caps of one wire. The evidence semantics
+/// (`version` 1, `s01-1`) do not change with the wire; only the counts do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EvidenceLimits {
+    pub observations: usize,
+    pub evaluations: usize,
+}
+
+impl EvidenceLimits {
+    /// `s14-wire-1` and the schema-2 gate: byte-identical to the historical caps.
+    pub const WIRE1: Self = Self {
+        observations: MAX_OBSERVATIONS,
+        evaluations: MAX_EVALUATIONS,
+    };
+    /// `s14-wire-2` (design A3). Worst case stays under 1 MiB by construction.
+    pub const WIRE2: Self = Self {
+        observations: 1024,
+        evaluations: 1024,
+    };
+}
 pub const MAX_EXTENSION_BYTES: usize = 1024 * 1024;
 pub const MAX_REPORT_BYTES: usize = 16 * 1024 * 1024;
 pub const VALIDATOR_VERSION: &str = "s01-1";
@@ -182,7 +204,7 @@ pub fn enable_v2(report: &mut Report) -> Result<()> {
         report.schema_version == 1 && report.evidence_contract.is_none(),
         "expected legacy report"
     );
-    let contract = build_contract(report)?;
+    let contract = build_contract(report, EvidenceLimits::WIRE1)?;
     report.schema_version = 2;
     report.evidence_contract = Some(contract);
     Ok(())
@@ -200,24 +222,29 @@ pub fn enable_v2(report: &mut Report) -> Result<()> {
 /// Every delivered finding of an `audit::rules()` rule that is not dropped by
 /// `MAX_OBSERVATIONS` / `MAX_EVALUATIONS` gets a `fail` evaluation pointing at it.
 pub fn attach_v1_schema4(report: &mut Report) -> Result<()> {
-    ensure!(
+    attach_schema4(report, EvidenceLimits::WIRE1)
+}
+
+/// [`attach_v1_schema4`] under the evidence limits of another wire.
+pub fn attach_schema4(report: &mut Report, limits: EvidenceLimits) -> Result<()> {
+    ensure_invariant!(
         report.schema_version == 3
             && report.policy_guidance.is_some()
             && report.evidence_contract.is_none(),
         "expected policy report awaiting schema 4"
     );
-    let contract = build_contract(report)?;
+    let contract = build_contract(report, limits)?;
     report.evidence_contract = Some(contract);
     Ok(())
 }
 
 /// Shared evidence builder. Reads `report`, never mutates it.
-fn build_contract(report: &Report) -> Result<EvidenceContract> {
-    ensure!(
+fn build_contract(report: &Report, limits: EvidenceLimits) -> Result<EvidenceContract> {
+    ensure_invariant!(
         report.pages.len() <= 40_000 && report.findings.len() <= 400_000,
         "report record limit"
     );
-    ensure!(
+    ensure_invariant!(
         report.engine_version.len() <= 128
             && report.ruleset_version.len() <= 128
             && report.started_at.len() <= 64
@@ -230,7 +257,8 @@ fn build_contract(report: &Report) -> Result<EvidenceContract> {
         "metadata scalar limit"
     );
     let base_size = serialized_size(report)?;
-    ensure!(
+    ensure_coded!(
+        JobErrorCode::ReportByteLimit,
         base_size < MAX_REPORT_BYTES,
         "report exceeds the 16 MiB report limit"
     );
@@ -264,12 +292,12 @@ fn build_contract(report: &Report) -> Result<EvidenceContract> {
     };
     let mut identities = std::collections::HashSet::new();
     for page in &report.pages {
-        ensure!(
+        ensure_invariant!(
             identities.insert(entity_id(&page.url, page.is_resource)),
             "duplicate entity identity"
         );
     }
-    for (i, page) in report.pages.iter().take(MAX_OBSERVATIONS).enumerate() {
+    for (i, page) in report.pages.iter().take(limits.observations).enumerate() {
         let reason = if page.blocked_by_robots {
             Some("robots_blocked")
         } else if page.error.is_some() {
@@ -314,13 +342,14 @@ fn build_contract(report: &Report) -> Result<EvidenceContract> {
             .enumerate()
             .filter(|(_, f)| f.rule == rule.id)
         {
-            ensure!(
+            ensure_invariant!(
                 findings.insert(f.url.as_str(), (i, f)).is_none(),
                 "duplicate finding for rule/URL"
             );
         }
         for (i, page) in report.pages.iter().enumerate() {
-            let limited = i >= MAX_OBSERVATIONS || contract.evaluations.len() >= MAX_EVALUATIONS;
+            let limited =
+                i >= limits.observations || contract.evaluations.len() >= limits.evaluations;
             let instrumented = rule.id == "missing_title";
             // A delivered finding always gets its pointer, whatever the page state.
             let finding = findings.get(page.url.as_str());
@@ -434,12 +463,14 @@ fn build_contract(report: &Report) -> Result<EvidenceContract> {
     contract.evaluation_coverage_complete = report.coverage_complete
         && !contract.truncated
         && contract.coverage.iter().all(|c| c.unknown == 0);
-    ensure!(
+    ensure_coded!(
+        JobErrorCode::EvidenceExtensionLimit,
         serialized_size(&contract)? <= MAX_EXTENSION_BYTES,
         "evidence extension exceeds limit"
     );
     // Reject oversized final reports before changing the original or allocating serialized bytes.
-    ensure!(
+    ensure_coded!(
+        JobErrorCode::ReportByteLimit,
         base_size + serialized_size(&contract)? + 32 <= MAX_REPORT_BYTES,
         "versioned report exceeds the 16 MiB report limit"
     );

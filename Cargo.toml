@@ -64,3 +64,14 @@ required-features = ["policy-wire-prototype"]
 [[example]]
 name = "make_finding_coverage"
 required-features = ["policy-wire-prototype"]
+
+[[example]]
+name = "make_scale_fixture"
+required-features = ["policy-wire-prototype"]
+
+[[example]]
+name = "measure_capture"
+
+[[example]]
+name = "make_wire2_fixtures"
+required-features = ["policy-wire-prototype"]

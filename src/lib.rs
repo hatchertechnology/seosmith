@@ -14,10 +14,16 @@ pub mod store;
 
 pub mod extract;
 
+pub mod families;
+pub mod resource_impact_cli;
+pub mod saved_graph;
+pub mod saved_index_integrity;
+
 pub mod contract;
 
 pub mod policy;
 
+pub mod generation_error;
 pub mod operations;
 pub mod policy_candidate;
 
@@ -28,6 +34,7 @@ compile_error!("the local-e2e feature is test-only and cannot be built without d
 
 pub mod finding_coverage_prototype;
 pub mod policy_wire_prototype;
+pub mod wire2;
 
 /// Experimental offline link graph analysis.
 pub mod graph_evidence;
@@ -38,7 +45,8 @@ pub mod resource_evidence;
 /// Bounded saved-checkpoint resource delivery and affected-page analysis.
 pub mod resource_impact;
 
-mod local_checkpoint;
+/// Per-page capture collectors (also read by `examples/measure_capture.rs`).
+pub mod local_checkpoint;
 
 pub mod s06_batch;
 /// Experimental versioned content detector.
