@@ -105,3 +105,104 @@ fn policy_copy_is_byte_identical_to_the_fixture() {
         "deploy/thor/policy.json drifted from the fixture"
     );
 }
+
+// ---------------------------------------------------------------- wire-2 flags
+
+/// `(name, value)` of every `- name: X` / `value: "Y"` pair under `env:` in
+/// `resources.yaml`. A `value:` on the line after the name; `valueFrom` entries
+/// and comments are not pairs.
+fn env_pairs() -> Vec<(String, String)> {
+    let text = fs::read_to_string(root().join("deploy/thor/resources.yaml")).unwrap();
+    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    let mut out = Vec::new();
+    for (n, line) in lines.iter().enumerate() {
+        let Some(name) = line.strip_prefix("- name: ") else {
+            continue;
+        };
+        if let Some(value) = lines.get(n + 1).and_then(|l| l.strip_prefix("value: ")) {
+            out.push((name.to_owned(), value.trim_matches('"').to_owned()));
+        }
+    }
+    out
+}
+
+fn flag(name: &str) -> Vec<String> {
+    env_pairs()
+        .into_iter()
+        .filter(|(n, _)| n == name)
+        .map(|(_, v)| v)
+        .collect()
+}
+
+#[test]
+fn wire2_flag_is_stated_once_and_false_until_the_rollout() {
+    assert_eq!(
+        flag("SEOSMITH_POLICY_WIRE_V2"),
+        ["false"],
+        "SEOSMITH_POLICY_WIRE_V2 must be stated exactly once, as \"false\"; the R6 rollout flips it"
+    );
+}
+
+#[test]
+fn flag_combination_is_one_the_binary_starts_with() {
+    // The binary refuses: wire-2 without wire-1 or without a policy, wire-1 or
+    // wire-2 together with the schema-2 evidence gate, and wire-1 without a policy.
+    let get = |n: &str| match flag(n).as_slice() {
+        [v] => v.clone(),
+        other => panic!("{n} must be stated exactly once: {other:?}"),
+    };
+    let ev2 = get("SEOSMITH_EVIDENCE_CONTRACT_V2") == "true";
+    let w1 = get("SEOSMITH_POLICY_WIRE_V1") == "true";
+    let w2 = get("SEOSMITH_POLICY_WIRE_V2") == "true";
+    let policy = !flag("SEOSMITH_ADVISORY_POLICY").is_empty();
+    for name in [
+        "SEOSMITH_EVIDENCE_CONTRACT_V2",
+        "SEOSMITH_POLICY_WIRE_V1",
+        "SEOSMITH_POLICY_WIRE_V2",
+    ] {
+        assert!(["true", "false"].contains(&get(name).as_str()), "{name}");
+    }
+    assert!(!(w1 && ev2), "wire-1 with the schema-2 evidence gate");
+    assert!(!(w2 && ev2), "wire-2 with the schema-2 evidence gate");
+    assert!(!w2 || w1, "wire-2 needs SEOSMITH_POLICY_WIRE_V1=true");
+    assert!(!w2 || policy, "wire-2 needs an advisory policy");
+    assert!(!w1 || policy, "wire-1 needs an advisory policy");
+}
+
+#[test]
+fn readme_spells_the_three_flag_names_in_full_and_the_naming_trap() {
+    let readme = fs::read_to_string(root().join("deploy/thor/README.md")).unwrap();
+    for name in [
+        "SEOSMITH_POLICY_WIRE_V2",
+        "SEOSMITH_POLICY_WIRE_V1",
+        "SEOSMITH_EVIDENCE_CONTRACT_V2",
+    ] {
+        assert!(readme.contains(name), "README must spell {name}");
+    }
+    assert!(
+        readme.contains("older **schema-2** evidence gate"),
+        "README must say that SEOSMITH_EVIDENCE_CONTRACT_V2 is the schema-2 gate, not wire-2"
+    );
+    assert!(
+        readme.contains("one-word flip"),
+        "rollback is the one-word flip"
+    );
+}
+
+// ------------------------------------------------- the thor `/tmp` emptyDir
+
+#[test]
+fn tmp_emptydir_is_mounted_and_bounded_and_the_root_stays_read_only() {
+    // Thor wedged on SQLITE_IOERR_GETTEMPPATH without a writable /tmp
+    // (coordination/tasks/w1c-thor-repro.md); the manifest change must not regress.
+    let text = fs::read_to_string(root().join("deploy/thor/resources.yaml")).unwrap();
+    assert!(text.contains("readOnlyRootFilesystem: true"));
+    assert!(
+        text.contains("- name: tmp\n              mountPath: /tmp"),
+        "the seosmith container must mount the `tmp` volume at /tmp"
+    );
+    assert!(
+        text.contains("- name: tmp\n          emptyDir:\n            sizeLimit: 128Mi"),
+        "the `tmp` volume must be an emptyDir with a size limit"
+    );
+}

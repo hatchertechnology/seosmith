@@ -123,6 +123,14 @@ spec:
             # Emit s14-wire-1 schema-4 reports with evidence v1.
             - name: SEOSMITH_POLICY_WIRE_V1
               value: "true"
+            # s14-wire-2 (evidence families, digest manifest). Stated explicitly and
+            # false: the pinned image predates the flag, which is inert until the R6
+            # rollout changes the image and flips this one value. It needs
+            # SEOSMITH_POLICY_WIRE_V1=true and an advisory policy, and the binary
+            # refuses it together with SEOSMITH_EVIDENCE_CONTRACT_V2 (the schema-2
+            # evidence gate, unrelated to wire-2). See README "Wire-2".
+            - name: SEOSMITH_POLICY_WIRE_V2
+              value: "false"
             # Q1 production advisory policy: {} from
             # fixtures/policies/production-default.json via the seosmith-policy
             # ConfigMap generated in kustomization.yaml.
