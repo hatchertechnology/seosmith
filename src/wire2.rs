@@ -5,6 +5,15 @@
 //! [`generate_wire_v2`] runs the wire-1 pipeline under [`WireProfile::WIRE2`],
 //! then budgets the families against the final bytes and appends them.
 //!
+//! **Key order.** The wire-2 report is the wire-1 bytes re-serialized through
+//! `serde_json::Value` (this crate does not enable `preserve_order`), so every
+//! object's keys come out in **sorted** order, `evidence_families` included. The
+//! wire-1 bytes already pass through the same round trip in
+//! `finding_coverage_prototype`, so wire-1 and wire-2 share one key-ordering
+//! rule; wire-2 appends only the `evidence_families` member. Receivers read by
+//! key and the digests are over canonical forms, never over report bytes, so
+//! the order carries no meaning. The 8b-4 contract doc states it.
+//!
 //! Extensions degrade, they do not fail (A5): a family that breaks a contract
 //! invariant becomes `unavailable` with `analyzer_error`, and items that do not
 //! fit the byte budget are counted as omitted. Only an oversized *base* report

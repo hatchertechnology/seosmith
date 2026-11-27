@@ -111,9 +111,12 @@ fn wire2_evidence_truncates_at_exactly_1024() -> Result<()> {
 }
 
 #[test]
-fn worst_case_wire2_evidence_fits_one_mib_with_a_16384_byte_seed() -> Result<()> {
-    // 1,100 pages (so both caps bind), then a 16,384 B seed: the evidence
-    // extension must stay <= 1 MiB by construction (design A3: ~944 KB).
+fn wire2_evidence_with_the_longest_seed_and_both_caps_binding_fits_one_mib() -> Result<()> {
+    // What this measures: 1,100 default-size pages (so both 1,024 caps bind) and a
+    // 16,384 B seed. It does NOT build 1,024 max-length scalars: the evidence has
+    // one free-form string, `policy.canonical_json` (the seed), and every other
+    // scalar is a fixed-size hashed id, locator or digest. The extension must stay
+    // <= 1 MiB by construction (design A3: ~944 KB).
     // The seed is set after the policy step: S14 itself rejects a seed that long.
     let mut r = policy_report(1100, "https://example.com/", ManifestForm::Digest);
     // Evidence holds hashed entity ids and locators, never URLs, so page URL
@@ -1058,5 +1061,48 @@ fn policy_guidance_stays_under_556_kb_with_10000_external_links() -> Result<()> 
     assert!(edges >= 9_900, "{edges}");
     assert!(manifest <= 16_384, "{manifest}");
     assert!(guidance <= 556_000, "{guidance}");
+    Ok(())
+}
+
+#[test]
+fn policy_guidance_at_a_65536_byte_canonical_policy_stays_under_556_kb() -> Result<()> {
+    // Design section 7: `policy_guidance` <= 556 KB at 1,753 entities with 10,000
+    // external links and a 65,536 B canonical policy.
+    //
+    // A valid report cannot reach 65,536 B: the canonical policy is the fixed
+    // numeric policy, four request scalars and the seed, and S14 bounds the seed
+    // at 16,384 B, so the pipeline's maximum is about 16 KB (the test above
+    // measures it). The 65,536 B in the design is the validator's cap on the
+    // field. So this measures the cap itself: run the full pipeline at the design
+    // geometry, then replace `candidate.policy_canonical_json` in the emitted
+    // `policy_guidance` with a 65,536 B string whose every byte is a `"`, the
+    // worst JSON escape (2 bytes each), and measure the serialized object.
+    let mut report = base_report(1_696, 175);
+    let seed = format!("{}/{}", scale::SCALE_HOST, "s".repeat(15_500));
+    report.request.url = seed.parse()?;
+    let bytes = generate_wire_v2(&mut report, &AdvisoryPolicy::default(), unavailable("x"))?;
+    let mut v: Value = serde_json::from_slice(&bytes)?;
+    let edges = v["policy_guidance"]["manifest"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["rule_id"] == "external_link")
+        .unwrap()["candidates_count"]
+        .as_u64()
+        .unwrap();
+    assert!(edges >= 9_900, "{edges}");
+    let actual = v["policy_guidance"]["candidate"]["policy_canonical_json"]
+        .as_str()
+        .unwrap()
+        .len();
+    let natural = serde_json::to_vec(&v["policy_guidance"])?.len();
+    v["policy_guidance"]["candidate"]["policy_canonical_json"] = Value::String("\"".repeat(65_536));
+    let padded = serde_json::to_vec(&v["policy_guidance"])?.len();
+    println!(
+        "edges = {edges}, canonical policy = {actual} B, policy_guidance natural = {natural} B, \
+         with a 65,536 B all-escape canonical policy = {padded} B (bound 556,000)"
+    );
+    assert!(padded > natural);
+    assert!(padded <= 556_000, "{padded}");
     Ok(())
 }
