@@ -31,7 +31,7 @@ Wire-1 is unchanged and still accepted: nothing in this document changes a wire-
 | S01 observations / evaluations (`evidence_contract`) | 128 / 512 | 1,024 / 1,024 |
 | `evidence_contract.version`, `semantics` | 1, `s01-1` | 1, `s01-1` (unchanged) |
 | S14 manifest | candidate lists, at most 262,144 B | digest rows (section 4), at most 16,384 compact B |
-| S14 policy records / observation records | 512 / 128 | 512 / 128 (byte-identical rule) |
+| S14 policy records / observation records | 512 / 128 | 512 / 128 (same rule as wire-1) |
 | `evidence_families` | absent | required object, at most 786,432 compact B |
 | `policy_guidance` | 1 MiB extension cap | 1 MiB extension cap (about 331 KB measured at 1,753 entities) |
 | Whole report | 4,952,756 B | 4,952,756 B |
@@ -39,6 +39,8 @@ Wire-1 is unchanged and still accepted: nothing in this document changes a wire-
 - **Compact bytes.** Every byte bound counts the compact serialization (`serde_json::to_vec` length) including quotes and escapes. String bounds count UTF-8 bytes of the decoded string. Whitespace in the raw text is not content.
 - **Policy records are a sample.** Records are emitted in rule order until there are 512 records or 128 observation records; the rest are counted as omitted (`record_limit`, `observation_limit`). `finding_coverage` reads `unknown` for every rule with an omission and the audit `partial`. Coverage rows count every candidate (`candidates = emitted + omitted`). Wire-2 does not claim S14 completeness.
 - **Producer reserve.** The production budgeter keeps 65,536 B of the report cap in reserve, so a production wire-2 report is at most `4,952,756 - 65,536 + 21` bytes. `positive/exact-cap-v2.json` is produced through the producer's cap test seam (`generate_wire_v2_with_cap`) so that the receiver's own boundary is exercised.
+- **Canonical policy size.** The `policy_guidance` bound in the design assumes a canonical policy of up to 65,536 B (`policy_candidate.rs`). That is a producer test input only: **the receiver rejects a 65,536 B canonical policy**, so no accepted report carries one, and the measured `policy_guidance` (about 331 KB) is far under the 1 MiB cap.
+- **Flag off.** With `SEOSMITH_POLICY_WIRE_V2` false the report is the wire-1 report, equal **as parsed JSON** to what the same crawl produced before wire-2 existed; the document does not promise equal key order or whitespace across producer versions.
 - Over 4,952,756 B the API answers 413 `report_limit` before `admit`; `admit` itself rejects with `inspection`/`ByteLimit`.
 
 ## 3. `evidence_families` (families-v1)
