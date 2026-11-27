@@ -135,11 +135,11 @@ fn flag(name: &str) -> Vec<String> {
 }
 
 #[test]
-fn wire2_flag_is_stated_once_and_false_until_the_rollout() {
+fn wire2_flag_is_stated_once_and_true_after_the_rollout() {
     assert_eq!(
         flag("SEOSMITH_POLICY_WIRE_V2"),
-        ["false"],
-        "SEOSMITH_POLICY_WIRE_V2 must be stated exactly once, as \"false\"; the R6 rollout flips it"
+        ["true"],
+        "SEOSMITH_POLICY_WIRE_V2 must be stated exactly once, as \"true\" after the R6 flip; rolling back is the one-word flip to \"false\""
     );
 }
 

@@ -131,7 +131,7 @@ spec:
             # refuses it together with SEOSMITH_EVIDENCE_CONTRACT_V2 (the schema-2
             # evidence gate, unrelated to wire-2). See README "Wire-2".
             - name: SEOSMITH_POLICY_WIRE_V2
-              value: "false"
+              value: "true"
             # Q1 production advisory policy: {} from
             # fixtures/policies/production-default.json via the seosmith-policy
             # ConfigMap generated in kustomization.yaml.
